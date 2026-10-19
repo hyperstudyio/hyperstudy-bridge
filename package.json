@@ -54,7 +54,7 @@
     "@vitest/coverage-v8": "^4.0.18",
     "@vitest/ui": "^4.0.18",
     "eslint": "^9.0.0",
-    "eslint-plugin-svelte": "^2.35.0",
+    "eslint-plugin-svelte": "^3.23.1",
     "jsdom": "^27.0.0",
     "playwright": "^1.55.0",
     "prettier": "^3.3.0",
