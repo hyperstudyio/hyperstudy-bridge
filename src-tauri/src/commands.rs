@@ -1216,3 +1216,36 @@ pub fn get_app_info() -> AppInfo {
         homepage: env!("CARGO_PKG_HOMEPAGE").to_string(),
     }
 }
+
+// Recording operations run off the async executor; native LSL handles stay on
+// the recording thread, independently of browser and display subscriptions.
+#[tauri::command]
+pub async fn discover_recording_streams() -> Result<Vec<crate::recording::StreamDescriptor>,String> {
+    tokio::task::spawn_blocking(crate::recording::discover).await
+        .map_err(|_|"Discovery worker failed".to_string())?.map_err(|e|e.to_string())
+}
+#[tauri::command]
+pub async fn start_lsl_recording(request:crate::recording::RecordingRequest,
+    state:State<'_,Arc<AppState>>) -> Result<crate::recording::RecordingStatus,String> {
+    let manager=state.recording.clone();
+    tokio::task::spawn_blocking(move||manager.start(request)).await
+        .map_err(|_|"Recording worker failed".to_string())?.map_err(|e|e.to_string())
+}
+#[tauri::command]
+pub async fn stop_lsl_recording(state:State<'_,Arc<AppState>>) -> Result<crate::recording::RecordingStatus,String> {
+    let manager=state.recording.clone();
+    tokio::task::spawn_blocking(move||manager.stop()).await
+        .map_err(|_|"Recording worker failed".to_string())?.map_err(|e|e.to_string())
+}
+#[tauri::command]
+pub fn lsl_recording_status(state:State<'_,Arc<AppState>>) -> crate::recording::RecordingStatus {
+    state.recording.status()
+}
+#[tauri::command]
+pub async fn recover_lsl_recording(path:std::path::PathBuf,state:State<'_,Arc<AppState>>) -> Result<std::path::PathBuf,String> {
+    if matches!(state.recording.status().state.as_str(),"starting"|"recording"|"stopping") {
+        return Err("Stop acquisition before recovering an interrupted recording".into());
+    }
+    tokio::task::spawn_blocking(move||crate::recording::recover(&path)).await
+        .map_err(|_|"Recovery worker failed".to_string())?.map_err(|e|e.to_string())
+}

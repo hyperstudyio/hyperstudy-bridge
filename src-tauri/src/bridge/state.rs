@@ -26,6 +26,7 @@ pub enum DisconnectTarget {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub recording: Arc<crate::recording::RecordingManager>,
     pub devices: Arc<RwLock<HashMap<String, Arc<RwLock<BoxedDevice>>>>>,
     pub connections: Arc<DashMap<String, ConnectionInfo>>,
     pub metrics: Arc<RwLock<Metrics>>,
@@ -304,6 +305,7 @@ impl AppState {
             neon_manager,
             frenz_manager,
             frenz_process,
+            recording: Arc::new(crate::recording::RecordingManager::default()),
             eyelink_manager,
             device_status_tx,
         }

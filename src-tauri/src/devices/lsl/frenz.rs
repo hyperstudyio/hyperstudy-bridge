@@ -12,7 +12,7 @@
 //!
 //! # FRENZ LSL Streams
 //!
-//! The Python bridge creates up to 16 streams per device, all named `{DEVICE_ID}_{suffix}`:
+//! The Python bridge creates up to 23 streams per device, all named `{DEVICE_ID}_{suffix}`:
 //! - Raw signals: `_EEG_raw`, `_PPG_raw`, `_IMU_raw`
 //! - Filtered signals: `_EEG_filtered`, `_EOG_filtered`, `_EMG_filtered`
 //! - Derived metrics: `_focus`, `_sleep_stage`, `_poas`, `_POSTURE`, `_signal_quality`
@@ -54,6 +54,8 @@ use tracing::{debug, info, warn};
 /// The POSTURE stream uses `string_value`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FrenzSample {
+    /// Original typed sample; integer streams are never coerced into float64.
+    pub data: SampleData,
     /// LSL timestamp
     pub timestamp: f64,
     /// The stream suffix identifying the data type (e.g., "_EEG_raw")
@@ -62,6 +64,22 @@ pub struct FrenzSample {
     pub values: Vec<f64>,
     /// String value (only populated for POSTURE stream)
     pub string_value: Option<String>,
+}
+
+impl FrenzSample {
+    /// Numeric bytes avoid JSON/JavaScript rounding of int64 and non-finite floats.
+    pub fn wire_data(&self) -> serde_json::Value {
+        use base64::Engine;
+        let format = match &self.data {
+            SampleData::Float32(_) => "float32", SampleData::Float64(_) => "float64",
+            SampleData::Int64(_) => "int64", SampleData::Int32(_) => "int32",
+            SampleData::Int16(_) => "int16", SampleData::Int8(_) => "int8",
+            SampleData::String(values) => return serde_json::json!({
+                "format": "string", "encoding": "json", "values": values }),
+        };
+        serde_json::json!({"format": format, "encoding": "base64-le",
+            "values": base64::engine::general_purpose::STANDARD.encode(self.data.to_bytes())})
+    }
 }
 
 /// Handle for an active FRENZ stream reading task
@@ -297,7 +315,6 @@ impl FrenzLslManager {
         let task_uid = stream_uid.clone();
         let task_device_name = device_name.to_string();
         let task_suffix = stream_suffix.to_string();
-        let channel_format = stream_info.channel_format;
 
         // Use a longer poll timeout for low-rate streams
         let poll_timeout_ms = if stream_info.nominal_srate < 1.0 {
@@ -320,35 +337,19 @@ impl FrenzLslManager {
                     .await
                 {
                     Ok(Some(sample)) => {
-                        let frenz_sample = match &sample.data {
-                            SampleData::Float64(data) => FrenzSample {
-                                timestamp: sample.timestamp,
-                                stream_suffix: task_suffix.clone(),
-                                values: data.clone(),
-                                string_value: None,
+                        let frenz_sample = FrenzSample {
+                            timestamp: sample.timestamp,
+                            stream_suffix: task_suffix.clone(),
+                            values: match &sample.data {
+                                SampleData::Float64(v) => v.clone(),
+                                SampleData::Float32(v) => v.iter().map(|&x| x as f64).collect(),
+                                _ => vec![],
                             },
-                            SampleData::Float32(data) => FrenzSample {
-                                timestamp: sample.timestamp,
-                                stream_suffix: task_suffix.clone(),
-                                values: data.iter().map(|&v| v as f64).collect(),
-                                string_value: None,
+                            string_value: match &sample.data {
+                                SampleData::String(v) => v.first().cloned(),
+                                _ => None,
                             },
-                            SampleData::String(data) => FrenzSample {
-                                timestamp: sample.timestamp,
-                                stream_suffix: task_suffix.clone(),
-                                values: vec![],
-                                string_value: data.first().cloned(),
-                            },
-                            _ => {
-                                warn!(
-                                    device = "frenz",
-                                    "Unexpected data format for {}{} (format: {:?})",
-                                    task_device_name,
-                                    task_suffix,
-                                    channel_format
-                                );
-                                continue;
-                            }
+                            data: sample.data,
                         };
 
                         if task_tx.send(frenz_sample).await.is_err() {
@@ -623,6 +624,18 @@ impl std::fmt::Debug for FrenzLslManager {
 mod tests {
     use super::*;
     use crate::devices::lsl::resolver::StreamFilter;
+
+    #[test]
+    fn websocket_payload_preserves_large_integers() {
+        use base64::Engine;
+        let sample = FrenzSample { data: SampleData::Int64(vec![i64::MIN, i64::MAX]),
+            timestamp: 1., stream_suffix: "_EEG_firmware".into(), values: vec![], string_value: None };
+        let payload = sample.wire_data();
+        assert_eq!(payload["format"], "int64");
+        assert_eq!(payload["encoding"], "base64-le");
+        let bytes = base64::engine::general_purpose::STANDARD.decode(payload["values"].as_str().unwrap()).unwrap();
+        assert_eq!(bytes, [i64::MIN.to_le_bytes(), i64::MAX.to_le_bytes()].concat());
+    }
 
     #[test]
     fn test_is_frenz_stream() {

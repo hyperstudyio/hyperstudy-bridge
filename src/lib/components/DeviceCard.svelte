@@ -310,7 +310,7 @@
 
       // Connect LSL streams via WebSocket
       frenzPhaseText = 'Connecting to data streams...';
-      await bridgeStore.connectDevice('frenz', device.config);
+      await bridgeStore.connectDevice('frenz', { ...device.config, device_name: frenzDeviceId });
 
       alert('Connected to FRENZ');
     } catch (error) {

@@ -33,6 +33,13 @@ fn map_frenz_config_to_suffixes(config: &serde_json::Value) -> Vec<String> {
         ("streamEmgFiltered", "_EMG_filtered"),
         ("streamPpgRaw", "_PPG_raw"),
         ("streamImuRaw", "_IMU_raw"),
+        ("streamHrRaw", "_HR_raw"),
+        ("streamSpo2Raw", "_SPO2_raw"),
+        ("streamFirmware", "_EEG_firmware"),
+        ("streamFirmware", "_PPG_firmware"),
+        ("streamFirmware", "_IMU_firmware"),
+        ("streamFirmware", "_HR_firmware"),
+        ("streamFirmware", "_SPO2_firmware"),
         ("streamFocus", "_focus"),
         ("streamSleepStage", "_sleep_stage"),
         ("streamPoas", "_poas"),
@@ -637,7 +644,18 @@ async fn handle_device_command(
                     return;
                 }
 
-                let device_name = &devices[0].device_name;
+                let requested = config.get("device_name").and_then(|v|v.as_str());
+                let selected = match requested {
+                    Some(name) => devices.iter().find(|d|d.device_name == name),
+                    None if devices.len() == 1 => devices.first(),
+                    _ => None,
+                };
+                let Some(selected) = selected else {
+                    send_response(tx, BridgeResponse::device_error("frenz".into(),
+                        "Select the intended FRENZ device; no unique matching device was found".into(),id)).await;
+                    return;
+                };
+                let device_name = &selected.device_name;
                 info!("FRENZ connect: using device '{}'", device_name);
 
                 // Create marker outlet if requested
@@ -691,6 +709,7 @@ async fn handle_device_command(
                                                         "type": "frenz_data",
                                                         "stream": suffix_clone,
                                                         "timestamp": sample.timestamp,
+                                                        "data": sample.wire_data(),
                                                         "values": sample.values,
                                                         "string_value": sample.string_value,
                                                     }),
@@ -1880,6 +1899,27 @@ async fn handle_device_command(
         // ====================================================================
         // FRENZ Brainband LSL handlers
         // ====================================================================
+        CommandAction::DiscoverRecordingStreams | CommandAction::StartLslRecording |
+        CommandAction::StopLslRecording | CommandAction::LslRecordingStatus => {
+            let manager = state.recording.clone();
+            let result = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+                match action {
+                    CommandAction::DiscoverRecordingStreams => Ok(serde_json::to_value(crate::recording::discover()?)?),
+                    CommandAction::StartLslRecording => {
+                        let request = serde_json::from_value(payload.ok_or_else(|| anyhow::anyhow!("Missing recording request"))?)?;
+                        Ok(serde_json::to_value(manager.start(request)?)?)
+                    },
+                    CommandAction::StopLslRecording => Ok(serde_json::to_value(manager.stop()?)?),
+                    _ => Ok(serde_json::to_value(manager.status())?),
+                }
+            }).await;
+            let response = match result {
+                Ok(Ok(value)) => BridgeResponse::data("recording".into(), value, id),
+                Ok(Err(error)) => BridgeResponse::device_error("recording".into(),error.to_string(),id),
+                Err(_) => BridgeResponse::device_error("recording".into(),"Recording command failed".into(),id),
+            };
+            send_response(tx,response).await;
+        }
         CommandAction::DiscoverFrenz => {
             info!("Discovering FRENZ devices via LSL");
 
@@ -2011,7 +2051,8 @@ async fn handle_device_command(
                                         "type": "frenz_data",
                                         "stream": suffix_clone,
                                         "timestamp": sample.timestamp,
-                                        "values": sample.values,
+                                        "data": sample.wire_data(),
+                                                        "values": sample.values,
                                         "string_value": sample.string_value,
                                     }),
                                     None,

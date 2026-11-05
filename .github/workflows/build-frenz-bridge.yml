@@ -59,7 +59,7 @@ jobs:
         env:
           PYAPP_EXEC_CODE: "from frenz_lsl_bridge import main; main()"
           PYAPP_DISTRIBUTION_EMBED: "1"
-          PYAPP_PYTHON_VERSION: "3.11"
+          PYAPP_PYTHON_VERSION: "3.9"
           PYAPP_PIP_EXTRA_ARGS: "--no-cache-dir"
         run: |
           export PYAPP_PROJECT_PATH="$(pwd)/$(ls dist/*.whl | head -1)"
@@ -75,7 +75,7 @@ jobs:
         env:
           PYAPP_EXEC_CODE: "from frenz_lsl_bridge import main; main()"
           PYAPP_DISTRIBUTION_EMBED: "1"
-          PYAPP_PYTHON_VERSION: "3.11"
+          PYAPP_PYTHON_VERSION: "3.9"
           PYAPP_PIP_EXTRA_ARGS: "--no-cache-dir"
         run: |
           $wheel = (Get-ChildItem dist/*.whl | Select-Object -First 1).FullName

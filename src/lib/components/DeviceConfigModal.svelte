@@ -130,10 +130,10 @@
       frenzDeviceId: {
         label: 'Device ID',
         type: 'text',
-        placeholder: 'Auto-discovered from LSL streams',
+        placeholder: 'Bluetooth name, e.g. FRENZI85',
         secure: true,
         secretKey: 'frenz_device_id',
-        readOnly: true,
+        readOnly: false,
       },
       frenzProductKey: {
         label: 'Product Key',
@@ -146,10 +146,13 @@
       streamEegRaw: { label: 'EEG Raw (7ch, 125Hz)', type: 'checkbox', default: true },
       streamPpgRaw: { label: 'PPG Raw (4ch, 25Hz)', type: 'checkbox', default: true },
       streamImuRaw: { label: 'IMU Raw (4ch, 50Hz)', type: 'checkbox', default: true },
+      streamHrRaw: { label: 'Heart rate', type: 'checkbox', default: true },
+      streamSpo2Raw: { label: 'SpO2', type: 'checkbox', default: true },
+      streamFirmware: { label: 'Original firmware streams', type: 'checkbox', default: true },
       // Filtered Signals
       streamEegFiltered: { label: 'EEG Filtered (4ch, 125Hz)', type: 'checkbox', default: true },
-      streamEogFiltered: { label: 'EOG Filtered (4ch, 125Hz)', type: 'checkbox', default: false },
-      streamEmgFiltered: { label: 'EMG Filtered (4ch, 125Hz)', type: 'checkbox', default: false },
+      streamEogFiltered: { label: 'EOG Filtered (4ch, 125Hz)', type: 'checkbox', default: true },
+      streamEmgFiltered: { label: 'EMG Filtered (4ch, 125Hz)', type: 'checkbox', default: true },
       // Derived Metrics
       streamFocus: { label: 'Focus Score (0.5Hz)', type: 'checkbox', default: true },
       streamSleepStage: { label: 'Sleep Stage (0.2Hz)', type: 'checkbox', default: true },

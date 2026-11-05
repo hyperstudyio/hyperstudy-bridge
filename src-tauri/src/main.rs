@@ -9,9 +9,10 @@ mod devices;
 mod logging;
 mod performance;
 mod storage;
+mod recording;
 mod usb_monitor;
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 use tracing::{error, info, warn};
@@ -47,6 +48,8 @@ async fn main() {
 
     let app_state = Arc::new(AppState::new());
     let state_clone = app_state.clone();
+    let exit_state = app_state.clone();
+    let shutdown = Arc::new(AtomicU8::new(0));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -165,6 +168,9 @@ async fn main() {
 
             #[cfg(target_os = "macos")]
             {
+                let quit_item = MenuItemBuilder::with_id("quit_after_recording", "Quit HyperStudy Bridge")
+                    .accelerator("CmdOrCtrl+Q")
+                    .build(app)?;
                 let app_submenu = SubmenuBuilder::new(app, "HyperStudy Bridge")
                     .about(None)
                     .item(&check_updates_item)
@@ -175,7 +181,7 @@ async fn main() {
                     .hide_others()
                     .show_all()
                     .separator()
-                    .quit()
+                    .item(&quit_item)
                     .build()?;
 
                 let edit_submenu = SubmenuBuilder::new(app, "Edit")
@@ -213,6 +219,9 @@ async fn main() {
 
             // Handle menu events — forward to frontend via Tauri event
             app.on_menu_event(move |app_handle, event| {
+                if event.id().as_ref() == "quit_after_recording" {
+                    app_handle.exit(0);
+                }
                 if event.id().as_ref() == "check_for_updates" {
                     let _ = app_handle.emit("menu-check-for-updates", ());
                 }
@@ -257,11 +266,47 @@ async fn main() {
             test_ttl_device,
             reset_device,
             get_app_info,
+            discover_recording_streams,
+            start_lsl_recording,
+            stop_lsl_recording,
+            lsl_recording_status,
+            recover_lsl_recording,
             start_frenz_bridge,
             stop_frenz_bridge,
             get_frenz_bridge_status,
             check_frenz_bridge_available
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |app, event| {
+            // Native OS termination (for example the macOS Dock Quit action)
+            // can bypass ExitRequested. The final Exit callback is synchronous.
+            if matches!(event, tauri::RunEvent::Exit) {
+                match exit_state.recording.stop() {
+                    Ok(status) if status.state == "failed" => error!("Recording exit error: {:?}", status.error),
+                    Err(error) => error!("Recording exit flush failed: {error}"),
+                    _ => {}
+                }
+            }
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                // Tauri exits the process without guaranteeing manager destructors.
+                // Stop on a worker, keep the event loop responsive, then permit exit.
+                if shutdown.load(Ordering::Acquire) == 2 { return; }
+                api.prevent_exit();
+                if shutdown.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                    let state = exit_state.clone();
+                    let handle = app.clone();
+                    let finished = shutdown.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        match state.recording.stop() {
+                            Ok(status) if status.state == "failed" => error!("Recording stopped with error: {:?}", status.error),
+                            Err(error) => error!("Recording finalization failed: {error}"),
+                            _ => {}
+                        }
+                        finished.store(2, Ordering::Release);
+                        handle.exit(code.unwrap_or(0));
+                    });
+                }
+            }
+        });
 }

@@ -1,342 +1,141 @@
-"""
-FRENZ LSL Bridge - Streams frenztoolkit data to Lab Streaming Layer.
-
-This script is packaged as a standalone binary via PyApp and managed
-by the HyperStudy Bridge Rust process manager.
-
-Protocol:
-  - Parent writes JSON config to stdin: {"device_id":"...","product_key":"..."}
-  - This script prints JSON status lines to stdout
-  - Parent sends "stop\n" to stdin for graceful shutdown
-"""
-
+"""Credential-safe FRENZ sidecar: stdin config/stop, stdout JSON status."""
 import json
+import os
+from pathlib import Path
 import signal
 import sys
 import tempfile
 import threading
 import time
-import traceback
+import uuid
+from frenz_streams import STREAMS, StreamPublisher
 
-# Global shutdown event
 shutdown_event = threading.Event()
+protocol_output = sys.stdout
 
 
-def emit(status_dict):
-    """Print a JSON status line to stdout for the parent process."""
-    try:
-        line = json.dumps(status_dict, separators=(",", ":"))
-        sys.stdout.write(line + "\n")
-        sys.stdout.flush()
-    except Exception:
-        pass
+def emit(status):
+    protocol_output.write(json.dumps(status, separators=(',', ':')) + '\n')
+    protocol_output.flush()
 
 
 def stdin_listener():
-    """Listen for 'stop' command on stdin."""
-    try:
-        for line in sys.stdin:
-            if line.strip().lower() == "stop":
-                shutdown_event.set()
-                return
-    except Exception:
-        pass
-    # stdin closed — treat as shutdown
+    for line in sys.stdin:
+        if line.strip().lower() == 'stop':
+            break
     shutdown_event.set()
 
 
-def create_outlets(device_id):
-    """Create LSL outlets for all FRENZ stream types."""
+def create_outlets(device_id, session_id, wall_to_lsl):
     import pylsl
-
     outlets = {}
-
-    # Stream definitions: (suffix, stream_type, channel_count, nominal_srate, channel_format)
-    stream_defs = [
-        # Raw physiological
-        ("_EEG_raw", "EEG", 7, 125.0, pylsl.cf_float32),
-        ("_PPG_raw", "PPG", 4, 25.0, pylsl.cf_float32),
-        ("_IMU_raw", "IMU", 4, 50.0, pylsl.cf_float32),
-        # Filtered physiological
-        ("_EEG_filtered", "EEG", 7, 125.0, pylsl.cf_float32),
-        ("_EOG_filtered", "EOG", 2, 125.0, pylsl.cf_float32),
-        ("_EMG_filtered", "EMG", 2, 125.0, pylsl.cf_float32),
-        # Metrics (scalar values, irregular rate)
-        ("_focus", "Metrics", 1, 0.0, pylsl.cf_float32),
-        ("_sleep_stage", "Metrics", 1, 0.0, pylsl.cf_float32),
-        ("_poas", "Metrics", 1, 0.0, pylsl.cf_float32),
-        ("_POSTURE", "Markers", 1, 0.0, pylsl.cf_string),
-        ("_signal_quality", "Quality", 1, 0.0, pylsl.cf_float32),
-        # Spectral power bands (5 channels: one per EEG electrode region)
-        ("_alpha", "EEG", 5, 0.0, pylsl.cf_float32),
-        ("_beta", "EEG", 5, 0.0, pylsl.cf_float32),
-        ("_theta", "EEG", 5, 0.0, pylsl.cf_float32),
-        ("_gamma", "EEG", 5, 0.0, pylsl.cf_float32),
-        ("_delta", "EEG", 5, 0.0, pylsl.cf_float32),
-    ]
-
-    for suffix, stream_type, ch_count, srate, ch_format in stream_defs:
-        stream_name = f"{device_id}{suffix}"
-        info = pylsl.StreamInfo(
-            name=stream_name,
-            type=stream_type,
-            channel_count=ch_count,
-            nominal_srate=srate,
-            channel_format=ch_format,
-            source_id=f"frenz-bridge-{device_id}{suffix}",
-        )
-        outlets[suffix] = pylsl.StreamOutlet(info)
-
+    for suffix, store, key, channels, rate, fmt, policy in STREAMS:
+        info = pylsl.StreamInfo(device_id + suffix, 'Markers' if fmt == 'string' else 'Biosignals',
+                               channels, rate, fmt, f'frenz-{device_id}-{session_id}{suffix}')
+        desc = info.desc()
+        for name, value in {'schema_version':'2', 'manufacturer':'Earable', 'device_id':device_id,
+                            'sdk_version':'0.3.2', 'sdk_store':store, 'sdk_key':key,
+                            'timestamp_policy':policy, 'session_id':session_id,
+                            'source_unix_to_lsl_offset':repr(wall_to_lsl),
+                            'source_timestamp_column':'0' if store in ('raw','firmware') else 'none',
+                            'sample_order':'SDK array index; never timestamp deduplication'}.items():
+            desc.append_child_value(name, value)
+        channel_metadata = desc.append_child('channels')
+        for index in range(channels):
+            channel = channel_metadata.append_child('channel')
+            source_timestamp = index == 0 and store in ('raw', 'firmware')
+            channel.append_child_value('label', 'source_timestamp' if source_timestamp else f'sdk_column_{index}')
+            channel.append_child_value('sdk_column_index', str(index))
+            # Preserve column order without inventing electrode names or units.
+            channel.append_child_value('unit', 'seconds' if source_timestamp else 'unspecified')
+        outlets[suffix] = pylsl.StreamOutlet(info, max_buffered=360)
     return outlets
 
 
-def push_raw_data(outlets, streamer):
-    """Push raw physiological data from streamer.DATA to LSL outlets."""
-    raw = streamer.DATA.get("RAW", {})
-
-    # EEG raw: [N, 7] array
-    eeg = raw.get("EEG")
-    if eeg is not None and len(eeg) > 0:
-        outlet = outlets.get("_EEG_raw")
-        if outlet:
-            for row in eeg:
-                outlet.push_sample(row.tolist())
-
-    # PPG raw: [N, 4] array
-    ppg = raw.get("PPG")
-    if ppg is not None and len(ppg) > 0:
-        outlet = outlets.get("_PPG_raw")
-        if outlet:
-            for row in ppg:
-                outlet.push_sample(row.tolist())
-
-    # IMU raw: [N, 4] array
-    imu = raw.get("IMU")
-    if imu is not None and len(imu) > 0:
-        outlet = outlets.get("_IMU_raw")
-        if outlet:
-            for row in imu:
-                outlet.push_sample(row.tolist())
-
-
-def push_filtered_data(outlets, streamer):
-    """Push filtered physiological data from streamer.DATA to LSL outlets."""
-    filtered = streamer.DATA.get("FILTERED", {})
-
-    eeg = filtered.get("EEG")
-    if eeg is not None and len(eeg) > 0:
-        outlet = outlets.get("_EEG_filtered")
-        if outlet:
-            for row in eeg:
-                outlet.push_sample(row.tolist())
-
-    eog = filtered.get("EOG")
-    if eog is not None and len(eog) > 0:
-        outlet = outlets.get("_EOG_filtered")
-        if outlet:
-            for row in eog:
-                outlet.push_sample(row.tolist())
-
-    emg = filtered.get("EMG")
-    if emg is not None and len(emg) > 0:
-        outlet = outlets.get("_EMG_filtered")
-        if outlet:
-            for row in emg:
-                outlet.push_sample(row.tolist())
-
-
-def push_scores(outlets, streamer):
-    """Push derived metrics and spectral data from streamer.SCORES to LSL outlets."""
-    scores = streamer.SCORES
-    if not scores:
-        return
-
-    # Scalar metrics
-    scalar_map = {
-        "_focus": "focus_score",
-        "_sleep_stage": "sleep_stage",
-        "_poas": "poas",
-        "_signal_quality": "sqc_scores",
-    }
-
-    for suffix, key in scalar_map.items():
-        val = scores.get(key)
-        if val is not None:
-            outlet = outlets.get(suffix)
-            if outlet:
-                try:
-                    outlet.push_sample([float(val)])
-                except (TypeError, ValueError):
-                    pass
-
-    # Posture (string stream)
-    posture = scores.get("posture")
-    if posture is not None:
-        outlet = outlets.get("_POSTURE")
-        if outlet:
-            outlet.push_sample([str(posture)])
-
-    # Spectral power bands (each is array of 5)
-    band_map = {
-        "_alpha": "alpha",
-        "_beta": "beta",
-        "_theta": "theta",
-        "_gamma": "gamma",
-        "_delta": "delta",
-    }
-
-    for suffix, key in band_map.items():
-        val = scores.get(key)
-        if val is not None:
-            outlet = outlets.get(suffix)
-            if outlet:
-                try:
-                    data = [float(v) for v in val]
-                    if len(data) == 5:
-                        outlet.push_sample(data)
-                except (TypeError, ValueError):
-                    pass
-
-
 def main():
-    """Main entry point for the FRENZ LSL bridge."""
-    # Register signal handlers for graceful shutdown
-    def handle_signal(_signum, _frame):
-        shutdown_event.set()
-
-    signal.signal(signal.SIGTERM, handle_signal)
-    if hasattr(signal, "SIGINT"):
-        signal.signal(signal.SIGINT, handle_signal)
-
-    emit({"status": "waiting_for_config"})
-
-    # Read credentials from stdin (single JSON line).
-    # IMPORTANT: Read config BEFORE starting the stdin listener thread
-    # to avoid a race condition where the thread consumes the config line.
+    global protocol_output
+    # Preserve the protocol descriptor, then suppress arbitrary vendor output.
+    # SDK diagnostics may contain credentials; only our structured statuses leave.
+    protocol_output = os.fdopen(os.dup(sys.stdout.fileno()), 'w', buffering=1)
+    with open(os.devnull, 'w') as null:
+        os.dup2(null.fileno(), sys.stdout.fileno())
+        os.dup2(null.fileno(), sys.stderr.fileno())
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: shutdown_event.set())
+    emit({'status':'waiting_for_config'})
+    streamer = None
+    failed = False
     try:
-        config_line = sys.stdin.readline()
-        if not config_line.strip():
-            emit({"status": "error", "message": "Empty config received on stdin"})
-            sys.exit(1)
-        config = json.loads(config_line)
-        device_id = config["device_id"]
-        product_key = config["product_key"]
-    except (json.JSONDecodeError, KeyError) as e:
-        emit({"status": "error", "message": f"Invalid config: {e}"})
-        sys.exit(1)
-
-    # Start stdin listener thread AFTER reading config to avoid race condition
-    stdin_thread = threading.Thread(target=stdin_listener, daemon=True)
-    stdin_thread.start()
-
-    emit({"status": "bootstrapping", "phase": "importing", "package": "frenztoolkit"})
-
-    try:
+        config = json.loads(sys.stdin.readline())
+        device_id, product_key = config['device_id'], config['product_key']
+        if not isinstance(device_id, str) or not device_id.strip() or not isinstance(product_key,str) or not product_key:
+            raise ValueError('Device ID and product key are required')
+        config.clear()
+        threading.Thread(target=stdin_listener, daemon=True).start()
+        emit({'status':'bootstrapping','phase':'importing','package':'frenztoolkit'})
         from frenztoolkit import Streamer
-    except ImportError as e:
-        emit({"status": "error", "message": f"Failed to import frenztoolkit: {e}"})
-        sys.exit(1)
-
-    if shutdown_event.is_set():
-        emit({"status": "stopped"})
-        return
-
-    emit({"status": "connecting", "device_id": device_id})
-
-    # Create streamer with temp data folder
-    data_folder = tempfile.mkdtemp(prefix="frenz_bridge_")
-    try:
-        streamer = Streamer(
-            device_id=device_id,
-            product_key=product_key,
-            data_folder=data_folder,
-            turn_off_light=True,
-        )
-    except Exception as e:
-        emit({"status": "error", "message": f"Failed to create streamer: {e}"})
-        sys.exit(1)
-
-    if shutdown_event.is_set():
-        emit({"status": "stopped"})
-        return
-
-    # Start the streamer (connects BLE + begins data flow)
-    try:
+        import pylsl
+        # SDK uses the process cwd after construction. Its recording leaf must
+        # be relative and absent; a precreated absolute directory is rejected.
+        root = Path(tempfile.mkdtemp(prefix='hyperstudy-frenz-'))
+        os.chdir(root)
+        emit({'status':'connecting','phase':'sdk_start','device_id':device_id})
+        streamer = Streamer(device_id=device_id, product_key=product_key,
+                            data_folder='vendor-native', turn_off_light=False)
+        product_key = None
+        session_id = str(uuid.uuid4())
+        wall_to_lsl = pylsl.local_clock() - time.time()
+        outlets = create_outlets(device_id, session_id, wall_to_lsl)
         streamer.start()
-    except Exception as e:
-        emit({"status": "error", "message": f"Failed to start streamer: {e}"})
-        sys.exit(1)
+        publisher = StreamPublisher()
+        started = time.monotonic()
+        last_report = started
+        last_sample = started
+        previous_count = 0
+        streaming = False
+        emit({'status':'connecting','phase':'waiting_for_data','device_id':device_id})
 
-    # Wait for initial data to populate
-    emit({"status": "connecting", "device_id": device_id, "phase": "waiting_for_data"})
-    wait_start = time.time()
-    while not shutdown_event.is_set() and time.time() - wait_start < 30:
-        if streamer.DATA and streamer.DATA.get("RAW", {}).get("EEG") is not None:
-            break
-        time.sleep(0.5)
+        def publish(suffix, rows, observed, policy):
+            values = rows if isinstance(rows, list) else rows.tolist()
+            timestamps = ([float(row[0]) + wall_to_lsl for row in values]
+                          if policy == 'source_unix' else [observed] * len(values))
+            outlets[suffix].push_chunk(values, timestamp=timestamps)
 
-    if shutdown_event.is_set():
-        try:
-            streamer.stop()
-        except Exception:
-            pass
-        emit({"status": "stopped"})
-        return
-
-    # Create LSL outlets
-    emit({"status": "bootstrapping", "phase": "creating_outlets"})
-    try:
-        outlets = create_outlets(device_id)
-    except Exception as e:
-        emit({"status": "error", "message": f"Failed to create LSL outlets: {e}"})
-        try:
-            streamer.stop()
-        except Exception:
-            pass
-        sys.exit(1)
-
-    active_streams = list(outlets.keys())
-    emit({"status": "streaming", "streams": active_streams, "sample_count": 0})
-
-    # Main streaming loop
-    sample_count = 0
-    last_status_time = time.time()
-    STATUS_INTERVAL = 5.0  # seconds between status updates
-
-    try:
         while not shutdown_event.is_set():
-            try:
-                push_raw_data(outlets, streamer)
-                push_filtered_data(outlets, streamer)
-                push_scores(outlets, streamer)
-                sample_count += 1
-            except Exception as e:
-                emit({"status": "error", "message": f"Push error: {e}"})
-
-            # Periodic status update
-            now = time.time()
-            if now - last_status_time >= STATUS_INTERVAL:
-                emit({
-                    "status": "streaming",
-                    "streams": active_streams,
-                    "sample_count": sample_count,
-                })
-                last_status_time = now
-
-            # Small sleep to avoid busy-waiting; actual pacing comes from
-            # the frenztoolkit data arrival rate
-            time.sleep(0.008)  # ~125 Hz max poll rate
-
-    except Exception as e:
-        emit({"status": "error", "message": f"Streaming error: {traceback.format_exc()}"})
+            publisher.poll(streamer, publish, pylsl.local_clock())
+            now = time.monotonic()
+            if publisher.sample_count != previous_count:
+                last_sample = now
+                previous_count = publisher.sample_count
+            has_eeg = publisher.cursors.get('_EEG_raw', 0) > 0
+            if not streaming and has_eeg:
+                streaming = True
+                emit({'status':'streaming','streams':list(outlets), 'sample_count':publisher.sample_count})
+            if (not streaming and now - started > 30) or (streaming and now - last_sample > 15):
+                raise TimeoutError('No new FRENZ samples received')
+            if streaming and now - last_report >= 5:
+                emit({'status':'streaming','streams':list(outlets),'sample_count':publisher.sample_count,
+                      'stream_sample_counts':publisher.cursors})
+                last_report = now
+            # Polling cadence for an SDK without a callback API, not a startup delay.
+            shutdown_event.wait(.02)
+    except BaseException as error:
+        failed = True
+        emit({'status':'error','message':f'FRENZ acquisition failed ({type(error).__name__})'})
     finally:
-        # Clean shutdown
-        try:
-            streamer.stop()
-        except Exception:
-            pass
-        emit({"status": "stopped"})
+        if streamer is not None:
+            # Vendor stop may terminate the process; report stopping first.
+            emit({'status':'stopping'})
+            try:
+                streamer.stop()
+            except BaseException:
+                failed = True
+                emit({'status':'error','message':'FRENZ shutdown failed'})
+        if not failed:
+            emit({'status':'stopped'})
+    if failed:
+        raise SystemExit(1)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
