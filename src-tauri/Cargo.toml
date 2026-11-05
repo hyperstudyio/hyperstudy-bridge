@@ -101,3 +101,10 @@ codegen-units = 1
 lto = true
 opt-level = "z"
 strip = true
+
+# Stronghold snapshot encryption must not spend minutes in unoptimized rounds.
+# Work factors and encryption settings are unchanged.
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3

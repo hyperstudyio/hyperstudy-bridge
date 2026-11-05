@@ -37,9 +37,12 @@ done
 
 # Build wheel first — PyApp requires a file (wheel/sdist), not a directory
 echo "=== Building wheel ==="
-pip install build 2>/dev/null || python -m pip install build
-python -m build --wheel --outdir "$SCRIPT_DIR/dist/"
-WHEEL=$(ls "$SCRIPT_DIR"/dist/*.whl | head -1)
+python -c "import build" 2>/dev/null || python -m pip install build
+WHEEL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/frenz-wheel.XXXXXX")
+trap 'rm -rf "$WHEEL_DIR"' EXIT
+python -m build --wheel --outdir "$WHEEL_DIR" "$SCRIPT_DIR"
+WHEELS=("$WHEEL_DIR"/*.whl)
+WHEEL="${WHEELS[0]}"
 echo "Built wheel: $WHEEL"
 
 # PyApp configuration

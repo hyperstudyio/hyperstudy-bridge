@@ -1,7 +1,10 @@
 <script>
   import { listTtlDevices } from '../services/tauri.js';
-  import { getSecret, setSecret, removeSecret } from '../services/stronghold.js';
+  import { getSecret, setSecrets } from '../services/stronghold.js';
   import * as bridgeStore from '../stores/websocket.svelte.js';
+
+  import FrenzDevicePicker from './FrenzDevicePicker.svelte';
+  import { untrack } from 'svelte';
 
   // Use Svelte 5 $props() rune
   let { isOpen = false, device = null, onSave = () => {}, onClose = () => {} } = $props();
@@ -12,6 +15,9 @@
   let secureFields = $state({});
   let errors = $state({});
   let isSubmitting = $state(false);
+  let isLoading = $state(false);
+  let saveError = $state('');
+  let loadGeneration = 0;
   let activeTab = $state('device'); // 'device' or 'lsl'
 
   // TTL device detection state
@@ -128,7 +134,7 @@
     frenz: {
       // Credentials (stored in encrypted vault, not in regular config)
       frenzDeviceId: {
-        label: 'Device ID',
+        label: 'FRENZ band',
         type: 'text',
         placeholder: 'Bluetooth name, e.g. FRENZI85',
         secure: true,
@@ -232,8 +238,9 @@
 
   // Initialize form data when device changes
   $effect(() => {
-    if (device && isOpen) {
-      initializeForm();
+    const id = device?.id;
+    if (id && isOpen) {
+      untrack(initializeForm);
     }
   });
 
@@ -289,6 +296,8 @@
     const config = deviceConfigs[device.id];
     if (!config) return;
 
+    const generation = ++loadGeneration;
+    isLoading = device.id === 'frenz'; saveError = '';
     const newFormData = {};
     const newSecureFields = {};
     const existingConfig = device.config || {};
@@ -300,7 +309,7 @@
           const value = await getSecret(fieldConfig.secretKey);
           newSecureFields[key] = value || '';
         } catch (e) {
-          console.warn(`Failed to load secure field ${key}:`, e);
+          saveError = 'Could not load saved credentials. Close and reopen configuration.';
           newSecureFields[key] = '';
         }
       } else if (fieldConfig.type === 'checkbox') {
@@ -310,6 +319,7 @@
       }
     }
 
+    if (generation !== loadGeneration) return;
     formData = newFormData;
     secureFields = newSecureFields;
 
@@ -334,6 +344,7 @@
     lslConfig = newLslConfig;
     errors = {};
     activeTab = 'device';
+    isLoading = false;
   }
 
   function validateField(fieldName, value) {
@@ -389,6 +400,10 @@
       hasErrors = true;
     }
 
+    if (device?.id === 'frenz') {
+      if (!secureFields.frenzDeviceId) { newErrors.frenzDeviceId = 'Scan for FRENZ bands and select your band.'; hasErrors = true; }
+      if (!secureFields.frenzProductKey) { newErrors.frenzProductKey = 'Enter your Earable product key.'; hasErrors = true; }
+    }
     errors = newErrors;
     return !hasErrors;
   }
@@ -432,24 +447,20 @@
   }
 
   async function handleSave() {
+    if (isSubmitting || isLoading) return;
     if (!validateForm()) {
       return;
     }
 
-    isSubmitting = true;
+    isSubmitting = true; saveError = '';
     try {
       // Persist secure fields to stronghold (separate from regular config)
       const config = deviceConfigs[device.id];
+      const secrets = {};
       for (const [key, fieldConfig] of Object.entries(config)) {
-        if (fieldConfig.secure) {
-          const value = secureFields[key];
-          if (value) {
-            await setSecret(fieldConfig.secretKey, value);
-          } else {
-            await removeSecret(fieldConfig.secretKey);
-          }
-        }
+        if (fieldConfig.secure) secrets[fieldConfig.secretKey] = secureFields[key] || null;
       }
+      if (Object.keys(secrets).length) await setSecrets(secrets);
 
       // Convert form data to appropriate types (excludes secure fields)
       const processedConfig = {};
@@ -484,16 +495,19 @@
       });
 
       await onSave(device.id, processedConfig, processedLslConfig);
+      isSubmitting = false;
       handleClose();
     } catch (error) {
-      console.error('Failed to save configuration:', error);
-      // You could add a general error state here
+      saveError = 'Could not save configuration. Your settings have not been confirmed saved.';
     } finally {
       isSubmitting = false;
     }
   }
 
   function handleClose() {
+    if (isSubmitting) return;
+    loadGeneration++;
+    isLoading = false;
     formData = {};
     lslConfig = {};
     secureFields = {};
@@ -550,6 +564,8 @@
           </button>
         </div>
 
+        {#if isLoading}<p role="status">Loading saved settings…</p>{/if}
+        {#if saveError}<p role="alert">{saveError}</p>{/if}
         <form
           class="config-form"
           onsubmit={e => {
@@ -557,6 +573,7 @@
             handleSave();
           }}
         >
+          <fieldset disabled={isSubmitting || isLoading}>
           {#if activeTab === 'device'}
             <!-- Device Configuration Tab -->
             {#if deviceConfigs[device.id]}
@@ -567,12 +584,17 @@
                     {#if fieldConfig.required}
                       <span class="required">*</span>
                     {/if}
-                    {#if fieldConfig.secure}
+                    {#if fieldConfig.secure && fieldName !== 'frenzDeviceId'}
                       <span class="secure-badge">Encrypted</span>
                     {/if}
                   </label>
 
-                  {#if fieldConfig.secure}
+                  {#if device.id === 'frenz' && fieldName === 'frenzDeviceId'}
+                    <FrenzDevicePicker id={fieldName} value={secureFields.frenzDeviceId || ''}
+                      disabled={isLoading || isSubmitting}
+                      onSelect={name => { secureFields.frenzDeviceId = name; delete errors.frenzDeviceId; }} />
+                    {#if errors.frenzDeviceId}<p role="alert">{errors.frenzDeviceId}</p>{/if}
+                  {:else if fieldConfig.secure}
                     <div class="input-with-button">
                       <input
                         id={fieldName}
@@ -832,6 +854,7 @@
               {/if}
             </div>
           {/if}
+          </fieldset>
         </form>
       </div>
 
@@ -840,7 +863,7 @@
         <button
           class="save-btn"
           onclick={handleSave}
-          disabled={isSubmitting || Object.keys(errors).length > 0}
+          disabled={isSubmitting || isLoading}
         >
           {isSubmitting ? 'Saving...' : 'Save Configuration'}
         </button>
@@ -850,6 +873,7 @@
 {/if}
 
 <style>
+  fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
   .modal-overlay {
     position: fixed;
     top: 0;

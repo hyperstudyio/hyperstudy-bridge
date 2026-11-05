@@ -271,6 +271,7 @@ async fn main() {
             stop_lsl_recording,
             lsl_recording_status,
             recover_lsl_recording,
+            scan_frenz_devices,
             start_frenz_bridge,
             stop_frenz_bridge,
             get_frenz_bridge_status,

@@ -1249,3 +1249,8 @@ pub async fn recover_lsl_recording(path:std::path::PathBuf,state:State<'_,Arc<Ap
     tokio::task::spawn_blocking(move||crate::recording::recover(&path)).await
         .map_err(|_|"Recovery worker failed".to_string())?.map_err(|e|e.to_string())
 }
+
+#[tauri::command]
+pub async fn scan_frenz_devices(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<Vec<crate::devices::lsl::frenz_process::FrenzBluetoothDevice>, String> {
+    state.frenz_process.scan(&app).await
+}

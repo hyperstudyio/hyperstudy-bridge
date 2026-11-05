@@ -77,7 +77,7 @@
       case 'stopped':
         return 'Stopped';
       case 'bootstrapping':
-        return 'Installing...';
+        return 'Starting...';
       case 'connecting':
         return 'Connecting...';
       case 'streaming':
@@ -422,7 +422,7 @@
 
       // If the device was connected, reconnect with new config
       // disconnectDevice properly awaits completion, so no arbitrary delay needed
-      if (wasConnected) {
+      if (wasConnected && deviceId !== 'frenz') {
         if (deviceId === 'eyelink') {
           await bridgeStore.disconnectEyeLink();
           await bridgeStore.connectEyeLink(newConfig);

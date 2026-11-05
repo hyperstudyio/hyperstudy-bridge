@@ -86,6 +86,20 @@ struct PythonStatusLine {
     progress: Option<u32>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FrenzBluetoothDevice {
+    pub name: String,
+    pub address: String,
+    pub rssi: i32,
+    pub selectable: bool,
+}
+#[derive(Deserialize)]
+struct FrenzScanReply {
+    status: String,
+    #[serde(default)] devices: Vec<FrenzBluetoothDevice>,
+    message: Option<String>,
+}
+
 /// Manages the FRENZ Python bridge process lifecycle
 pub struct FrenzProcessManager {
     /// The running child process (if any)
@@ -94,6 +108,8 @@ pub struct FrenzProcessManager {
     status: Arc<RwLock<FrenzBridgeStatus>>,
     /// Shutdown flag for the stdout reader task
     shutdown: Arc<AtomicBool>,
+    /// Serialize scan/start so two processes cannot compete for Bluetooth.
+    operation: tokio::sync::Mutex<()>,
     /// Handle for the stdout reader task
     reader_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
@@ -101,6 +117,7 @@ pub struct FrenzProcessManager {
 impl FrenzProcessManager {
     pub fn new() -> Self {
         Self {
+            operation: tokio::sync::Mutex::new(()),
             process: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(FrenzBridgeStatus::default())),
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -162,6 +179,36 @@ impl FrenzProcessManager {
         Self::find_binary(app_handle).is_some()
     }
 
+    /// Scan advertisements without credentials or initializing the vendor SDK.
+    pub async fn scan(&self, app: &tauri::AppHandle) -> Result<Vec<FrenzBluetoothDevice>, String> {
+        let _operation = self.operation.try_lock().map_err(|_| "A FRENZ scan or connection is already starting")?;
+        if self.process.read().await.is_some() {
+            return Err("Disconnect FRENZ before scanning for another band".into());
+        }
+        let binary = Self::find_binary(app).ok_or("FRENZ sidecar is unavailable")?;
+        let mut child = tokio::process::Command::new(binary)
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()).kill_on_drop(true).spawn()
+            .map_err(|_| "Could not start Bluetooth scanner")?;
+        let mut input = child.stdin.take().ok_or("Scanner input unavailable")?;
+        input.write_all(b"{\"action\":\"scan\"}\n").await.map_err(|_| "Could not request Bluetooth scan")?;
+        drop(input);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(180), child.wait_with_output())
+            .await.map_err(|_| "Bluetooth setup or scan timed out. Check network access and Bluetooth permission.")?
+            .map_err(|_| "Bluetooth scanner stopped unexpectedly")?;
+        let reply = String::from_utf8_lossy(&output.stdout);
+        for line in reply.lines() {
+            if let Ok(result) = serde_json::from_str::<FrenzScanReply>(line) {
+                match result.status.as_str() {
+                    "discovered" if output.status.success() => return Ok(result.devices),
+                    "scan_error" => return Err(result.message.unwrap_or_else(|| "Bluetooth scan failed".into())),
+                    _ => {}
+                }
+            }
+        }
+        Err("Bluetooth scanner could not initialize. Check the sidecar installation.".into())
+    }
+
     /// Start the FRENZ bridge process
     ///
     /// Spawns the PyApp binary, sends credentials via stdin, and starts
@@ -172,6 +219,7 @@ impl FrenzProcessManager {
         product_key: &str,
         app_handle: &tauri::AppHandle,
     ) -> Result<(), String> {
+        let _operation = self.operation.try_lock().map_err(|_| "Another FRENZ operation is in progress".to_string())?;
         // Check if already running
         {
             let proc = self.process.read().await;
@@ -385,7 +433,9 @@ impl FrenzProcessManager {
                 s.state = FrenzBridgeState::Bootstrapping;
                 s.phase = parsed.phase.clone();
                 if let Some(ref pkg) = parsed.package {
-                    s.message = Some(format!("Installing {}...", pkg));
+                    s.message = Some(if parsed.phase.as_deref() == Some("importing") {
+                        format!("Loading {}...", pkg)
+                    } else { format!("Installing {}...", pkg) });
                 } else if let Some(ref phase) = parsed.phase {
                     s.message = Some(format!("{}...", phase));
                 }

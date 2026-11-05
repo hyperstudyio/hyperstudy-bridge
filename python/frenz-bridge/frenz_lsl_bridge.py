@@ -65,14 +65,24 @@ def main():
     emit({'status':'waiting_for_config'})
     streamer = None
     failed = False
+    phase = "configuration"
     try:
         config = json.loads(sys.stdin.readline())
+        if config.get('action') == 'scan':
+            import asyncio
+            from frenz_discovery import scan, scan_error
+            try:
+                emit({'status': 'discovered', 'devices': asyncio.run(scan())})
+            except Exception as error:
+                emit({'status': 'scan_error', 'message': scan_error(error)})
+            return
         device_id, product_key = config['device_id'], config['product_key']
         if not isinstance(device_id, str) or not device_id.strip() or not isinstance(product_key,str) or not product_key:
             raise ValueError('Device ID and product key are required')
         config.clear()
         threading.Thread(target=stdin_listener, daemon=True).start()
         emit({'status':'bootstrapping','phase':'importing','package':'frenztoolkit'})
+        phase = "loading_sdk"
         from frenztoolkit import Streamer
         import pylsl
         # SDK uses the process cwd after construction. Its recording leaf must
@@ -80,12 +90,15 @@ def main():
         root = Path(tempfile.mkdtemp(prefix='hyperstudy-frenz-'))
         os.chdir(root)
         emit({'status':'connecting','phase':'sdk_start','device_id':device_id})
+        phase = "sdk_initialization"
         streamer = Streamer(device_id=device_id, product_key=product_key,
                             data_folder='vendor-native', turn_off_light=False)
         product_key = None
         session_id = str(uuid.uuid4())
         wall_to_lsl = pylsl.local_clock() - time.time()
+        phase = "creating_streams"
         outlets = create_outlets(device_id, session_id, wall_to_lsl)
+        phase = "connecting_bluetooth"
         streamer.start()
         publisher = StreamPublisher()
         started = time.monotonic()
@@ -102,6 +115,7 @@ def main():
             outlets[suffix].push_chunk(values, timestamp=timestamps)
 
         while not shutdown_event.is_set():
+            phase = "publishing_samples"
             publisher.poll(streamer, publish, pylsl.local_clock())
             now = time.monotonic()
             if publisher.sample_count != previous_count:
@@ -121,7 +135,11 @@ def main():
             shutdown_event.wait(.02)
     except BaseException as error:
         failed = True
-        emit({'status':'error','message':f'FRENZ acquisition failed ({type(error).__name__})'})
+        # Allowlist a known SDK error; never expose arbitrary exception text.
+        reason = ('The Earable SDK rejected the product key.'
+                  if 'invalid product key' in str(error).lower()
+                  else f'FRENZ failed during {phase} ({type(error).__name__}).')
+        emit({'status':'error', 'phase':phase, 'message':reason})
     finally:
         if streamer is not None:
             # Vendor stop may terminate the process; report stopping first.
