@@ -13,6 +13,7 @@
   let formData = $state({});
   let lslConfig = $state({});
   let secureFields = $state({});
+  let visibleSecrets = $state({});
   let errors = $state({});
   let isSubmitting = $state(false);
   let isLoading = $state(false);
@@ -293,6 +294,7 @@
   }
 
   async function initializeForm() {
+    visibleSecrets = {};
     const config = deviceConfigs[device.id];
     if (!config) return;
 
@@ -511,6 +513,7 @@
     formData = {};
     lslConfig = {};
     secureFields = {};
+    visibleSecrets = {};
     errors = {};
     isSubmitting = false;
     activeTab = 'device';
@@ -598,14 +601,28 @@
                     <div class="input-with-button">
                       <input
                         id={fieldName}
-                        type={fieldConfig.type}
+                        type={fieldConfig.type === 'password' && visibleSecrets[fieldName] ? 'text' : fieldConfig.type}
                         class="form-input"
                         class:readonly={fieldConfig.readOnly}
                         placeholder={fieldConfig.placeholder || ''}
                         value={secureFields[fieldName] || ''}
                         readonly={fieldConfig.readOnly}
+                        spellcheck={false}
+                        autocapitalize="none"
                         oninput={e => (secureFields[fieldName] = e.target.value)}
                       />
+                      {#if fieldConfig.type === 'password'}
+                        <button
+                          type="button"
+                          class="reveal-btn"
+                          aria-label={`${visibleSecrets[fieldName] ? 'Hide' : 'Show'} ${fieldConfig.label}`}
+                          aria-controls={fieldName}
+                          aria-pressed={!!visibleSecrets[fieldName]}
+                          onclick={() => (visibleSecrets[fieldName] = !visibleSecrets[fieldName])}
+                        >
+                          {visibleSecrets[fieldName] ? 'Hide' : 'Show'}
+                        </button>
+                      {/if}
                       {#if !fieldConfig.readOnly && secureFields[fieldName]}
                         <button
                           type="button"
@@ -1201,6 +1218,7 @@
 
   .input-with-button .form-input {
     flex: 1;
+    min-width: 0;
   }
 
   .secure-badge {
@@ -1237,6 +1255,21 @@
   .clear-btn:hover {
     background: var(--color-error);
     color: white;
+  }
+
+  .reveal-btn {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--color-primary);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--color-primary);
+    cursor: pointer;
+    font-size: 0.813rem;
+    font-weight: 500;
+  }
+
+  .reveal-btn:hover:not(:disabled) {
+    background: var(--color-surface-elevated);
   }
 
   .detect-btn {

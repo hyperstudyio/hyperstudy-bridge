@@ -19,3 +19,30 @@ it('shows persistence failure and keeps configuration open',async()=>{
  await screen.findByText('Selected band: FRENZI85');await fireEvent.click(screen.getByText('Save Configuration'));
  expect(await screen.findByRole('alert')).toHaveTextContent('Could not save configuration');expect(onClose).not.toHaveBeenCalled();
 });
+
+it('shows and hides the current key without changing or saving it', async () => {
+ const onSave = vi.fn();
+ render(DeviceConfigModal, {device, isOpen: true, onSave});
+ await screen.findByText('Selected band: FRENZI85');
+ const input = screen.getByLabelText(/Product Key/, {selector: 'input'});
+ expect(input).toHaveAttribute('type', 'password');
+ await fireEvent.input(input, {target: {value: 'edited-test-key'}});
+ await fireEvent.click(screen.getByRole('button', {name: 'Show Product Key'}));
+ expect(input).toHaveAttribute('type', 'text');
+ expect(input).toHaveValue('edited-test-key');
+ await fireEvent.click(screen.getByRole('button', {name: 'Hide Product Key'}));
+ expect(input).toHaveAttribute('type', 'password');
+ expect(input).toHaveValue('edited-test-key');
+ expect(onSave).not.toHaveBeenCalled();
+ expect(setSecrets).not.toHaveBeenCalled();
+});
+
+it('hides the key again when configuration is reopened', async () => {
+ const view = render(DeviceConfigModal, {device, isOpen: true});
+ await screen.findByText('Selected band: FRENZI85');
+ await fireEvent.click(screen.getByRole('button', {name: 'Show Product Key'}));
+ await view.rerender({isOpen: false});
+ await view.rerender({isOpen: true});
+ await screen.findByText('Selected band: FRENZI85');
+ expect(screen.getByLabelText(/Product Key/, {selector: 'input'})).toHaveAttribute('type', 'password');
+});
