@@ -3,6 +3,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   let { isOpen = $bindable(false) } = $props();
   let streams = $state([]);
+  let studies = $state([]);
   let selected = $state([]);
   let directory = $state('');
   let label = $state('');
@@ -19,8 +20,8 @@
       if (pending) return;
       pending = true;
       try {
-        const next = await invoke('lsl_recording_status');
-        if (!closed) status = next;
+        const [next, sessions] = await Promise.all([invoke('lsl_recording_status'), invoke('list_study_recordings')]);
+        if (!closed) { status = next; studies = sessions; }
       } catch (e) {
         if (!closed) error = String(e);
       } finally { pending = false; }
@@ -114,7 +115,18 @@
       <button onclick={recover} disabled={active || busy}>Recover interrupted recording</button>
     </div>
     {#if recoveredPath}<p class="recording-path">Recovered copy: {recoveredPath}</p>{/if}
-    <p><small>Files stay on this computer. Cloud upload is not available yet.</small></p>
+    <p><small>Local files are retained after cloud upload. Reopen the matching study to authorize a pending upload.</small></p>
+    {#if studies.length}
+      <h3>Study recordings</h3>
+      {#each studies as study (study.recording_id)}
+        <div class="study-recording">
+          <p><strong>{study.context.label || study.recording_id}</strong> · {study.state}</p>
+          <p>Cloud: {study.upload_status}</p>
+          <p class="recording-path">{study.path}</p>
+          {#if study.upload_error}<p role="status">{study.upload_error}</p>{/if}
+        </div>
+      {/each}
+    {/if}
   </section>
 {/if}
 

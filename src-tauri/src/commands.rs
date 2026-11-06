@@ -1260,3 +1260,10 @@ pub async fn recover_lsl_recording(path:std::path::PathBuf,state:State<'_,Arc<Ap
 pub async fn scan_frenz_devices(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<Vec<crate::devices::lsl::frenz_process::FrenzBluetoothDevice>, String> {
     state.frenz_process.scan(&app).await
 }
+
+#[tauri::command]
+pub async fn list_study_recordings(state: State<'_,Arc<AppState>>) -> Result<Vec<crate::recording::study::StudySession>,String> {
+    let manager = state.recording.clone();
+    tokio::task::spawn_blocking(move || manager.list_studies()).await
+        .map_err(|_|"Study status worker failed".to_string())?.map_err(|e|e.to_string())
+}

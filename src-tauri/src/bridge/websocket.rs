@@ -217,7 +217,8 @@ async fn handle_connection<R: Runtime>(
                 Ok(Message::Text(text)) => {
                     state_clone.update_connection_activity(&connection_id_clone);
                     state_clone.increment_message_count();
-                    info!("Received WebSocket message: {}", text);
+                    // Payloads can contain short-lived upload capabilities and device secrets.
+                    info!(bytes = text.len(), "Received WebSocket message");
 
                     match MessageHandler::parse_command(&text) {
                         Ok(BridgeCommand::Command {
@@ -1922,6 +1923,53 @@ async fn handle_device_command(
         // ====================================================================
         // FRENZ Brainband LSL handlers
         // ====================================================================
+        CommandAction::UploadStudyRecording => {
+            let result = async {
+                let value = payload.ok_or_else(|| anyhow::anyhow!("Missing upload request"))?;
+                let recording_id = value.get("recording_id").and_then(|v|v.as_str()).ok_or_else(|| anyhow::anyhow!("Missing recording ID"))?.to_string();
+                let base = value.get("api_base_url").and_then(|v|v.as_str()).ok_or_else(|| anyhow::anyhow!("Missing API base URL"))?.to_string();
+                let grant = serde_json::from_value(value.get("grant").cloned().ok_or_else(|| anyhow::anyhow!("Missing upload grant"))?)
+                    .map_err(|_|anyhow::anyhow!("Invalid upload grant"))?;
+                crate::recording::upload::enqueue(state.recording.clone(),recording_id,base,grant).await
+            }.await;
+            let response = match result {
+                Ok(value) => BridgeResponse::data("recording".into(),value,id),
+                Err(error) => BridgeResponse::device_error("recording".into(),error.to_string(),id),
+            };
+            send_response(tx,response).await;
+        }
+        CommandAction::StartStudyRecording
+        | CommandAction::GetStudyRecording
+        | CommandAction::StopStudyRecording
+        | CommandAction::SendStudyMarker
+        | CommandAction::PrepareRecordingUpload
+        | CommandAction::ListStudyRecordings => {
+            let manager = state.recording.clone();
+            let result = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+                let value = payload.unwrap_or_else(||json!({}));
+                let field = |name: &str| value.get(name).cloned().ok_or_else(||anyhow::anyhow!("Missing {}",name));
+                match action {
+                    CommandAction::StartStudyRecording => Ok(serde_json::to_value(manager.start_study(serde_json::from_value(value)?)?)?),
+                    CommandAction::GetStudyRecording => Ok(serde_json::to_value(manager.get_study(&serde_json::from_value(field("context")?)?)?)?),
+                    CommandAction::StopStudyRecording => Ok(serde_json::to_value(manager.stop_study(serde_json::from_value(value)?)?)?),
+                    CommandAction::SendStudyMarker => {
+                        let id: String = serde_json::from_value(field("recording_id")?)?;
+                        manager.study_marker(&id,&serde_json::from_value(field("context")?)?,field("marker")?)
+                    }
+                    CommandAction::PrepareRecordingUpload => {
+                        let id: String = serde_json::from_value(field("recording_id")?)?;
+                        crate::recording::upload::manifest(&manager.study_path(&id)?,&id)
+                    }
+                    _ => Ok(serde_json::to_value(manager.list_studies()?)?),
+                }
+            }).await;
+            let response = match result {
+                Ok(Ok(value)) => BridgeResponse::data("recording".into(),value,id),
+                Ok(Err(error)) => BridgeResponse::device_error("recording".into(),error.to_string(),id),
+                Err(_) => BridgeResponse::device_error("recording".into(),"Study recording command failed".into(),id),
+            };
+            send_response(tx,response).await;
+        }
         CommandAction::DiscoverRecordingStreams
         | CommandAction::StartLslRecording
         | CommandAction::StopLslRecording
@@ -1945,7 +1993,7 @@ async fn handle_device_command(
                                 Some(value) if !value.is_null() => serde_json::from_value(value)?,
                                 _ => crate::recording::RecordingStopRequest::default(),
                             };
-                            Ok(serde_json::to_value(manager.stop_with(request)?)?)
+                            Ok(serde_json::to_value(manager.stop_unmanaged(request)?)?)
                         }
                         _ => Ok(serde_json::to_value(manager.status())?),
                     }

@@ -1,6 +1,8 @@
 //! Independent LSL acquisition with per-recording SQLite FULL WAL persistence.
 mod boundary;
 mod store;
+pub mod study;
+pub mod upload;
 mod worker;
 use crate::devices::lsl::types::SampleData;
 use anyhow::{ensure, Result};
@@ -83,6 +85,8 @@ struct StopSignal {
     request: RecordingStopRequest,
     requested_lsl: f64,
     started: std::time::Instant,
+    map_local_boundary: bool,
+    end_marker: Option<serde_json::Value>,
 }
 impl StopSignal {
     fn new(request: RecordingStopRequest) -> Self {
@@ -90,6 +94,8 @@ impl StopSignal {
             request,
             requested_lsl: lsl::local_clock(),
             started: std::time::Instant::now(),
+            map_local_boundary: false,
+            end_marker: None,
         }
     }
 }
@@ -144,8 +150,15 @@ impl RecordedSample {
         }
     }
 }
+enum WorkerCommand {
+    Stop(StopSignal),
+    Marker {
+        marker: serde_json::Value,
+        reply: mpsc::Sender<Result<f64, String>>,
+    },
+}
 struct Active {
-    stop: mpsc::Sender<StopSignal>,
+    stop: mpsc::Sender<WorkerCommand>,
     stream_uids: Vec<String>,
     handle: JoinHandle<()>,
 }
@@ -153,12 +166,21 @@ struct Active {
 pub struct RecordingManager {
     active: Mutex<Option<Active>>,
     status: Arc<Mutex<RecordingStatus>>,
+    study: Mutex<study::StudyRegistry>,
 }
 impl RecordingManager {
     pub fn status(&self) -> RecordingStatus {
         self.status.lock().unwrap().clone()
     }
     pub fn start(&self, request: RecordingRequest) -> Result<RecordingStatus> {
+        self.start_internal(request, false, None)
+    }
+    fn start_internal(
+        &self,
+        request: RecordingRequest,
+        study: bool,
+        recording_id: Option<String>,
+    ) -> Result<RecordingStatus> {
         ensure!(
             !request.stream_uids.is_empty() && request.stream_uids.len() <= 64,
             "Select 1–64 streams"
@@ -184,9 +206,10 @@ impl RecordingManager {
         }
         ensure!(active.is_none(), "A recording is already active");
         std::fs::create_dir_all(&request.directory)?;
-        let path = request
-            .directory
-            .join(format!("{}.sqlite", uuid::Uuid::new_v4()));
+        let path = request.directory.join(format!(
+            "{}.sqlite",
+            recording_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        ));
         *self.status.lock().unwrap() = RecordingStatus {
             state: "starting".into(),
             path: Some(path.clone()),
@@ -198,8 +221,11 @@ impl RecordingManager {
         let stream_uids = request.stream_uids.clone();
         let (stop, receiver) = mpsc::channel();
         let status = self.status.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
-            if let Err(error) = worker::record(request, &path, receiver, status.clone()) {
+            if let Err(error) =
+                worker::record(request, &path, receiver, status.clone(), study, ready_tx)
+            {
                 let mut s = status.lock().unwrap();
                 s.state = "failed".into();
                 s.error = Some(error.to_string());
@@ -210,19 +236,47 @@ impl RecordingManager {
             handle,
             stream_uids,
         });
+        if study {
+            // Native inlet setup is bounded per source. Readiness is an explicit
+            // worker signal, never inferred from elapsed time or a starting flag.
+            ready_rx.recv().map_err(|_| {
+                anyhow::anyhow!(self
+                    .status()
+                    .error
+                    .unwrap_or_else(|| "Recorder failed before readiness".into()))
+            })?;
+        }
         Ok(self.status())
     }
     pub fn stop(&self) -> Result<RecordingStatus> {
         self.stop_with(RecordingStopRequest::default())
     }
     pub fn stop_with(&self, request: RecordingStopRequest) -> Result<RecordingStatus> {
+        self.stop_signal(StopSignal::new(request))
+    }
+    fn stop_signal(&self, signal: StopSignal) -> Result<RecordingStatus> {
+        self.stop_signal_scoped(signal, None)
+    }
+    fn stop_signal_scoped(
+        &self,
+        signal: StopSignal,
+        expected_path: Option<&std::path::Path>,
+    ) -> Result<RecordingStatus> {
         // Hold lifecycle lock through join so a new start cannot race finalization.
         let mut active = self.active.lock().unwrap();
+        if let Some(expected) = expected_path {
+            ensure!(
+                self.status().path.as_deref() == Some(expected),
+                "Recording is no longer the active session"
+            );
+        }
         if let Some(running) = active.as_ref() {
-            request.validate(&running.stream_uids)?;
+            if !signal.map_local_boundary {
+                signal.request.validate(&running.stream_uids)?;
+            }
         }
         if let Some(running) = active.take() {
-            let _ = running.stop.send(StopSignal::new(request));
+            let _ = running.stop.send(WorkerCommand::Stop(signal));
             running
                 .handle
                 .join()
@@ -235,9 +289,9 @@ impl Drop for RecordingManager {
     fn drop(&mut self) {
         if let Ok(active) = self.active.get_mut() {
             if let Some(r) = active.take() {
-                let _ = r
-                    .stop
-                    .send(StopSignal::new(RecordingStopRequest::default()));
+                let _ = r.stop.send(WorkerCommand::Stop(StopSignal::new(
+                    RecordingStopRequest::default(),
+                )));
                 let _ = r.handle.join();
             }
         }

@@ -77,6 +77,8 @@ async fn main() {
             let state = state_clone.clone();
             let app_handle = app.handle().clone();
 
+            state.recording.configure_study_directory(app_handle.path().app_data_dir()?.join("recordings"))?;
+
             // Set the app handle for the logging layer to enable event emission
             set_app_handle(app_handle.clone());
 
@@ -270,6 +272,7 @@ async fn main() {
             start_lsl_recording,
             stop_lsl_recording,
             lsl_recording_status,
+            list_study_recordings,
             recover_lsl_recording,
             scan_frenz_devices,
             start_frenz_bridge,

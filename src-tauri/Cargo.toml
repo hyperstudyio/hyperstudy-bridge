@@ -36,11 +36,13 @@ tungstenite = "0.27"
 lsl = { git = "https://github.com/labstreaminglayer/liblsl-rust.git", branch = "main" }
 
 # HTTP Client (for Neon REST API)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 # mDNS/DNS-SD browse (Neon Companion phones advertise as PI monitor:<name>:<id>)
 mdns-sd = "0.21"
 
 # Utilities
+sha2 = "0.10"
+tokio-util = { version = "0.7", features = ["io"] }
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"

@@ -32,6 +32,13 @@ pub enum BridgeCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandAction {
+    StartStudyRecording,
+    GetStudyRecording,
+    StopStudyRecording,
+    SendStudyMarker,
+    PrepareRecordingUpload,
+    UploadStudyRecording,
+    ListStudyRecordings,
     DiscoverRecordingStreams,
     StartLslRecording,
     StopLslRecording,

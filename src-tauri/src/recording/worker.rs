@@ -2,6 +2,7 @@ use super::boundary::{observations_satisfied, reports, StreamEvidence};
 use super::*;
 use anyhow::{bail, Context};
 use lsl::Pullable;
+use rusqlite::OptionalExtension;
 use std::{
     path::Path,
     time::{Duration, Instant},
@@ -67,8 +68,10 @@ fn commit(
 pub fn record(
     request: RecordingRequest,
     path: &Path,
-    stop: mpsc::Receiver<StopSignal>,
+    stop: mpsc::Receiver<WorkerCommand>,
     status: Arc<Mutex<RecordingStatus>>,
+    study: bool,
+    ready: mpsc::Sender<()>,
 ) -> Result<()> {
     let available = lsl::resolve_streams(1.)?;
     let mut inlets = Inlets(Vec::new());
@@ -93,15 +96,43 @@ pub fn record(
         specs.push(descriptor(&inlet.info(5.)?)?);
         inlets.push(inlet);
     }
+    let marker_index = if study {
+        let id = specs.len();
+        specs.push(StreamDescriptor {
+            uid: format!(
+                "study-markers-{}",
+                path.file_stem().unwrap().to_string_lossy()
+            ),
+            name: "HyperStudy Study Markers".into(),
+            source_id: "hyperstudy-bridge-study".into(),
+            channels: 1,
+            format: "string".into(),
+            nominal_rate: 0.,
+            xml: "<info><type>Markers</type><clock>bridge_local_lsl</clock></info>".into(),
+        });
+        Some(id)
+    } else {
+        None
+    };
     let mut store = Store::create(path, &request.context, &specs)?;
     status.lock().unwrap().state = "recording".into();
+    status.lock().unwrap().streams = specs.len();
+    let _ = ready.send(());
     let mut evidence: Vec<_> = specs.iter().cloned().map(StreamEvidence::new).collect();
     let mut pending = Vec::with_capacity(4096);
     let mut flush = Instant::now() + Duration::from_millis(100);
     let mut clocks = Instant::now();
-    let signal = loop {
-        if let Ok(signal) = stop.try_recv() {
-            break signal;
+    let mut signal = loop {
+        if let Ok(command) = stop.try_recv() {
+            match command {
+                WorkerCommand::Stop(signal) => break signal,
+                WorkerCommand::Marker { marker, reply } => {
+                    let result =
+                        write_marker(&mut store, &mut pending, &status, marker_index, marker)
+                            .map_err(|e| e.to_string());
+                    let _ = reply.send(result);
+                }
+            }
         }
         for (id, inlet) in inlets.iter().enumerate() {
             // Bound per-stream work so busy streams cannot starve peers or stop.
@@ -163,7 +194,12 @@ pub fn record(
         }
         // Interruptible acquisition polling cadence; no synchronization sleeps.
         match stop.recv_timeout(Duration::from_millis(5)) {
-            Ok(signal) => break signal,
+            Ok(WorkerCommand::Stop(signal)) => break signal,
+            Ok(WorkerCommand::Marker { marker, reply }) => {
+                let result = write_marker(&mut store, &mut pending, &status, marker_index, marker)
+                    .map_err(|e| e.to_string());
+                let _ = reply.send(result);
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 break StopSignal::new(RecordingStopRequest::default())
             }
@@ -171,6 +207,34 @@ pub fn record(
         }
     };
     status.lock().unwrap().state = "stopping".into();
+    if let Some(marker) = signal.end_marker.take() {
+        signal.requested_lsl =
+            write_marker(&mut store, &mut pending, &status, marker_index, marker)?;
+    }
+    let mut unmapped_streams = Vec::new();
+    if signal.map_local_boundary {
+        // LSL correction maps remote -> local: source target = local - correction.
+        // Retain uncertainty in clock_observations; no acquisition precision claim.
+        for (id, spec) in specs.iter().enumerate().take(inlets.len()) {
+            let measured: Option<(f64, f64, f64)> = store.db.query_row(
+                "SELECT observed_lsl,correction,uncertainty FROM clock_observations WHERE stream_id=? AND correction IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+                [id as i64], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+            if let Some((_, correction, _)) = measured.filter(|(observed, c, u)| {
+                c.is_finite()
+                    && u.is_finite()
+                    && *u >= 0.
+                    && signal.requested_lsl - *observed <= 10.
+                    && signal.requested_lsl >= *observed
+            }) {
+                signal.request.boundaries.push(SourceBoundary {
+                    stream_uid: spec.uid.clone(),
+                    source_timestamp: signal.requested_lsl - correction,
+                });
+            } else {
+                unmapped_streams.push(spec.uid.clone());
+            }
+        }
+    }
     drain_to_boundaries(
         &inlets,
         &specs,
@@ -180,16 +244,29 @@ pub fn record(
         &mut evidence,
         &signal,
     )?;
-    drain_at_stop(
-        &inlets,
-        &specs,
-        &mut store,
-        &mut pending,
-        &status,
-        &mut evidence,
-    )?;
+    if signal.map_local_boundary {
+        drain_at_stop_until(
+            &inlets,
+            &specs,
+            &mut store,
+            &mut pending,
+            &status,
+            &mut evidence,
+            Some(signal.started + Duration::from_millis(signal.request.timeout_ms)),
+        )?;
+    } else {
+        drain_at_stop(
+            &inlets,
+            &specs,
+            &mut store,
+            &mut pending,
+            &status,
+            &mut evidence,
+        )?;
+    }
     let report = RecordingEndReport {
-        acquisition_coverage: if signal.request.boundaries.is_empty() {
+        acquisition_coverage: if !signal.map_local_boundary && signal.request.boundaries.is_empty()
+        {
             "not_requested"
         } else {
             "unverified"
@@ -199,6 +276,7 @@ pub fn record(
         drain_finished_lsl: lsl::local_clock(),
         drain_elapsed_ms: signal.started.elapsed().as_millis() as u64,
         streams: reports(&evidence, &signal.request, true),
+        unmapped_streams,
     };
     store.save_end_report(&report)?;
     status.lock().unwrap().end_report = Some(report);
@@ -228,9 +306,23 @@ pub(super) fn drain_at_stop(
     status: &Arc<Mutex<RecordingStatus>>,
     evidence: &mut [StreamEvidence],
 ) -> Result<()> {
+    drain_at_stop_until(inlets, specs, store, pending, status, evidence, None)
+}
+fn drain_at_stop_until(
+    inlets: &[lsl::StreamInlet],
+    specs: &[StreamDescriptor],
+    store: &mut Store,
+    pending: &mut Vec<RecordedSample>,
+    status: &Arc<Mutex<RecordingStatus>>,
+    evidence: &mut [StreamEvidence],
+    deadline: Option<Instant>,
+) -> Result<()> {
     let counts: Vec<_> = inlets.iter().map(|i| i.samples_available()).collect();
     for (id, count) in counts.into_iter().enumerate() {
         for _ in 0..count {
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
+            }
             let (data, timestamp) = pull(&inlets[id], &specs[id].format)?
                 .context("Inlet backlog disappeared during stop")?;
             evidence[id].observe(timestamp);
@@ -289,11 +381,40 @@ pub(super) fn drain_to_boundaries(
         {
             break;
         }
-        drain_at_stop(inlets, specs, store, pending, status, evidence)?;
+        drain_at_stop_until(
+            inlets,
+            specs,
+            store,
+            pending,
+            status,
+            evidence,
+            Some(deadline),
+        )?;
         // The same bounded acquisition cadence used during recording. This is
         // polling until explicit observations/deadline, not a guessed tail delay.
         let remaining = deadline.saturating_duration_since(Instant::now());
         std::thread::park_timeout(remaining.min(Duration::from_millis(5)));
     }
     Ok(())
+}
+
+fn write_marker(
+    store: &mut Store,
+    pending: &mut Vec<RecordedSample>,
+    status: &Arc<Mutex<RecordingStatus>>,
+    marker_index: Option<usize>,
+    marker: serde_json::Value,
+) -> Result<f64> {
+    let stream = marker_index.context("This recording has no study marker stream")?;
+    let value = serde_json::to_string(&marker)?;
+    ensure!(value.len() <= 64 * 1024, "Marker exceeds 64 KiB");
+    let timestamp = lsl::local_clock();
+    pending.push(RecordedSample {
+        stream,
+        timestamp,
+        received: timestamp,
+        data: SampleData::String(vec![value]),
+    });
+    commit(store, pending, status)?;
+    Ok(timestamp)
 }

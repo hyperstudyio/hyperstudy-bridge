@@ -369,6 +369,7 @@ fn completed_file_retains_timed_out_source_boundary_evidence() {
         requested_lsl: 100.,
         drain_finished_lsl: 101.,
         drain_elapsed_ms: 1000,
+        unmapped_streams: vec![],
         streams: vec![StreamEndReport {
             stream_uid: "u".into(),
             source_timestamp: 99.,
@@ -427,4 +428,148 @@ fn unreliable_clock_waits_until_the_explicit_deadline() {
     let reports = boundary::reports(&evidence, &signal.request, true);
     assert_eq!(reports[0].outcome, "unreliable_timestamps");
     assert_eq!(store.committed, 0);
+}
+
+#[test]
+fn study_context_requires_complete_identity_and_ignores_label_for_ownership() {
+    let mut context = RecordingContext::default();
+    assert!(super::study::validate_context(&context).is_err());
+    context.experiment_id = Some("experiment".into());
+    context.room_id = Some("room".into());
+    context.participant_id = Some("participant".into());
+    context.session_id = Some("session".into());
+    assert!(super::study::validate_context(&context).is_ok());
+    let mut other = context.clone();
+    other.label = Some("new label".into());
+    assert!(super::study::same_context(&context, &other));
+    other.participant_id = Some("different".into());
+    assert!(!super::study::same_context(&context, &other));
+}
+#[test]
+fn study_manifest_rejects_unfinalized_and_hashes_exact_file() {
+    let p = path();
+    let context = RecordingContext {
+        experiment_id: Some("experiment".into()),
+        room_id: Some("room".into()),
+        participant_id: Some("participant".into()),
+        session_id: Some("session".into()),
+        label: None,
+    };
+    let store = Store::create(&p, &context, &[descriptor()]).unwrap();
+    assert!(super::upload::manifest(&p, "recording").is_err());
+    store.finish(&p, "completed").unwrap();
+    let manifest = super::upload::manifest(&p, "recording").unwrap();
+    assert_eq!(manifest["fileSize"], std::fs::metadata(&p).unwrap().len());
+    assert_eq!(manifest["participantId"], "participant");
+    assert_eq!(manifest["sampleCount"], 0);
+    assert_eq!(manifest["sha256"].as_str().unwrap().len(), 64);
+}
+#[test]
+fn upload_targets_are_exact_trusted_hosts() {
+    use super::upload::{validate_api_base, validate_upload_url};
+    assert!(validate_api_base("https://dev.hyperstudy.io").is_ok());
+    assert!(validate_api_base("https://dev.hyperstudy.io.evil.test").is_err());
+    assert!(validate_api_base("https://user:pass@dev.hyperstudy.io").is_err());
+    assert!(validate_api_base("https://dev.hyperstudy.io/path").is_err());
+    assert!(
+        validate_upload_url("https://storage.googleapis.com/bucket/object?signature=value").is_ok()
+    );
+    assert!(validate_upload_url("https://storage.googleapis.com.evil.test/bucket").is_err());
+    assert!(validate_upload_url("http://storage.googleapis.com/bucket").is_err());
+}
+
+#[test]
+fn study_ready_attach_markers_scoped_stop_and_final_manifest() {
+    let name = format!("HyperStudy-study-test-{}", uuid::Uuid::new_v4());
+    let info =
+        lsl::StreamInfo::new(&name, "Test", 1, 0., lsl::ChannelFormat::String, &name).unwrap();
+    let outlet = lsl::StreamOutlet::new(&info, 0, 60).unwrap();
+    let uid = outlet.info().unwrap().uid();
+    let manager = RecordingManager::default();
+    let dir = std::env::temp_dir().join(&name);
+    manager.configure_study_directory(dir).unwrap();
+    let context = RecordingContext {
+        experiment_id: Some("e".into()),
+        room_id: Some("r".into()),
+        participant_id: Some("p".into()),
+        session_id: Some("s".into()),
+        label: None,
+    };
+    let started = manager
+        .start_study(super::study::StudyStartRequest {
+            stream_uids: vec![uid.clone()],
+            context: context.clone(),
+        })
+        .unwrap();
+    assert_eq!(started.recording.state, "recording");
+    assert_eq!(started.recording.streams, 2);
+    assert!(manager
+        .stop_unmanaged(RecordingStopRequest::default())
+        .is_err());
+    let attached = manager
+        .start_study(super::study::StudyStartRequest {
+            stream_uids: vec![uid.clone()],
+            context: context.clone(),
+        })
+        .unwrap();
+    assert_eq!(attached.recording_id, started.recording_id);
+    let mut wrong = context.clone();
+    wrong.room_id = Some("another-room".into());
+    assert!(manager
+        .start_study(super::study::StudyStartRequest {
+            stream_uids: vec![uid],
+            context: wrong.clone()
+        })
+        .is_err());
+    assert!(manager
+        .stop_study(super::study::StudyScope {
+            recording_id: started.recording_id.clone(),
+            context: wrong,
+            end_marker: None
+        })
+        .is_err());
+    let ack = manager
+        .study_marker(
+            &started.recording_id,
+            &context,
+            serde_json::json!({"eventType":"experiment.start"}),
+        )
+        .unwrap();
+    assert!(ack["marker_lsl_timestamp"].as_f64().unwrap().is_finite());
+    let stopped = manager
+        .stop_study(super::study::StudyScope {
+            recording_id: started.recording_id.clone(),
+            context: context.clone(),
+            end_marker: Some(serde_json::json!({"eventType":"experiment.end"})),
+        })
+        .unwrap();
+    assert_eq!(stopped.recording.state, "completed");
+    assert_eq!(stopped.recording.committed_samples, 2);
+    assert_eq!(
+        stopped
+            .recording
+            .end_report
+            .as_ref()
+            .unwrap()
+            .acquisition_coverage,
+        "unverified"
+    );
+    let duplicate = manager
+        .stop_study(super::study::StudyScope {
+            recording_id: started.recording_id.clone(),
+            context,
+            end_marker: Some(serde_json::json!({"eventType":"experiment.end"})),
+        })
+        .unwrap();
+    assert_eq!(duplicate.recording.committed_samples, 2);
+    let manifest = super::upload::manifest(
+        &manager.study_path(&started.recording_id).unwrap(),
+        &started.recording_id,
+    )
+    .unwrap();
+    assert_eq!(manifest["sampleCount"], 2);
+    assert_eq!(
+        manifest["streams"][1]["source_id"],
+        "hyperstudy-bridge-study"
+    );
 }

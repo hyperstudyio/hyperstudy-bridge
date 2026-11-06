@@ -22,6 +22,8 @@ pub struct RecordingEndReport {
     pub drain_finished_lsl: f64,
     pub drain_elapsed_ms: u64,
     pub streams: Vec<StreamEndReport>,
+    #[serde(default)]
+    pub unmapped_streams: Vec<String>,
 }
 
 pub(super) struct StreamEvidence {
