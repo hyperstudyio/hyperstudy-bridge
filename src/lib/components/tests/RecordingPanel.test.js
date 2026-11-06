@@ -36,4 +36,15 @@ describe('RecordingPanel', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Disk full');
     expect(screen.getByText('120 samples saved')).toBeInTheDocument();
   });
+  it('distinguishes a finalized file from an unverified source tail', async () => {
+    invoke.mockResolvedValue({ state: 'completed', committed_samples: 120, path: '/tmp/a.sqlite', error: null,
+      end_report: { acquisition_coverage: 'unverified', streams: [
+        { stream_uid: 'raw-1', outcome: 'timed_out' },
+      ] },
+    });
+    render(RecordingPanel, { isOpen: true });
+    expect(await screen.findByText(/Acquisition coverage is unverified/)).toBeInTheDocument();
+    expect(screen.getByText(/raw-1: timed_out/)).toBeInTheDocument();
+  });
+
 });

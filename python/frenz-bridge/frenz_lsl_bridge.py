@@ -8,7 +8,7 @@ import tempfile
 import threading
 import time
 import uuid
-from frenz_streams import STREAMS, StreamPublisher
+from frenz_streams import STREAMS, StreamPublisher, measure_clock_pair, timing_metadata
 
 shutdown_event = threading.Event()
 protocol_output = sys.stdout
@@ -26,17 +26,17 @@ def stdin_listener():
     shutdown_event.set()
 
 
-def create_outlets(device_id, session_id, wall_to_lsl):
+def create_outlets(device_id, session_id, clock_pair):
     import pylsl
     outlets = {}
     for suffix, store, key, channels, rate, fmt, policy in STREAMS:
         info = pylsl.StreamInfo(device_id + suffix, 'Markers' if fmt == 'string' else 'Biosignals',
                                channels, rate, fmt, f'frenz-{device_id}-{session_id}{suffix}')
         desc = info.desc()
-        for name, value in {'schema_version':'2', 'manufacturer':'Earable', 'device_id':device_id,
+        for name, value in {'schema_version':'3', 'manufacturer':'Earable', 'device_id':device_id,
                             'sdk_version':'0.3.2', 'sdk_store':store, 'sdk_key':key,
                             'timestamp_policy':policy, 'session_id':session_id,
-                            'source_unix_to_lsl_offset':repr(wall_to_lsl),
+                            **timing_metadata(store, policy, clock_pair),
                             'source_timestamp_column':'0' if store in ('raw','firmware') else 'none',
                             'sample_order':'SDK array index; never timestamp deduplication'}.items():
             desc.append_child_value(name, value)
@@ -95,9 +95,10 @@ def main():
                             data_folder='vendor-native', turn_off_light=False)
         product_key = None
         session_id = str(uuid.uuid4())
-        wall_to_lsl = pylsl.local_clock() - time.time()
+        clock_pair = measure_clock_pair(pylsl.local_clock, time.time)
+        wall_to_lsl = clock_pair['offset_seconds']
         phase = "creating_streams"
-        outlets = create_outlets(device_id, session_id, wall_to_lsl)
+        outlets = create_outlets(device_id, session_id, clock_pair)
         phase = "connecting_bluetooth"
         streamer.start()
         publisher = StreamPublisher()
@@ -124,12 +125,14 @@ def main():
             has_eeg = publisher.cursors.get('_EEG_raw', 0) > 0
             if not streaming and has_eeg:
                 streaming = True
-                emit({'status':'streaming','streams':list(outlets), 'sample_count':publisher.sample_count})
+                emit({'status':'streaming','streams':list(outlets), 'sample_count':publisher.sample_count,
+                      'timing':publisher.timing_status(), 'clock_pair':clock_pair})
             if (not streaming and now - started > 30) or (streaming and now - last_sample > 15):
                 raise TimeoutError('No new FRENZ samples received')
             if streaming and now - last_report >= 5:
                 emit({'status':'streaming','streams':list(outlets),'sample_count':publisher.sample_count,
-                      'stream_sample_counts':publisher.cursors})
+                      'stream_sample_counts':publisher.cursors,
+                      'timing':publisher.timing_status(), 'clock_pair':clock_pair})
                 last_report = now
             # Polling cadence for an SDK without a callback API, not a startup delay.
             shutdown_event.wait(.02)

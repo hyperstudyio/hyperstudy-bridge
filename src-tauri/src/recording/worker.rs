@@ -1,3 +1,4 @@
+use super::boundary::{observations_satisfied, reports, StreamEvidence};
 use super::*;
 use anyhow::{bail, Context};
 use lsl::Pullable;
@@ -66,11 +67,11 @@ fn commit(
 pub fn record(
     request: RecordingRequest,
     path: &Path,
-    stop: mpsc::Receiver<()>,
+    stop: mpsc::Receiver<StopSignal>,
     status: Arc<Mutex<RecordingStatus>>,
 ) -> Result<()> {
     let available = lsl::resolve_streams(1.)?;
-    let mut inlets = Vec::new();
+    let mut inlets = Inlets(Vec::new());
     let mut specs = Vec::new();
     for uid in &request.stream_uids {
         if stop.try_recv().is_ok() {
@@ -94,23 +95,27 @@ pub fn record(
     }
     let mut store = Store::create(path, &request.context, &specs)?;
     status.lock().unwrap().state = "recording".into();
+    let mut evidence: Vec<_> = specs.iter().cloned().map(StreamEvidence::new).collect();
     let mut pending = Vec::with_capacity(4096);
     let mut flush = Instant::now() + Duration::from_millis(100);
     let mut clocks = Instant::now();
-    loop {
-        if stop.try_recv().is_ok() {
-            break;
+    let signal = loop {
+        if let Ok(signal) = stop.try_recv() {
+            break signal;
         }
         for (id, inlet) in inlets.iter().enumerate() {
             // Bound per-stream work so busy streams cannot starve peers or stop.
             for _ in 0..512 {
                 match pull(inlet, &specs[id].format) {
-                    Ok(Some((data, timestamp))) => pending.push(RecordedSample {
-                        stream: id,
-                        data,
-                        timestamp,
-                        received: lsl::local_clock(),
-                    }),
+                    Ok(Some((data, timestamp))) => {
+                        evidence[id].observe(timestamp);
+                        pending.push(RecordedSample {
+                            stream: id,
+                            data,
+                            timestamp,
+                            received: lsl::local_clock(),
+                        });
+                    }
                     Ok(None) => break,
                     Err(error) => {
                         commit(&mut store, &mut pending, &status)?;
@@ -158,13 +163,57 @@ pub fn record(
         }
         // Interruptible acquisition polling cadence; no synchronization sleeps.
         match stop.recv_timeout(Duration::from_millis(5)) {
-            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(signal) => break signal,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break StopSignal::new(RecordingStopRequest::default())
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-    }
+    };
     status.lock().unwrap().state = "stopping".into();
-    drain_at_stop(&inlets, &specs, &mut store, &mut pending, &status)?;
+    drain_to_boundaries(
+        &inlets,
+        &specs,
+        &mut store,
+        &mut pending,
+        &status,
+        &mut evidence,
+        &signal,
+    )?;
+    drain_at_stop(
+        &inlets,
+        &specs,
+        &mut store,
+        &mut pending,
+        &status,
+        &mut evidence,
+    )?;
+    let report = RecordingEndReport {
+        acquisition_coverage: if signal.request.boundaries.is_empty() {
+            "not_requested"
+        } else {
+            "unverified"
+        }
+        .into(),
+        requested_lsl: signal.requested_lsl,
+        drain_finished_lsl: lsl::local_clock(),
+        drain_elapsed_ms: signal.started.elapsed().as_millis() as u64,
+        streams: reports(&evidence, &signal.request, true),
+    };
+    store.save_end_report(&report)?;
+    status.lock().unwrap().end_report = Some(report);
+    let finalization_started = Instant::now();
     store.finish(path, "completed")?;
+    let finalization_ms = finalization_started.elapsed().as_millis();
+    let teardown_started = Instant::now();
+    // All native reads are finished before cancellation. Cancel every receiver
+    // before dropping any handle, so teardown is not serialized per stream.
+    drop(inlets);
+    tracing::info!(
+        finalization_ms,
+        inlet_teardown_ms = teardown_started.elapsed().as_millis(),
+        "Recording file finalized and native inlets closed"
+    );
     status.lock().unwrap().state = "completed".into();
     Ok(())
 }
@@ -177,12 +226,14 @@ pub(super) fn drain_at_stop(
     store: &mut Store,
     pending: &mut Vec<RecordedSample>,
     status: &Arc<Mutex<RecordingStatus>>,
+    evidence: &mut [StreamEvidence],
 ) -> Result<()> {
     let counts: Vec<_> = inlets.iter().map(|i| i.samples_available()).collect();
     for (id, count) in counts.into_iter().enumerate() {
         for _ in 0..count {
             let (data, timestamp) = pull(&inlets[id], &specs[id].format)?
                 .context("Inlet backlog disappeared during stop")?;
+            evidence[id].observe(timestamp);
             pending.push(RecordedSample {
                 stream: id,
                 data,
@@ -195,4 +246,54 @@ pub(super) fn drain_at_stop(
         }
     }
     commit(store, pending, status)
+}
+
+// Cancellation is nonblocking in liblsl. Keep the native handles on their owner
+// thread; StreamInlet deliberately does not implement Send or Sync.
+struct Inlets(Vec<lsl::StreamInlet>);
+impl std::ops::Deref for Inlets {
+    type Target = Vec<lsl::StreamInlet>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for Inlets {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Drop for Inlets {
+    fn drop(&mut self) {
+        for inlet in &self.0 {
+            inlet.close_stream();
+        }
+    }
+}
+
+pub(super) fn drain_to_boundaries(
+    inlets: &[lsl::StreamInlet],
+    specs: &[StreamDescriptor],
+    store: &mut Store,
+    pending: &mut Vec<RecordedSample>,
+    status: &Arc<Mutex<RecordingStatus>>,
+    evidence: &mut [StreamEvidence],
+    signal: &StopSignal,
+) -> Result<()> {
+    if signal.request.boundaries.is_empty() {
+        return Ok(());
+    }
+    let deadline = signal.started + Duration::from_millis(signal.request.timeout_ms);
+    loop {
+        if Instant::now() >= deadline
+            || observations_satisfied(&reports(evidence, &signal.request, false))
+        {
+            break;
+        }
+        drain_at_stop(inlets, specs, store, pending, status, evidence)?;
+        // The same bounded acquisition cadence used during recording. This is
+        // polling until explicit observations/deadline, not a guessed tail delay.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        std::thread::park_timeout(remaining.min(Duration::from_millis(5)));
+    }
+    Ok(())
 }

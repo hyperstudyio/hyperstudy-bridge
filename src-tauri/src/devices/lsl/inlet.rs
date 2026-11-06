@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -26,8 +26,6 @@ enum InletCommand {
         timeout: f64,
         response: ResponseSender<Result<(), LslError>>,
     },
-    /// Close the stream connection
-    CloseStream,
     /// Pull a single sample with timeout
     PullSample {
         timeout: f64,
@@ -71,8 +69,8 @@ pub struct StreamInlet {
     stream_uid: String,
     /// Time correction offset
     time_correction: Arc<RwLock<f64>>,
-    /// Thread join handle (wrapped in Option for Drop)
-    _thread_handle: Option<thread::JoinHandle<()>>,
+    /// Serialize close calls until the native inlet and its workers are destroyed.
+    thread_handle: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 // Manual Debug implementation since thread::JoinHandle doesn't implement Debug
@@ -241,16 +239,13 @@ impl StreamInlet {
                     break;
                 }
 
-                // Use recv_timeout to allow periodic shutdown flag checks
-                match command_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                // Shutdown sends a command, so an idle worker needs no polling delay.
+                match command_rx.recv() {
                     Ok(InletCommand::OpenStream { timeout, response }) => {
                         let result = lsl_inlet.open_stream(timeout).map_err(|e| {
                             LslError::LslLibraryError(format!("Open failed: {:?}", e))
                         });
                         let _ = response.send(result);
-                    }
-                    Ok(InletCommand::CloseStream) => {
-                        lsl_inlet.close_stream();
                     }
                     Ok(InletCommand::PullSample { timeout, response }) => {
                         let result = Self::pull_sample_from_lsl(
@@ -275,11 +270,7 @@ impl StreamInlet {
                         lsl_inlet.close_stream();
                         break;
                     }
-                    Err(std_mpsc::RecvTimeoutError::Timeout) => {
-                        // Normal timeout, continue loop to check shutdown flag
-                        continue;
-                    }
-                    Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                    Err(std_mpsc::RecvError) => {
                         info!(
                             device = "lsl",
                             "LSL inlet command channel closed: {}", thread_info.name
@@ -305,7 +296,7 @@ impl StreamInlet {
             last_receive_time: Arc::new(RwLock::new(None)),
             stream_uid: discovered_stream.uid,
             time_correction: Arc::new(RwLock::new(0.0)),
-            _thread_handle: Some(thread_handle),
+            thread_handle: Mutex::new(Some(thread_handle)),
         };
 
         debug!(device = "lsl", "LSL inlet created successfully");
@@ -409,6 +400,12 @@ impl StreamInlet {
 
     /// Open the inlet connection
     pub async fn open(&self, timeout: Duration) -> Result<(), LslError> {
+        if self.shutdown_flag.load(Ordering::Relaxed) {
+            return Err(LslError::LslLibraryError(
+                "Inlet has been closed; create a new inlet".into(),
+            ));
+        }
+        let started = Instant::now();
         if self.active.load(Ordering::Relaxed) {
             warn!(device = "lsl", "Inlet already open");
             return Ok(());
@@ -459,39 +456,42 @@ impl StreamInlet {
             }
         }
 
+        let open_elapsed = started.elapsed();
+        // Clock correction uses LSL's time service, even for an idle marker stream.
+        // Never label timestamps as corrected when the initial estimate failed.
+        let correction = self.calculate_time_correction().await?;
+        *self.time_correction.write().await = correction;
         self.active.store(true, Ordering::Relaxed);
+        self.status.write().await.active = true;
 
-        let mut status = self.status.write().await;
-        status.active = true;
-
-        // Get initial time correction
-        if let Ok(correction) = self.calculate_time_correction().await {
-            let mut time_correction = self.time_correction.write().await;
-            *time_correction = correction;
-        }
-
-        info!(device = "lsl", "LSL inlet opened successfully");
+        info!(device = "lsl", stream = %self.info.name,
+            open_ms = open_elapsed.as_millis() as u64,
+            correction_ms = started.elapsed().saturating_sub(open_elapsed).as_millis() as u64,
+            "LSL inlet opened successfully");
         Ok(())
     }
 
-    /// Close the inlet connection
+    /// Permanently close the inlet and wait for native resources to be released.
     pub async fn close(&self) -> Result<(), LslError> {
-        if !self.active.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-
-        info!(device = "lsl", "Closing LSL inlet: {}", self.info.name);
-
-        // Set shutdown flag and send close command
+        let started = Instant::now();
         self.shutdown_flag.store(true, Ordering::Relaxed);
-        let _ = self.command_tx.send(InletCommand::CloseStream);
-
         self.active.store(false, Ordering::Relaxed);
+        let _ = self.command_tx.send(InletCommand::Shutdown);
+        self.status.write().await.active = false;
 
-        let mut status = self.status.write().await;
-        status.active = false;
-
-        info!(device = "lsl", "LSL inlet closed");
+        // Also close failed/partially opened inlets. Keep this lock until join
+        // completes so simultaneous callers cannot report premature completion.
+        let mut handle = self.thread_handle.lock().await;
+        if let Some(thread) = handle.take() {
+            tokio::task::spawn_blocking(move || thread.join())
+                .await
+                .map_err(|e| LslError::LslLibraryError(format!("Inlet cleanup task failed: {e}")))?
+                .map_err(|_| {
+                    LslError::LslLibraryError("Inlet worker panicked during cleanup".into())
+                })?;
+        }
+        info!(device = "lsl", stream = %self.info.name,
+            elapsed_ms = started.elapsed().as_millis() as u64, "LSL inlet closed");
         Ok(())
     }
 
@@ -721,7 +721,7 @@ impl StreamInlet {
 
 impl Drop for StreamInlet {
     fn drop(&mut self) {
-        // Signal shutdown via flag (thread will see this within 100ms)
+        // Best-effort shutdown on drop; normal remove/close awaits native destruction.
         self.shutdown_flag.store(true, Ordering::Relaxed);
         // Also send shutdown command for immediate response
         let _ = self.command_tx.send(InletCommand::Shutdown);
@@ -883,6 +883,81 @@ mod tests {
             data_loss: 0.0,
             time_stamps: (),
         }
+    }
+
+    fn inlet_with_worker(
+        worker: impl FnOnce(std_mpsc::Receiver<InletCommand>) + Send + 'static,
+    ) -> StreamInlet {
+        let (command_tx, command_rx) = std_mpsc::channel();
+        StreamInlet {
+            info: StreamInfo::ttl_markers("test"),
+            status: Arc::new(RwLock::new(StreamStatus::default())),
+            time_sync: Arc::new(TimeSync::new(false)),
+            buffer: Arc::new(RwLock::new(VecDeque::new())),
+            buffer_limit: 1,
+            active: Arc::new(AtomicBool::new(false)),
+            sample_count: Arc::new(AtomicU64::new(0)),
+            command_tx,
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
+            bytes_received: Arc::new(AtomicU64::new(0)),
+            last_receive_time: Arc::new(RwLock::new(None)),
+            stream_uid: "unit-test".into(),
+            time_correction: Arc::new(RwLock::new(0.0)),
+            thread_handle: Mutex::new(Some(thread::spawn(move || worker(command_rx)))),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_requires_initial_clock_correction() {
+        let inlet = inlet_with_worker(|commands| {
+            while let Ok(command) = commands.recv() {
+                match command {
+                    InletCommand::OpenStream { response, .. } => {
+                        response.send(Ok(())).unwrap();
+                    }
+                    InletCommand::TimeCorrection { response, .. } => {
+                        response
+                            .send(Err(LslError::LslLibraryError("clock unavailable".into())))
+                            .unwrap();
+                    }
+                    _ => break,
+                }
+            }
+        });
+        let result = inlet.open(Duration::from_secs(1)).await;
+        assert!(
+            result.is_err(),
+            "An uncorrected timestamp must not silently be accepted"
+        );
+        assert!(!inlet.is_active());
+    }
+
+    #[tokio::test]
+    async fn close_waits_for_native_worker_destruction() {
+        let (stopping_tx, stopping_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let destroyed = Arc::new(AtomicBool::new(false));
+        let worker_destroyed = destroyed.clone();
+        let inlet = inlet_with_worker(move |commands| {
+            let _ = commands.recv();
+            let _ = stopping_tx.send(());
+            let _ = release_rx.recv();
+            worker_destroyed.store(true, Ordering::SeqCst);
+        });
+        inlet.active.store(true, Ordering::Relaxed);
+        let close = inlet.close();
+        tokio::pin!(close);
+        tokio::select! {
+            result = &mut close => {
+                let _ = release_tx.send(());
+                panic!("close returned before worker destruction: {:?}", result);
+            }
+            _ = stopping_rx => {}
+        }
+        assert!(!destroyed.load(Ordering::SeqCst));
+        release_tx.send(()).unwrap();
+        close.await.unwrap();
+        assert!(destroyed.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

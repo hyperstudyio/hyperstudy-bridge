@@ -50,7 +50,7 @@ impl Store {
             PRAGMA user_version=1;
             CREATE TABLE recording (id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL,
                 context_json TEXT NOT NULL, committed_samples INTEGER NOT NULL DEFAULT 0,
-                started_utc TEXT NOT NULL, ended_utc TEXT, error TEXT);
+                started_utc TEXT NOT NULL, ended_utc TEXT, error TEXT, end_report_json TEXT);
             CREATE TABLE streams (id INTEGER PRIMARY KEY, metadata_json TEXT NOT NULL);
             CREATE TABLE blocks (id INTEGER PRIMARY KEY, stream_id INTEGER NOT NULL REFERENCES streams(id),
                 first_sequence INTEGER NOT NULL, sample_count INTEGER NOT NULL,
@@ -139,6 +139,14 @@ impl Store {
         self.committed = committed;
         self.sequences = next;
         Ok(committed)
+    }
+
+    pub fn save_end_report(&self, report: &super::RecordingEndReport) -> Result<()> {
+        self.db.execute(
+            "UPDATE recording SET end_report_json=? WHERE id=1",
+            [serde_json::to_string(report)?],
+        )?;
+        Ok(())
     }
 
     pub fn finish(self, path: &Path, state: &str) -> Result<()> {

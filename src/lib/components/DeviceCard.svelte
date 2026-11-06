@@ -28,10 +28,17 @@
   // FRENZ bridge process status
   let frenzBridgeAvailable = $state(false);
   let frenzBridgeStatus = $state({ state: 'stopped', streams: [], sample_count: 0 });
+  let frenzTimingAnomaly = $derived(
+    Object.entries(frenzBridgeStatus.timing || {}).some(([suffix, timing]) =>
+      timing.backward_count > 0 || timing.nonfinite_count > 0 ||
+      (suffix.endsWith('_raw') && timing.cadence_deviation_count > 0)
+    )
+  );
   let unlistenFrenzStatus = null;
 
   // FRENZ unified connect progress
   let frenzConnecting = $state(false);
+  let frenzDisconnecting = $state(false);
   let frenzPhaseText = $state('');
 
   // General device connect progress
@@ -228,7 +235,6 @@
       try {
         const result = await bridgeStore.connectDevice(deviceId, deviceConfig);
         console.log(`Successfully connected ${deviceName}`, result);
-        alert(`Connected to ${deviceName}`);
       } catch (error) {
         console.error(`Failed to connect ${deviceName}:`, error);
         alert(`Failed to connect: ${error.message || error}`);
@@ -242,7 +248,6 @@
       try {
         await bridgeStore.disconnectDevice(deviceId);
         console.log(`Successfully disconnected ${deviceName}`);
-        alert(`Disconnected from ${deviceName}`);
       } catch (error) {
         console.error(`Failed to disconnect ${deviceName}:`, error);
         alert(`Failed to disconnect: ${error.message || error}`);
@@ -258,7 +263,6 @@
     try {
       const result = await bridgeStore.connectEyeLink(device.config);
       console.log('Successfully connected EyeLink', result);
-      alert('Connected to EyeLink 1000 Plus');
     } catch (error) {
       console.error('Failed to connect EyeLink:', error);
       alert(`Failed to connect: ${error.message || error}`);
@@ -273,7 +277,6 @@
     try {
       await bridgeStore.disconnectEyeLink();
       console.log('Successfully disconnected EyeLink');
-      alert('Disconnected from EyeLink 1000 Plus');
     } catch (error) {
       console.error('Failed to disconnect EyeLink:', error);
       alert(`Failed to disconnect: ${error.message || error}`);
@@ -312,7 +315,6 @@
       frenzPhaseText = 'Connecting to data streams...';
       await bridgeStore.connectDevice('frenz', { ...device.config, device_name: frenzDeviceId });
 
-      alert('Connected to FRENZ');
     } catch (error) {
       alert(`Failed to connect: ${error.message || error}`);
     } finally {
@@ -357,11 +359,15 @@
 
   // FRENZ disconnect: LSL streams + bridge process
   async function handleFrenzDisconnect() {
+    if (frenzDisconnecting) return;
+    frenzDisconnecting = true;
     try {
       await bridgeStore.disconnectDevice('frenz');
-      alert('Disconnected from FRENZ');
+      frenzBridgeStatus = await getFrenzBridgeStatus();
     } catch (error) {
       alert(`Failed to disconnect: ${error.message || error}`);
+    } finally {
+      frenzDisconnecting = false;
     }
   }
 
@@ -604,6 +610,12 @@
             <span class="label">Samples:</span>
             <span class="value">{frenzBridgeStatus.sample_count.toLocaleString()}</span>
           </div>
+          <div class="config-row">
+            <span class="label">Timestamp quality:</span>
+            <span class="value" style:color={frenzTimingAnomaly ? 'var(--color-warning)' : undefined}>
+              {frenzTimingAnomaly ? 'Source timestamp discontinuities detected' : 'Acquisition alignment unverified'}
+            </span>
+          </div>
         {/if}
       {:else if !frenzBridgeAvailable && frenzBridgeStatus.state !== 'stopped'}
         <div class="config-row">
@@ -648,9 +660,10 @@
       disabled={device.status === 'connecting' ||
         isConnecting ||
         frenzConnecting ||
+        frenzDisconnecting ||
         (device.id === 'ttl' && !device.config.port)}
     >
-      {device.status === 'connected'
+      {frenzDisconnecting ? 'Disconnecting...' : device.status === 'connected'
         ? 'Disconnect'
         : isConnecting || frenzConnecting
           ? 'Connecting...'

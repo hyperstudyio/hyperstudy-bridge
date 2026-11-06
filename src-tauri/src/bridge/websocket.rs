@@ -644,15 +644,23 @@ async fn handle_device_command(
                     return;
                 }
 
-                let requested = config.get("device_name").and_then(|v|v.as_str());
+                let requested = config.get("device_name").and_then(|v| v.as_str());
                 let selected = match requested {
-                    Some(name) => devices.iter().find(|d|d.device_name == name),
+                    Some(name) => devices.iter().find(|d| d.device_name == name),
                     None if devices.len() == 1 => devices.first(),
                     _ => None,
                 };
                 let Some(selected) = selected else {
-                    send_response(tx, BridgeResponse::device_error("frenz".into(),
-                        "Select the intended FRENZ device; no unique matching device was found".into(),id)).await;
+                    send_response(
+                        tx,
+                        BridgeResponse::device_error(
+                            "frenz".into(),
+                            "Select the intended FRENZ device; no unique matching device was found"
+                                .into(),
+                            id,
+                        ),
+                    )
+                    .await;
                     return;
                 };
                 let device_name = &selected.device_name;
@@ -1011,18 +1019,33 @@ async fn handle_device_command(
             // FRENZ: disconnect all LSL streams and stop the bridge process
             if device_id == "frenz" {
                 info!("FRENZ disconnect: disconnecting all streams and stopping bridge");
-                let _ = state.frenz_manager.disconnect_all().await;
-                let _ = state.frenz_process.stop().await;
-
-                send_response(
-                    tx,
+                let (streams, process) = tokio::join!(
+                    state.frenz_manager.disconnect_all(),
+                    state.frenz_process.stop()
+                );
+                let errors: Vec<String> = [streams.err().map(|e| e.to_string()), process.err()]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                let response = if errors.is_empty() {
+                    state.broadcast_device_status(DeviceStatusEvent::disconnected(
+                        "frenz".into(),
+                        crate::devices::DeviceType::LSL,
+                        "FRENZ disconnected",
+                    ));
                     BridgeResponse::status(
                         device_id,
                         crate::devices::DeviceStatus::Disconnected,
                         id,
-                    ),
-                )
-                .await;
+                    )
+                } else {
+                    BridgeResponse::device_error(
+                        device_id,
+                        format!("FRENZ cleanup failed: {}", errors.join("; ")),
+                        id,
+                    )
+                };
+                send_response(tx, response).await;
                 return;
             }
 
@@ -1899,26 +1922,47 @@ async fn handle_device_command(
         // ====================================================================
         // FRENZ Brainband LSL handlers
         // ====================================================================
-        CommandAction::DiscoverRecordingStreams | CommandAction::StartLslRecording |
-        CommandAction::StopLslRecording | CommandAction::LslRecordingStatus => {
+        CommandAction::DiscoverRecordingStreams
+        | CommandAction::StartLslRecording
+        | CommandAction::StopLslRecording
+        | CommandAction::LslRecordingStatus => {
             let manager = state.recording.clone();
-            let result = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
-                match action {
-                    CommandAction::DiscoverRecordingStreams => Ok(serde_json::to_value(crate::recording::discover()?)?),
-                    CommandAction::StartLslRecording => {
-                        let request = serde_json::from_value(payload.ok_or_else(|| anyhow::anyhow!("Missing recording request"))?)?;
-                        Ok(serde_json::to_value(manager.start(request)?)?)
-                    },
-                    CommandAction::StopLslRecording => Ok(serde_json::to_value(manager.stop()?)?),
-                    _ => Ok(serde_json::to_value(manager.status())?),
-                }
-            }).await;
+            let result =
+                tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+                    match action {
+                        CommandAction::DiscoverRecordingStreams => {
+                            Ok(serde_json::to_value(crate::recording::discover()?)?)
+                        }
+                        CommandAction::StartLslRecording => {
+                            let request =
+                                serde_json::from_value(payload.ok_or_else(|| {
+                                    anyhow::anyhow!("Missing recording request")
+                                })?)?;
+                            Ok(serde_json::to_value(manager.start(request)?)?)
+                        }
+                        CommandAction::StopLslRecording => {
+                            let request = match payload {
+                                Some(value) if !value.is_null() => serde_json::from_value(value)?,
+                                _ => crate::recording::RecordingStopRequest::default(),
+                            };
+                            Ok(serde_json::to_value(manager.stop_with(request)?)?)
+                        }
+                        _ => Ok(serde_json::to_value(manager.status())?),
+                    }
+                })
+                .await;
             let response = match result {
                 Ok(Ok(value)) => BridgeResponse::data("recording".into(), value, id),
-                Ok(Err(error)) => BridgeResponse::device_error("recording".into(),error.to_string(),id),
-                Err(_) => BridgeResponse::device_error("recording".into(),"Recording command failed".into(),id),
+                Ok(Err(error)) => {
+                    BridgeResponse::device_error("recording".into(), error.to_string(), id)
+                }
+                Err(_) => BridgeResponse::device_error(
+                    "recording".into(),
+                    "Recording command failed".into(),
+                    id,
+                ),
             };
-            send_response(tx,response).await;
+            send_response(tx, response).await;
         }
         CommandAction::DiscoverFrenz => {
             info!("Discovering FRENZ devices via LSL");
@@ -2095,56 +2139,41 @@ async fn handle_device_command(
                 .and_then(|p| p.get("device_name"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-
-            if device_name.is_empty() {
-                // Disconnect all FRENZ streams
-                info!("Disconnecting all FRENZ streams");
-                let _ = state.frenz_manager.disconnect_all().await;
-
-                send_response(
-                    tx,
-                    BridgeResponse::data(
-                        "frenz_lsl".to_string(),
-                        json!({ "success": true, "message": "Disconnected all FRENZ streams" }),
-                        id,
-                    ),
-                )
-                .await;
+            let suffix = payload
+                .as_ref()
+                .and_then(|p| p.get("stream"))
+                .and_then(|v| v.as_str());
+            let result = if device_name.is_empty() {
+                state.frenz_manager.disconnect_all().await
+            } else if let Some(suffix) = suffix {
+                state
+                    .frenz_manager
+                    .disconnect_stream(device_name, suffix)
+                    .await
             } else {
-                // Disconnect specific stream if suffix provided, otherwise all for device
-                let suffix = payload
-                    .as_ref()
-                    .and_then(|p| p.get("stream"))
-                    .and_then(|v| v.as_str());
-
-                if let Some(suffix) = suffix {
-                    info!("Disconnecting FRENZ stream: {}{}", device_name, suffix);
-                    let _ = state
-                        .frenz_manager
-                        .disconnect_stream(device_name, suffix)
-                        .await;
-                } else {
-                    // Disconnect all streams for this device
-                    if let Some(device) = state.frenz_manager.get_device(device_name).await {
-                        for suffix in device.streams.keys() {
-                            let _ = state
-                                .frenz_manager
-                                .disconnect_stream(device_name, suffix)
-                                .await;
-                        }
-                    }
+                state.frenz_manager.disconnect_device(device_name).await
+            };
+            let response = match result {
+                Err(error) => {
+                    BridgeResponse::device_error("frenz_lsl".into(), error.to_string(), id)
                 }
-
-                send_response(
-                    tx,
-                    BridgeResponse::status(
-                        format!("frenz_{}", device_name),
-                        crate::devices::DeviceStatus::Disconnected,
-                        id,
-                    ),
-                )
-                .await;
-            }
+                Ok(()) if device_name.is_empty() => BridgeResponse::data(
+                    "frenz_lsl".into(),
+                    json!({"success":true,"message":"Disconnected all FRENZ streams"}),
+                    id,
+                ),
+                Ok(()) if suffix.is_some() => BridgeResponse::data(
+                    "frenz_lsl".into(),
+                    json!({"success":true,"device_name":device_name,"disconnected_stream":suffix}),
+                    id,
+                ),
+                Ok(()) => BridgeResponse::status(
+                    format!("frenz_{}", device_name),
+                    crate::devices::DeviceStatus::Disconnected,
+                    id,
+                ),
+            };
+            send_response(tx, response).await;
         }
         CommandAction::FrenzStatus => {
             let stats = state.frenz_manager.get_stats().await;

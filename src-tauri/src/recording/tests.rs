@@ -244,7 +244,187 @@ fn stopping_drains_the_native_inlet_backlog() {
     let p = path();
     let mut store = Store::create(&p, &RecordingContext::default(), &[descriptor()]).unwrap();
     let status = Arc::new(Mutex::new(RecordingStatus::default()));
-    worker::drain_at_stop(&[inlet], &[descriptor()], &mut store, &mut vec![], &status).unwrap();
+    worker::drain_at_stop(
+        &[inlet],
+        &[descriptor()],
+        &mut store,
+        &mut vec![],
+        &status,
+        &mut [boundary::StreamEvidence::new(descriptor())],
+    )
+    .unwrap();
     assert_eq!(store.committed, 100);
     assert_eq!(status.lock().unwrap().committed_samples, 100);
+}
+
+#[test]
+fn source_regression_cannot_report_a_boundary_as_observed() {
+    let mut evidence = boundary::StreamEvidence::new(descriptor());
+    evidence.observe(10.0);
+    evidence.observe(11.0);
+    evidence.observe(10.5);
+    assert_eq!(evidence.outcome(10.75, false), "unreliable_timestamps");
+}
+
+#[test]
+fn boundary_deadline_reports_missing_tail_without_inventing_samples() {
+    let mut evidence = boundary::StreamEvidence::new(descriptor());
+    evidence.observe(10.0);
+    assert_eq!(evidence.outcome(11.0, false), "pending");
+    assert_eq!(evidence.outcome(11.0, true), "timed_out");
+    assert_eq!(evidence.last_timestamp, Some(10.0));
+}
+
+#[test]
+fn crossing_a_boundary_never_claims_verified_acquisition_coverage() {
+    let mut evidence = boundary::StreamEvidence::new(descriptor());
+    evidence.observe(10.0);
+    evidence.observe(10.008);
+    assert_eq!(evidence.outcome(10.004, false), "observed_unverified");
+}
+
+#[test]
+fn forward_clock_jump_cannot_report_a_boundary_as_observed() {
+    let mut evidence = boundary::StreamEvidence::new(descriptor());
+    evidence.observe(10.0);
+    evidence.observe(11.0);
+    assert_eq!(evidence.outcome(10.5, false), "unreliable_timestamps");
+}
+
+/// Manual performance characterization: no hardware or running Bridge required.
+#[test]
+#[ignore]
+fn characterize_multi_inlet_teardown() {
+    use std::time::Instant;
+    for close_first in [false, true] {
+        let mut outlets = Vec::new();
+        let mut inlets = Vec::new();
+        for _ in 0..24 {
+            let name = format!("HyperStudy-teardown-{}", uuid::Uuid::new_v4());
+            let info =
+                lsl::StreamInfo::new(&name, "Test", 1, 1., lsl::ChannelFormat::Float32, &name)
+                    .unwrap();
+            let outlet = lsl::StreamOutlet::new(&info, 0, 60).unwrap();
+            let resolved = lsl::resolve_byprop("source_id", &name, 1, 5.).unwrap();
+            assert!(!resolved.is_empty(), "Synthetic outlet was not discovered");
+            let inlet = lsl::StreamInlet::new(&resolved[0], 60, 0, false).unwrap();
+            inlet.open_stream(5.).unwrap();
+            inlet.info(5.).unwrap();
+            let _ = inlet.time_correction_ex(0.);
+            outlets.push(outlet);
+            inlets.push(inlet);
+        }
+        let started = Instant::now();
+        if close_first {
+            for inlet in &inlets {
+                inlet.close_stream();
+            }
+        }
+        drop(inlets);
+        eprintln!(
+            "24 inlet teardown close_first={close_first}: {:?}",
+            started.elapsed()
+        );
+        drop(outlets);
+    }
+}
+
+#[test]
+fn repeated_timestamps_do_not_certify_continuity_for_regular_streams() {
+    let mut evidence = boundary::StreamEvidence::new(descriptor());
+    evidence.observe(10.0);
+    evidence.observe(10.0);
+    assert_eq!(evidence.outcome(10.0, false), "unreliable_timestamps");
+}
+
+#[test]
+fn stop_boundary_validation_rejects_unknown_duplicate_and_nonfinite_targets() {
+    let valid = RecordingStopRequest {
+        boundaries: vec![SourceBoundary {
+            stream_uid: "u".into(),
+            source_timestamp: 10.,
+        }],
+        timeout_ms: 100,
+    };
+    assert!(valid.validate(&["u".into()]).is_ok());
+    assert!(valid.validate(&["different".into()]).is_err());
+    let mut duplicate = valid.clone();
+    duplicate.boundaries.push(valid.boundaries[0].clone());
+    assert!(duplicate.validate(&["u".into(), "second".into()]).is_err());
+    let mut nonfinite = valid;
+    nonfinite.boundaries[0].source_timestamp = f64::NAN;
+    assert!(nonfinite.validate(&["u".into()]).is_err());
+    assert!(RecordingStopRequest::default()
+        .validate(&["u".into()])
+        .is_ok());
+    assert!(serde_json::from_str::<RecordingStopRequest>(r#"{"unexpected":1}"#).is_err());
+}
+
+#[test]
+fn completed_file_retains_timed_out_source_boundary_evidence() {
+    let p = path();
+    let store = Store::create(&p, &RecordingContext::default(), &[descriptor()]).unwrap();
+    let report = RecordingEndReport {
+        acquisition_coverage: "unverified".into(),
+        requested_lsl: 100.,
+        drain_finished_lsl: 101.,
+        drain_elapsed_ms: 1000,
+        streams: vec![StreamEndReport {
+            stream_uid: "u".into(),
+            source_timestamp: 99.,
+            outcome: "timed_out".into(),
+            last_timestamp: Some(98.),
+            samples_observed: 12,
+            backward_steps: 0,
+            repeated_timestamps: 0,
+            large_forward_steps: 0,
+        }],
+    };
+    store.save_end_report(&report).unwrap();
+    store.finish(&p, "completed").unwrap();
+    let db = rusqlite::Connection::open(&p).unwrap();
+    let (state, json): (String, String) = db
+        .query_row("SELECT state,end_report_json FROM recording", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(state, "completed");
+    let saved: RecordingEndReport = serde_json::from_str(&json).unwrap();
+    assert_eq!(saved.acquisition_coverage, "unverified");
+    assert_eq!(saved.streams[0].outcome, "timed_out");
+    assert_eq!(saved.streams[0].last_timestamp, Some(98.));
+}
+
+#[test]
+fn unreliable_clock_waits_until_the_explicit_deadline() {
+    use std::time::Duration;
+    let p = path();
+    let mut store = Store::create(&p, &RecordingContext::default(), &[descriptor()]).unwrap();
+    let status = Arc::new(Mutex::new(RecordingStatus::default()));
+    let mut evidence = [boundary::StreamEvidence::new(descriptor())];
+    evidence[0].observe(10.);
+    evidence[0].observe(11.); // A forward jump must not stop draining early.
+    let signal = StopSignal::new(RecordingStopRequest {
+        boundaries: vec![SourceBoundary {
+            stream_uid: "u".into(),
+            source_timestamp: 10.5,
+        }],
+        timeout_ms: 10,
+    });
+    let started = signal.started;
+    worker::drain_to_boundaries(
+        &[],
+        &[],
+        &mut store,
+        &mut vec![],
+        &status,
+        &mut evidence,
+        &signal,
+    )
+    .unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(10));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let reports = boundary::reports(&evidence, &signal.request, true);
+    assert_eq!(reports[0].outcome, "unreliable_timestamps");
+    assert_eq!(store.committed, 0);
 }

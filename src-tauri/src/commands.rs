@@ -1156,12 +1156,18 @@ pub async fn stop_frenz_bridge(
 ) -> Result<CommandResult<String>, ()> {
     info!(device = "frenz", "Stopping FRENZ bridge");
 
-    match state.frenz_process.stop().await {
-        Ok(()) => Ok(CommandResult::success("FRENZ bridge stopped".to_string())),
-        Err(e) => {
-            error!(device = "frenz", "Failed to stop FRENZ bridge: {}", e);
-            Ok(CommandResult::error(e))
-        }
+    let (streams, process) = tokio::join!(
+        state.frenz_manager.disconnect_all(),
+        state.frenz_process.stop()
+    );
+    let errors: Vec<String> = [streams.err().map(|e| e.to_string()), process.err()]
+        .into_iter().flatten().collect();
+    if errors.is_empty() {
+        state.broadcast_device_status(crate::bridge::DeviceStatusEvent::disconnected(
+            "frenz".into(), crate::devices::DeviceType::LSL, "FRENZ disconnected"));
+        Ok(CommandResult::success("FRENZ bridge stopped".to_string()))
+    } else {
+        Ok(CommandResult::error(format!("FRENZ cleanup failed: {}", errors.join("; "))))
     }
 }
 
@@ -1232,9 +1238,9 @@ pub async fn start_lsl_recording(request:crate::recording::RecordingRequest,
         .map_err(|_|"Recording worker failed".to_string())?.map_err(|e|e.to_string())
 }
 #[tauri::command]
-pub async fn stop_lsl_recording(state:State<'_,Arc<AppState>>) -> Result<crate::recording::RecordingStatus,String> {
+pub async fn stop_lsl_recording(request:Option<crate::recording::RecordingStopRequest>, state:State<'_,Arc<AppState>>) -> Result<crate::recording::RecordingStatus,String> {
     let manager=state.recording.clone();
-    tokio::task::spawn_blocking(move||manager.stop()).await
+    tokio::task::spawn_blocking(move||manager.stop_with(request.unwrap_or_default())).await
         .map_err(|_|"Recording worker failed".to_string())?.map_err(|e|e.to_string())
 }
 #[tauri::command]

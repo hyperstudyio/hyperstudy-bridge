@@ -78,6 +78,15 @@
     <p>Save selected streams locally. Recording continues when this panel or the browser closes.</p>
     <p role="status"><strong>{status.state}</strong> · <span>{status.committed_samples.toLocaleString()} samples saved</span></p>
     {#if status.path}<p class="recording-path">{status.path}</p>{/if}
+    {#if status.end_report}
+      <p>File finalization and device timing are separate. Acquisition coverage is unverified.</p>
+      {#if status.end_report.acquisition_coverage === 'not_requested'}
+        <p>No source end boundary was requested; samples still in device processing may arrive after stop.</p>
+      {/if}
+      {#each status.end_report.streams as boundary (boundary.stream_uid)}
+        <p class="recording-path">{boundary.stream_uid}: {boundary.outcome}</p>
+      {/each}
+    {/if}
     {#if error || status.error}<p role="alert">{error || status.error}</p>{/if}
     <label for="recording-directory">Recording folder</label>
     <div class="recording-row">
