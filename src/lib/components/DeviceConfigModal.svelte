@@ -163,15 +163,15 @@
       // Derived Metrics
       streamFocus: { label: 'Focus Score (0.5Hz)', type: 'checkbox', default: true },
       streamSleepStage: { label: 'Sleep Stage (0.2Hz)', type: 'checkbox', default: true },
-      streamPoas: { label: 'PoAS (0.2Hz)', type: 'checkbox', default: false },
-      streamPosture: { label: 'Posture (0.2Hz)', type: 'checkbox', default: false },
+      streamPoas: { label: 'PoAS (0.2Hz)', type: 'checkbox', default: true },
+      streamPosture: { label: 'Posture (0.2Hz)', type: 'checkbox', default: true },
       streamSignalQuality: { label: 'Signal Quality (0.2Hz)', type: 'checkbox', default: true },
       // Power Bands
-      streamAlpha: { label: 'Alpha Power (5ch, 0.5Hz)', type: 'checkbox', default: false },
-      streamBeta: { label: 'Beta Power (5ch, 0.5Hz)', type: 'checkbox', default: false },
-      streamTheta: { label: 'Theta Power (5ch, 0.5Hz)', type: 'checkbox', default: false },
-      streamGamma: { label: 'Gamma Power (5ch, 0.5Hz)', type: 'checkbox', default: false },
-      streamDelta: { label: 'Delta Power (5ch, 0.5Hz)', type: 'checkbox', default: false },
+      streamAlpha: { label: 'Alpha Power (5ch, 0.5Hz)', type: 'checkbox', default: true },
+      streamBeta: { label: 'Beta Power (5ch, 0.5Hz)', type: 'checkbox', default: true },
+      streamTheta: { label: 'Theta Power (5ch, 0.5Hz)', type: 'checkbox', default: true },
+      streamGamma: { label: 'Gamma Power (5ch, 0.5Hz)', type: 'checkbox', default: true },
+      streamDelta: { label: 'Delta Power (5ch, 0.5Hz)', type: 'checkbox', default: true },
       // Marker outlet
       enableMarkerOutlet: {
         label: 'Enable Event Marker Outlet',
@@ -448,6 +448,12 @@
     }
   }
 
+  function enableAllFrenzStreams() {
+    for (const [name, config] of Object.entries(deviceConfigs.frenz)) {
+      if (config.type === 'checkbox') formData[name] = true;
+    }
+  }
+
   async function handleSave() {
     if (isSubmitting || isLoading) return;
     if (!validateForm()) {
@@ -581,6 +587,12 @@
             <!-- Device Configuration Tab -->
             {#if deviceConfigs[device.id]}
               {#each Object.entries(deviceConfigs[device.id]) as [fieldName, fieldConfig]}
+                {#if device.id === 'frenz' && fieldName === 'streamEegRaw'}
+                  <div class="frenz-stream-actions">
+                    <span>Sensor and model streams</span>
+                    <button type="button" class="reveal-btn" onclick={enableAllFrenzStreams}>Enable all</button>
+                  </div>
+                {/if}
                 <div class="form-group">
                   <label for={fieldName} class="form-label">
                     {fieldConfig.label}
@@ -1255,6 +1267,15 @@
   .clear-btn:hover {
     background: var(--color-error);
     color: white;
+  }
+
+  .frenz-stream-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    margin: 1rem 0;
+    font-weight: 600;
   }
 
   .reveal-btn {
