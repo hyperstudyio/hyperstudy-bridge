@@ -73,6 +73,73 @@ impl Default for FrenzBridgeStatus {
 }
 
 impl FrenzBridgeStatus {
+    fn apply_python_status(&mut self, parsed: PythonStatusLine) {
+        // The sidecar reports cleanup separately after connection/acquisition
+        // failures. Preserve the first failure and its phase until an explicit
+        // new start resets status; teardown must not hide the cause.
+        if self.state == FrenzBridgeState::Error {
+            return;
+        }
+        match parsed.status.as_str() {
+            "waiting_for_config" => {
+                self.state = FrenzBridgeState::Bootstrapping;
+                self.message = Some("Waiting for configuration...".to_string());
+            }
+            "bootstrapping" => {
+                self.state = FrenzBridgeState::Bootstrapping;
+                self.phase = parsed.phase.clone();
+                if let Some(ref pkg) = parsed.package {
+                    self.message = Some(if parsed.phase.as_deref() == Some("importing") {
+                        format!("Loading {}...", pkg)
+                    } else {
+                        format!("Installing {}...", pkg)
+                    });
+                } else if let Some(ref phase) = parsed.phase {
+                    self.message = Some(format!("{}...", phase));
+                }
+            }
+            "connecting" => {
+                self.state = FrenzBridgeState::Connecting;
+                self.message = parsed
+                    .device_id
+                    .as_ref()
+                    .map(|id| format!("Connecting to {}...", id));
+                if let Some(ref phase) = parsed.phase {
+                    self.phase = Some(phase.clone());
+                }
+            }
+            "streaming" => {
+                self.state = FrenzBridgeState::Streaming;
+                self.message = None;
+                if let Some(streams) = parsed.streams {
+                    self.streams = streams;
+                }
+                if let Some(count) = parsed.sample_count {
+                    self.sample_count = count;
+                }
+                self.timing = parsed.timing;
+                self.clock_pair = parsed.clock_pair;
+            }
+            "error" => {
+                self.state = FrenzBridgeState::Error;
+                self.message = parsed.message;
+                self.phase = parsed.phase;
+                self.streams.clear();
+            }
+            "stopped" => {
+                self.state = FrenzBridgeState::Stopped;
+                self.message = None;
+                self.streams.clear();
+            }
+            other => {
+                debug!(
+                    device = "frenz",
+                    "Unknown status from FRENZ bridge: {}", other
+                );
+            }
+        }
+    }
+
     fn mark_process_exit(&mut self, description: &str, requested: bool) {
         self.streams.clear();
         if requested {
@@ -511,62 +578,7 @@ impl FrenzProcessManager {
                 "FRENZ sidecar phase changed");
         }
 
-        match parsed.status.as_str() {
-            "waiting_for_config" => {
-                s.state = FrenzBridgeState::Bootstrapping;
-                s.message = Some("Waiting for configuration...".to_string());
-            }
-            "bootstrapping" => {
-                s.state = FrenzBridgeState::Bootstrapping;
-                s.phase = parsed.phase.clone();
-                if let Some(ref pkg) = parsed.package {
-                    s.message = Some(if parsed.phase.as_deref() == Some("importing") {
-                        format!("Loading {}...", pkg)
-                    } else {
-                        format!("Installing {}...", pkg)
-                    });
-                } else if let Some(ref phase) = parsed.phase {
-                    s.message = Some(format!("{}...", phase));
-                }
-            }
-            "connecting" => {
-                s.state = FrenzBridgeState::Connecting;
-                s.message = parsed
-                    .device_id
-                    .as_ref()
-                    .map(|id| format!("Connecting to {}...", id));
-                if let Some(ref phase) = parsed.phase {
-                    s.phase = Some(phase.clone());
-                }
-            }
-            "streaming" => {
-                s.state = FrenzBridgeState::Streaming;
-                s.message = None;
-                if let Some(streams) = parsed.streams {
-                    s.streams = streams;
-                }
-                if let Some(count) = parsed.sample_count {
-                    s.sample_count = count;
-                }
-                s.timing = parsed.timing;
-                s.clock_pair = parsed.clock_pair;
-            }
-            "error" => {
-                s.state = FrenzBridgeState::Error;
-                s.message = parsed.message;
-            }
-            "stopped" => {
-                s.state = FrenzBridgeState::Stopped;
-                s.message = None;
-                s.streams.clear();
-            }
-            other => {
-                debug!(
-                    device = "frenz",
-                    "Unknown status from FRENZ bridge: {}", other
-                );
-            }
-        }
+        s.apply_python_status(parsed);
 
         Self::emit_status_event(&s, app_handle);
     }
@@ -673,6 +685,36 @@ impl std::fmt::Debug for FrenzProcessManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_statuses_never_replace_the_first_sidecar_failure() {
+        let mut status = FrenzBridgeStatus::default();
+        status.sample_count = 123;
+        for line in [
+            r#"{"status":"connecting","phase":"sdk_start","device_id":"FRENZI85"}"#,
+            r#"{"status":"error","phase":"connecting_bluetooth","message":"FRENZ failed during connecting_bluetooth (RuntimeError)."}"#,
+            r#"{"status":"stopping"}"#,
+            r#"{"status":"error","message":"FRENZ shutdown failed"}"#,
+            r#"{"status":"stopped"}"#,
+        ] {
+            status.apply_python_status(serde_json::from_str(line).unwrap());
+        }
+        status.mark_process_exit("exit status: 1", false);
+        assert_eq!(status.state, FrenzBridgeState::Error);
+        assert_eq!(status.phase.as_deref(), Some("connecting_bluetooth"));
+        assert_eq!(
+            status.message.as_deref(),
+            Some("FRENZ failed during connecting_bluetooth (RuntimeError).")
+        );
+        assert_eq!(status.sample_count, 123);
+        // A shutdown failure is still the primary error when no earlier failure exists.
+        let mut clean = FrenzBridgeStatus::default();
+        clean.apply_python_status(
+            serde_json::from_str(r#"{"status":"error","message":"FRENZ shutdown failed"}"#)
+                .unwrap(),
+        );
+        assert_eq!(clean.message.as_deref(), Some("FRENZ shutdown failed"));
+    }
 
     #[test]
     fn unexpected_exit_clears_active_streams_and_reports_failure() {
