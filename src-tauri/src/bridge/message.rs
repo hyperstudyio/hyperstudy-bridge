@@ -40,6 +40,7 @@ pub enum CommandAction {
     UploadStudyRecording,
     ListStudyRecordings,
     DiscoverRecordingStreams,
+    DescribeRecordingStream,
     StartLslRecording,
     StopLslRecording,
     LslRecordingStatus,

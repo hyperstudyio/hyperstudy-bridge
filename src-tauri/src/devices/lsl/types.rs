@@ -596,12 +596,18 @@ pub struct DiscoveredNeonDevice {
     pub has_gaze_stream: bool,
     /// Whether events stream is available
     pub has_events_stream: bool,
-    /// Number of gaze channels (2 for basic, 6 for eye-state enabled)
+    /// Number of gaze channels; zero when gaze is absent or ambiguous.
     pub gaze_channel_count: u32,
     /// Gaze stream UID (if available)
     pub gaze_stream_uid: Option<String>,
     /// Events stream UID (if available)
     pub events_stream_uid: Option<String>,
+    /// Multiple gaze publishers share this device identity; no UID is selected.
+    #[serde(default)]
+    pub gaze_stream_ambiguous: bool,
+    /// Multiple event publishers share this device identity; no UID is selected.
+    #[serde(default)]
+    pub events_stream_ambiguous: bool,
     /// When this device was first discovered
     pub discovered_at: std::time::SystemTime,
 }

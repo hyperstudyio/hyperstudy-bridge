@@ -1504,6 +1504,10 @@ async fn handle_device_command(
                                 "has_gaze_stream": d.has_gaze_stream,
                                 "has_events_stream": d.has_events_stream,
                                 "gaze_channel_count": d.gaze_channel_count,
+                                "gaze_stream_uid": d.gaze_stream_uid,
+                                "events_stream_uid": d.events_stream_uid,
+                                "gaze_stream_ambiguous": d.gaze_stream_ambiguous,
+                                "events_stream_ambiguous": d.events_stream_ambiguous,
                             })
                         })
                         .collect();
@@ -1971,6 +1975,7 @@ async fn handle_device_command(
             send_response(tx,response).await;
         }
         CommandAction::DiscoverRecordingStreams
+        | CommandAction::DescribeRecordingStream
         | CommandAction::StartLslRecording
         | CommandAction::StopLslRecording
         | CommandAction::LslRecordingStatus => {
@@ -1980,6 +1985,14 @@ async fn handle_device_command(
                     match action {
                         CommandAction::DiscoverRecordingStreams => {
                             Ok(serde_json::to_value(crate::recording::discover()?)?)
+                        }
+                        CommandAction::DescribeRecordingStream => {
+                            let uid = payload
+                                .as_ref()
+                                .and_then(|value| value.get("uid"))
+                                .and_then(|value| value.as_str())
+                                .ok_or_else(|| anyhow::anyhow!("Missing stream UID"))?;
+                            Ok(serde_json::to_value(crate::recording::describe(uid)?)?)
                         }
                         CommandAction::StartLslRecording => {
                             let request =

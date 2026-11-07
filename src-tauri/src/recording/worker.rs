@@ -32,6 +32,23 @@ fn descriptor(info: &lsl::StreamInfo) -> Result<StreamDescriptor> {
 pub fn discover() -> Result<Vec<StreamDescriptor>> {
     lsl::resolve_streams(1.)?.iter().map(descriptor).collect()
 }
+pub fn describe(uid: &str) -> Result<StreamDescriptor> {
+    ensure!(
+        !uid.trim().is_empty() && !uid.contains('\0'),
+        "A valid stream UID is required"
+    );
+    let available = lsl::resolve_byprop("uid", uid, 1, 3.)?;
+    let info = available
+        .iter()
+        .find(|info| info.uid() == uid)
+        .context("Selected LSL stream is no longer available")?;
+    // Fetch full XML without subscribing to samples, timestamp postprocessing,
+    // or source recovery. Discovery alone only supplies abbreviated metadata.
+    let inlet = lsl::StreamInlet::new(info, 1, 0, false)?;
+    let full = inlet.info(3.)?;
+    ensure!(full.uid() == uid, "Selected LSL stream identity changed");
+    descriptor(&full)
+}
 fn pull(inlet: &lsl::StreamInlet, format: &str) -> Result<Option<(SampleData, f64)>> {
     macro_rules! sample {
         ($t:ty,$v:ident) => {{

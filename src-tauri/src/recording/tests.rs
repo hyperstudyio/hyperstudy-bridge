@@ -1,5 +1,58 @@
 use super::*;
 use crate::devices::lsl::types::SampleData;
+#[test]
+fn describe_recording_stream_preserves_exact_identity_and_full_xml_without_subscribing() {
+    let name = format!("Synthetic Neon metadata {}", uuid::Uuid::new_v4());
+    let first = lsl::StreamInfo::new(
+        &name,
+        "Gaze",
+        2,
+        200.,
+        lsl::ChannelFormat::Float32,
+        "other-device",
+    )
+    .unwrap();
+    let other = lsl::StreamOutlet::new(&first, 0, 1).unwrap();
+    let mut selected = lsl::StreamInfo::new(
+        &name,
+        "Gaze",
+        2,
+        200.,
+        lsl::ChannelFormat::Float32,
+        "selected-device",
+    )
+    .unwrap();
+    selected
+        .desc()
+        .append_child("channels")
+        .append_child("channel")
+        .append_child_value("label", "pupil_diameter_left")
+        .append_child_value("unit", "mm");
+    let outlet = lsl::StreamOutlet::new(&selected, 0, 1).unwrap();
+    let uid = outlet.info().unwrap().uid();
+    let described = worker::describe(&uid).unwrap();
+    assert_eq!(described.uid, uid);
+    assert_eq!(described.source_id, "selected-device");
+    assert_eq!(described.name, name);
+    assert_eq!(described.channels, 2);
+    assert_eq!(described.nominal_rate, 200.);
+    assert_eq!(described.format, "float32");
+    assert!(described.xml.contains("<label>pupil_diameter_left</label>"));
+    assert!(described.xml.contains("<unit>mm</unit>"));
+    assert!(!outlet.have_consumers());
+    assert!(!other.have_consumers());
+    // The display name must never stand in for the selected UID.
+    assert!(worker::describe(&name).is_err());
+    assert!(worker::describe("").is_err());
+}
+
+#[test]
+fn describe_recording_stream_command_accepts_uid_payload() {
+    let command = crate::bridge::MessageHandler::parse_command(
+        r#"{"type":"command","device":"recording","action":"describe_recording_stream","payload":{"uid":"precise-uid"},"id":"metadata-request"}"#,
+    );
+    assert!(command.is_ok(), "{command:?}");
+}
 fn path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "hyperstudy-recording-test-{}.sqlite",

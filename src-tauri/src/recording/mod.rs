@@ -300,5 +300,8 @@ impl Drop for RecordingManager {
 pub fn discover() -> Result<Vec<StreamDescriptor>> {
     worker::discover()
 }
+pub fn describe(uid: &str) -> Result<StreamDescriptor> {
+    worker::describe(uid)
+}
 #[cfg(test)]
 mod tests;

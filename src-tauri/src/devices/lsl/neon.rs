@@ -156,6 +156,8 @@ pub(crate) fn group_neon_streams(
                         gaze_channel_count: 0,
                         gaze_stream_uid: None,
                         events_stream_uid: None,
+                        gaze_stream_ambiguous: false,
+                        events_stream_ambiguous: false,
                         discovered_at: now,
                     },
                 ));
@@ -164,10 +166,24 @@ pub(crate) fn group_neon_streams(
         };
         let entry = &mut by_identity[idx].1;
 
+        // Distinct publishers with the same identity cannot be selected safely.
+        // Keep ambiguity sticky through this discovery pass, regardless of order.
         if StreamFilter::is_neon_gaze_stream(stream_name) {
             entry.has_gaze_stream = true;
-            entry.gaze_channel_count = stream.info.channel_count;
-            entry.gaze_stream_uid = Some(stream.uid.clone());
+            if entry
+                .gaze_stream_uid
+                .as_deref()
+                .is_some_and(|uid| uid != stream.uid)
+            {
+                entry.gaze_stream_ambiguous = true;
+            }
+            if entry.gaze_stream_ambiguous {
+                entry.gaze_stream_uid = None;
+                entry.gaze_channel_count = 0;
+            } else {
+                entry.gaze_channel_count = stream.info.channel_count;
+                entry.gaze_stream_uid = Some(stream.uid.clone());
+            }
             debug!(
                 device = "neon",
                 "Found Neon gaze stream: {} ({} channels) on {}",
@@ -177,7 +193,18 @@ pub(crate) fn group_neon_streams(
             );
         } else if StreamFilter::is_neon_events_stream(stream_name) {
             entry.has_events_stream = true;
-            entry.events_stream_uid = Some(stream.uid.clone());
+            if entry
+                .events_stream_uid
+                .as_deref()
+                .is_some_and(|uid| uid != stream.uid)
+            {
+                entry.events_stream_ambiguous = true;
+            }
+            entry.events_stream_uid = if entry.events_stream_ambiguous {
+                None
+            } else {
+                Some(stream.uid.clone())
+            };
             debug!(
                 device = "neon",
                 "Found Neon events stream: {} on {}", stream_name, host
@@ -324,7 +351,11 @@ impl NeonLslManager {
         }
 
         let gaze_uid = device.gaze_stream_uid.ok_or_else(|| {
-            LslError::NeonStreamNotAvailable("Gaze stream UID not found".to_string())
+            LslError::NeonStreamNotAvailable(if device.gaze_stream_ambiguous {
+                "Multiple gaze stream UIDs share this device name and host".to_string()
+            } else {
+                "Gaze stream UID not found".to_string()
+            })
         })?;
 
         // Hold the task registry lock for the WHOLE connect — duplicate checks,
@@ -502,7 +533,11 @@ impl NeonLslManager {
         }
 
         let events_uid = device.events_stream_uid.ok_or_else(|| {
-            LslError::NeonStreamNotAvailable("Events stream UID not found".to_string())
+            LslError::NeonStreamNotAvailable(if device.events_stream_ambiguous {
+                "Multiple events stream UIDs share this device name and host".to_string()
+            } else {
+                "Events stream UID not found".to_string()
+            })
         })?;
 
         // Serialized against disconnects for the whole connect — see
@@ -1037,6 +1072,59 @@ mod grouping_tests {
             data_loss: 0.0,
             time_stamps: (),
         }
+    }
+
+    #[test]
+    fn distinct_gaze_publishers_on_same_host_have_no_selected_uid() {
+        for uids in [["g1", "g2", "g1"], ["g2", "g1", "g3"]] {
+            let mut streams: Vec<_> = uids
+                .iter()
+                .map(|uid| stream("Neon P1_Neon Gaze", "phone-a", uid))
+                .collect();
+            streams.push(stream("Neon P1_Neon Events", "phone-a", "e1"));
+            let map = group_neon_streams(streams, SystemTime::now());
+            let device = &map["Neon P1"];
+            assert!(device.has_gaze_stream);
+            assert!(device.gaze_stream_ambiguous);
+            assert!(!device.events_stream_ambiguous);
+            assert_eq!(device.gaze_stream_uid, None);
+            assert_eq!(device.gaze_channel_count, 0);
+            assert_eq!(device.events_stream_uid.as_deref(), Some("e1"));
+            assert_eq!(device.hostname.as_deref(), Some("phone-a"));
+        }
+    }
+
+    #[test]
+    fn distinct_event_publishers_on_same_host_have_no_selected_uid() {
+        let map = group_neon_streams(
+            vec![
+                stream("Neon P1_Neon Gaze", "phone-a", "g1"),
+                stream("Neon P1_Neon Events", "phone-a", "e1"),
+                stream("Neon P1_Neon Events", "phone-a", "e2"),
+                stream("Neon P1_Neon Events", "phone-a", "e3"),
+            ],
+            SystemTime::now(),
+        );
+        let device = &map["Neon P1"];
+        assert!(device.has_events_stream);
+        assert!(device.events_stream_ambiguous);
+        assert!(!device.gaze_stream_ambiguous);
+        assert_eq!(device.events_stream_uid, None);
+        assert_eq!(device.gaze_stream_uid.as_deref(), Some("g1"));
+    }
+
+    #[test]
+    fn repeated_same_uid_does_not_create_ambiguity() {
+        let map = group_neon_streams(
+            vec![
+                stream("Neon P1_Neon Gaze", "phone-a", "g1"),
+                stream("Neon P1_Neon Gaze", "phone-a", "g1"),
+            ],
+            SystemTime::now(),
+        );
+        assert_eq!(map["Neon P1"].gaze_stream_uid.as_deref(), Some("g1"));
+        assert_eq!(map["Neon P1"].gaze_channel_count, 2);
+        assert!(!map["Neon P1"].gaze_stream_ambiguous);
     }
 
     #[test]
