@@ -150,7 +150,7 @@
         secretKey: 'frenz_product_key',
       },
       // Raw Signals
-      streamEegRaw: { label: 'EEG Raw (7ch, 125Hz)', type: 'checkbox', default: true },
+      streamEegRaw: { label: 'EEG: Bluetooth raw and SDK comparison (125Hz)', type: 'checkbox', default: true },
       streamPpgRaw: { label: 'PPG Raw (4ch, 25Hz)', type: 'checkbox', default: true },
       streamImuRaw: { label: 'IMU Raw (4ch, 50Hz)', type: 'checkbox', default: true },
       streamHrRaw: { label: 'Heart rate', type: 'checkbox', default: true },

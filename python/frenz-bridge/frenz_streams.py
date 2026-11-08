@@ -4,6 +4,7 @@ import numpy as np
 
 # suffix, store, key, channels, nominal rate, LSL format, timestamp policy
 STREAMS = [
+    ('_EEG_bluetooth','bluetooth','EEG',13,125.,'double64','packet_arrival'),
     ('_EEG_raw','raw','EEG',7,125.,'double64','source_unix'),
     ('_PPG_raw','raw','PPG',4,25.,'double64','source_unix'),
     ('_IMU_raw','raw','IMU',4,50.,'double64','source_unix'),
@@ -51,6 +52,20 @@ def timing_metadata(store, policy, clock_pair):
     }
     if policy == 'source_unix':
         metadata['source_unix_to_lsl_offset'] = repr(clock_pair['offset_seconds'])
+    if store == 'raw':
+        metadata['acquisition_source'] = 'sdk_processed_comparison_not_original_packets'
+    if store == 'bluetooth':
+        metadata.update(source_timestamp_semantics='original_device_seconds_unverified',
+                        lsl_timestamp_semantics='bluetooth_callback_arrival_shared_by_nine_rows',
+                        clock_mapping_method='none_arrival_already_in_lsl_clock',
+                        acquisition_source='bluetooth_notification_before_sdk',
+                        sample_rate_semantics='nominal_not_measured',
+                        wire_layout='178_bytes_sequence_channel_count_seconds_9x19byte_rows_trailer')
+    if store == 'scores':
+        metadata.update(acquisition_source='unmodified_sdk_model_history',
+                        model_window_timestamp='not_exposed_by_sdk',
+                        model_input_buffer_integrity='not_verified',
+                        score_time_semantics='first_bridge_observation_of_history_row')
     return metadata
 
 
@@ -111,6 +126,8 @@ class StreamPublisher:
                   'scores': streamer.SCORES,
                   'firmware': streamer.get_raw_data_realtime()}
         for suffix, store, key, channels, rate, fmt, policy in STREAMS:
+            if store == 'bluetooth':
+                continue  # Published independently by the notification tap.
             value = stores[store].get('array__' + key if store == 'scores' else key)
             if value is None:
                 continue

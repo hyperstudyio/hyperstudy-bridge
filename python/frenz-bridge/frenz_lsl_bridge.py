@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from frenz_streams import STREAMS, StreamPublisher, measure_clock_pair, timing_metadata
+from frenz_bluetooth import EEG_COLUMNS, EEG_SUFFIX, EegPacketTap
 
 shutdown_event = threading.Event()
 protocol_output = sys.stdout
@@ -33,16 +34,22 @@ def create_outlets(device_id, session_id, clock_pair):
         info = pylsl.StreamInfo(device_id + suffix, 'Markers' if fmt == 'string' else 'Biosignals',
                                channels, rate, fmt, f'frenz-{device_id}-{session_id}{suffix}')
         desc = info.desc()
-        for name, value in {'schema_version':'3', 'manufacturer':'Earable', 'device_id':device_id,
+        for name, value in {'schema_version':'4' if store == 'bluetooth' else '3', 'manufacturer':'Earable', 'device_id':device_id,
                             'sdk_version':'0.3.2', 'sdk_store':store, 'sdk_key':key,
                             'timestamp_policy':policy, 'session_id':session_id,
                             **timing_metadata(store, policy, clock_pair),
-                            'source_timestamp_column':'0' if store in ('raw','firmware') else 'none',
-                            'sample_order':'SDK array index; never timestamp deduplication'}.items():
+                            'source_timestamp_column':'0' if store in ('raw','firmware','bluetooth') else 'none',
+                            'sample_order':('packet_index then row_in_packet; no deduplication' if store == 'bluetooth'
+                                            else 'SDK array index; never timestamp deduplication')}.items():
             desc.append_child_value(name, value)
         channel_metadata = desc.append_child('channels')
         for index in range(channels):
             channel = channel_metadata.append_child('channel')
+            if store == 'bluetooth':
+                label, unit = EEG_COLUMNS[index]
+                channel.append_child_value('label', label)
+                channel.append_child_value('unit', unit)
+                continue
             source_timestamp = index == 0 and store in ('raw', 'firmware')
             channel.append_child_value('label', 'source_timestamp' if source_timestamp else f'sdk_column_{index}')
             channel.append_child_value('sdk_column_index', str(index))
@@ -64,6 +71,7 @@ def main():
         signal.signal(sig, lambda *_: shutdown_event.set())
     emit({'status':'waiting_for_config'})
     streamer = None
+    packet_tap = None
     failed = False
     phase = "configuration"
     try:
@@ -99,6 +107,8 @@ def main():
         wall_to_lsl = clock_pair['offset_seconds']
         phase = "creating_streams"
         outlets = create_outlets(device_id, session_id, clock_pair)
+        packet_tap = EegPacketTap(pylsl.local_clock)
+        packet_tap.install()
         phase = "connecting_bluetooth"
         streamer.start()
         publisher = StreamPublisher()
@@ -115,35 +125,50 @@ def main():
                           if policy == 'source_unix' else [observed] * len(values))
             outlets[suffix].push_chunk(values, timestamp=timestamps)
 
+        def counts():
+            return {**publisher.cursors, EEG_SUFFIX: packet_tap.sample_count}
+
+        def timing():
+            return {**publisher.timing_status(), EEG_SUFFIX: packet_tap.timing_status()}
+
         while not shutdown_event.is_set():
             phase = "publishing_samples"
+            packet_tap.drain(publish)
             publisher.poll(streamer, publish, pylsl.local_clock())
             now = time.monotonic()
-            if publisher.sample_count != previous_count:
+            if packet_tap.sample_count != previous_count:
                 last_sample = now
-                previous_count = publisher.sample_count
-            has_eeg = publisher.cursors.get('_EEG_raw', 0) > 0
+                previous_count = packet_tap.sample_count
+            total_count = publisher.sample_count + packet_tap.sample_count
+            has_eeg = packet_tap.sample_count > 0
             if not streaming and has_eeg:
                 streaming = True
-                emit({'status':'streaming','streams':list(outlets), 'sample_count':publisher.sample_count,
-                      'timing':publisher.timing_status(), 'clock_pair':clock_pair})
+                emit({'status':'streaming','streams':list(outlets), 'sample_count':total_count,
+                      'stream_sample_counts':counts(), 'timing':timing(), 'clock_pair':clock_pair})
             if (not streaming and now - started > 30) or (streaming and now - last_sample > 15):
                 raise TimeoutError('No new FRENZ samples received')
             if streaming and now - last_report >= 5:
-                emit({'status':'streaming','streams':list(outlets),'sample_count':publisher.sample_count,
-                      'stream_sample_counts':publisher.cursors,
-                      'timing':publisher.timing_status(), 'clock_pair':clock_pair})
+                emit({'status':'streaming','streams':list(outlets),'sample_count':total_count,
+                      'stream_sample_counts':counts(), 'timing':timing(), 'clock_pair':clock_pair})
                 last_report = now
             # Polling cadence for an SDK without a callback API, not a startup delay.
             shutdown_event.wait(.02)
+        # Publish all packets already observed when stopping; do not silently
+        # discard the queue just because a stop command arrived between polls.
+        packet_tap.finish_and_drain(publish)
+        publisher.poll(streamer, publish, pylsl.local_clock())
     except BaseException as error:
         failed = True
         # Allowlist a known SDK error; never expose arbitrary exception text.
         reason = ('The Earable SDK rejected the product key.'
                   if 'invalid product key' in str(error).lower()
                   else f'FRENZ failed during {phase} ({type(error).__name__}).')
+        if packet_tap is not None and packet_tap.failure is not None:
+            reason = packet_tap.failure  # Fixed allowlisted capture error, no vendor text.
         emit({'status':'error', 'phase':phase, 'message':reason})
     finally:
+        if packet_tap is not None:
+            packet_tap.finish_capture()
         if streamer is not None:
             # Vendor stop may terminate the process; report stopping first.
             emit({'status':'stopping'})
@@ -152,6 +177,8 @@ def main():
             except BaseException:
                 failed = True
                 emit({'status':'error','message':'FRENZ shutdown failed'})
+        if packet_tap is not None:
+            packet_tap.restore()
         if not failed:
             emit({'status':'stopped'})
     if failed:

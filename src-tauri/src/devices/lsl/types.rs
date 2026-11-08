@@ -340,6 +340,7 @@ impl Default for LslConfig {
 /// All known FRENZ LSL stream suffixes.
 /// Streams are named `{DEVICE_ID}_{suffix}` by the Python LSL bridge script.
 pub const FRENZ_STREAM_SUFFIXES: &[&str] = &[
+    "_EEG_bluetooth",
     "_EEG_raw",
     "_EEG_filtered",
     "_EOG_filtered",
@@ -424,7 +425,7 @@ pub struct DiscoveredFrenzDevice {
 /// Determine the category for a FRENZ stream based on its suffix
 pub fn frenz_stream_category(suffix: &str) -> FrenzStreamCategory {
     match suffix.to_lowercase().as_str() {
-        "_eeg_raw" => FrenzStreamCategory::RawPhysiological,
+        "_eeg_raw" | "_eeg_bluetooth" => FrenzStreamCategory::RawPhysiological,
         "_ppg_raw" => FrenzStreamCategory::Cardiovascular,
         "_imu_raw" => FrenzStreamCategory::Motion,
         "_eeg_filtered" | "_eog_filtered" | "_emg_filtered" => {

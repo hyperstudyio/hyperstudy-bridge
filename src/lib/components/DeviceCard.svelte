@@ -31,6 +31,7 @@
   let frenzTimingAnomaly = $derived(
     Object.entries(frenzBridgeStatus.timing || {}).some(([suffix, timing]) =>
       timing.backward_count > 0 || timing.nonfinite_count > 0 ||
+      timing.sequence_discontinuity_count > 0 ||
       (suffix.endsWith('_raw') && timing.cadence_deviation_count > 0)
     )
   );

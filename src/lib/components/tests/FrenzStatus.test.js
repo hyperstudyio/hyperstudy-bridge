@@ -30,6 +30,12 @@ it('distinguishes preserved timestamps from verified acquisition alignment', asy
   render(DeviceCard, {device});
   expect(await screen.findByText('Acquisition alignment unverified')).toBeInTheDocument();
 });
+it('reports Bluetooth EEG sequence discontinuities', async () => {
+  render(DeviceCard, {device});
+  await waitFor(() => expect(update).toBeTypeOf('function'));
+  update({payload:{state:'streaming',streams:['_EEG_bluetooth'],sample_count:18,timing:{_EEG_bluetooth:{sequence_discontinuity_count:1}}}});
+  expect(await screen.findByText('Source timestamp discontinuities detected')).toBeInTheDocument();
+});
 it('reports processed clock jumps without treating repeated firmware seconds as errors', async () => {
   render(DeviceCard, {device});
   await waitFor(() => expect(update).toBeTypeOf('function'));

@@ -4,6 +4,17 @@ import numpy as np
 from frenz_streams import StreamPublisher, STREAMS
 
 class PublisherTests(unittest.TestCase):
+    def test_focus_history_keeps_identical_consecutive_scores(self):
+        p = StreamPublisher(); sent = []
+        s = SimpleNamespace(DATA={}, SCORES={'array__focus_score': [52., 52.]},
+                            get_raw_data_realtime=lambda: {})
+        p.poll(s, lambda *args: sent.append(args), 42.)
+        s.SCORES['array__focus_score'].append(54.)
+        p.poll(s, lambda *args: sent.append(args), 43.)
+        self.assertEqual([b[0] for b in sent], ['_focus', '_focus'])
+        np.testing.assert_array_equal(np.concatenate([b[1] for b in sent]), [[52.], [52.], [54.]])
+        self.assertEqual(p.cursors['_focus'], 3)
+
     def test_incremental_arrays_preserve_equal_timestamps_and_integer_precision(self):
         p=StreamPublisher(); sent=[]
         s=SimpleNamespace(DATA={'RAW':{},'FILTERED':{}}, SCORES={})
@@ -48,6 +59,20 @@ class PublisherTests(unittest.TestCase):
 
 
 class TimingTests(unittest.TestCase):
+    def test_hybrid_metadata_does_not_claim_acquisition_or_model_window_timing(self):
+        from frenz_streams import timing_metadata
+        pair = {'offset_seconds': 12., 'wall_time': 30., 'lsl_time': 42.,
+                'measurement_half_span_seconds': .001}
+        raw = timing_metadata('bluetooth', 'packet_arrival', pair)
+        focus = timing_metadata('scores', 'observed_history', pair)
+        comparison = timing_metadata('raw', 'source_unix', pair)
+        self.assertEqual(raw['lsl_timestamp_semantics'], 'bluetooth_callback_arrival_shared_by_nine_rows')
+        self.assertEqual(raw['clock_mapping_method'], 'none_arrival_already_in_lsl_clock')
+        self.assertNotIn('source_unix_to_lsl_offset', raw)
+        self.assertEqual(raw['acquisition_alignment'], 'unverified')
+        self.assertEqual(focus['model_window_timestamp'], 'not_exposed_by_sdk')
+        self.assertEqual(comparison['acquisition_source'], 'sdk_processed_comparison_not_original_packets')
+
     def test_raw_steps_across_batches_are_reported_without_changing_rows(self):
         # A synthetic copy of the observed +1/-1 second pattern at 125 Hz.
         p = StreamPublisher()

@@ -24,10 +24,23 @@ const WS_PORT: u16 = 9000;
 #[allow(dead_code)]
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
+#[cfg(test)]
+mod hybrid_config_tests {
+    use super::*;
+
+    #[test]
+    fn raw_eeg_selects_bluetooth_and_sdk_comparison_with_focus() {
+        let suffixes = map_frenz_config_to_suffixes(&json!({"streamEegRaw": true, "streamFocus": true}));
+        assert_eq!(suffixes, vec!["_EEG_raw", "_EEG_bluetooth", "_focus"]);
+        assert!(crate::devices::lsl::types::FRENZ_STREAM_SUFFIXES.contains(&"_EEG_bluetooth"));
+    }
+}
+
 /// Maps frontend FRENZ config boolean flags to LSL stream suffixes.
 fn map_frenz_config_to_suffixes(config: &serde_json::Value) -> Vec<String> {
     let mapping: &[(&str, &str)] = &[
         ("streamEegRaw", "_EEG_raw"),
+        ("streamEegRaw", "_EEG_bluetooth"),
         ("streamEegFiltered", "_EEG_filtered"),
         ("streamEogFiltered", "_EOG_filtered"),
         ("streamEmgFiltered", "_EMG_filtered"),
