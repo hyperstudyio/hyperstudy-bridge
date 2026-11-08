@@ -15,6 +15,29 @@ shutdown_event = threading.Event()
 protocol_output = sys.stdout
 
 
+class StreamResourceError(RuntimeError):
+    """Fixed, credential-safe diagnostics for local runtime resource limits."""
+
+
+def prepare_lsl_runtime():
+    # Finder/LaunchServices children inherit a 256-descriptor soft limit on
+    # macOS. Each LSL outlet owns multiple sockets; all FRENZ streams exceed it.
+    # Raise only this process's soft limit, never the system or hard limit.
+    if sys.platform == 'win32':
+        return
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    required = 1024
+    if soft == resource.RLIM_INFINITY or soft >= required:
+        return
+    if hard != resource.RLIM_INFINITY and hard < required:
+        raise StreamResourceError('FRENZ requires a file/socket limit of at least 1024.')
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (required, hard))
+    except (ValueError, OSError) as error:
+        raise StreamResourceError('Unable to reserve file/socket capacity for FRENZ streams.') from error
+
+
 def emit(status):
     protocol_output.write(json.dumps(status, separators=(',', ':')) + '\n')
     protocol_output.flush()
@@ -71,6 +94,7 @@ def main():
         signal.signal(sig, lambda *_: shutdown_event.set())
     emit({'status':'waiting_for_config'})
     streamer = None
+    streamer_start_attempted = False
     packet_tap = None
     failed = False
     phase = "configuration"
@@ -89,6 +113,8 @@ def main():
             raise ValueError('Device ID and product key are required')
         config.clear()
         threading.Thread(target=stdin_listener, daemon=True).start()
+        phase = "preparing_runtime"
+        prepare_lsl_runtime()
         emit({'status':'bootstrapping','phase':'importing','package':'frenztoolkit'})
         phase = "loading_sdk"
         from frenztoolkit import Streamer
@@ -108,8 +134,10 @@ def main():
         phase = "creating_streams"
         outlets = create_outlets(device_id, session_id, clock_pair)
         packet_tap = EegPacketTap(pylsl.local_clock)
+        phase = "installing_packet_capture"
         packet_tap.install()
         phase = "connecting_bluetooth"
+        streamer_start_attempted = True
         streamer.start()
         publisher = StreamPublisher()
         started = time.monotonic()
@@ -165,11 +193,13 @@ def main():
                   else f'FRENZ failed during {phase} ({type(error).__name__}).')
         if packet_tap is not None and packet_tap.failure is not None:
             reason = packet_tap.failure  # Fixed allowlisted capture error, no vendor text.
+        if isinstance(error, StreamResourceError):
+            reason = str(error)
         emit({'status':'error', 'phase':phase, 'message':reason})
     finally:
         if packet_tap is not None:
             packet_tap.finish_capture()
-        if streamer is not None:
+        if streamer is not None and streamer_start_attempted:
             # Vendor stop may terminate the process; report stopping first.
             emit({'status':'stopping'})
             try:

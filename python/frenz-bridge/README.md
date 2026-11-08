@@ -38,6 +38,17 @@ not establish whether its internal buffers affect model accuracy.
 
 ## Failure and shutdown
 
+Desktop launches on macOS normally inherit a 256-file/socket soft limit, which
+can be exhausted by the full set of LSL outlets. Before initializing the SDK,
+the sidecar raises only its own soft limit to 1024 (preserving a higher limit and
+never changing the hard or system limit). An insufficient hard limit or denied
+adjustment produces an explicit error. The desktop startup test must start with
+the GUI limit; a successful terminal test alone does not cover this condition.
+
+An explicit new Connect attempt reaps a failed child still shutting down before
+starting a new one. It never replaces an actively connecting/streaming child.
+SDK shutdown is not called when startup never reached the Bluetooth-start stage.
+
 The callback only copies bytes into a bounded queue; Rust's existing LSL recorder
 provides SQLite durability downstream. An unsupported layout, queue overflow or
 unsupported SDK version fails explicitly. The tap supports frenztoolkit 0.3.2

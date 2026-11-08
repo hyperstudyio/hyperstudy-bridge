@@ -337,13 +337,7 @@ impl FrenzProcessManager {
             .operation
             .try_lock()
             .map_err(|_| "Another FRENZ operation is in progress".to_string())?;
-        // Check if already running
-        {
-            let proc = self.process.read().await;
-            if proc.is_some() {
-                return Err("FRENZ bridge is already running".to_string());
-            }
-        }
+        self.prepare_start().await?;
 
         let binary_path = Self::find_binary(app_handle)
             .ok_or_else(|| "FRENZ bridge binary not found".to_string())?;
@@ -597,6 +591,29 @@ impl FrenzProcessManager {
     /// Stop the FRENZ bridge process gracefully
     pub async fn stop(&self) -> Result<(), String> {
         let _operation = self.operation.lock().await;
+        self.stop_locked().await
+    }
+
+    /// Called only while start owns the operation lock. A user-initiated start
+    /// may reap a failed child still exiting, but must never replace an active one.
+    async fn prepare_start(&self) -> Result<(), String> {
+        let failed = self.status.read().await.state == FrenzBridgeState::Error;
+        if failed && self.process.read().await.is_some() {
+            self.stop_locked().await?;
+            if let Some(app) = self.app_handle.read().await.as_ref() {
+                if let Some(state) = app.try_state::<Arc<crate::bridge::AppState>>() {
+                    state.frenz_manager.disconnect_all().await.map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        if self.process.read().await.is_some() {
+            return Err("FRENZ bridge is already running".into());
+        }
+        Ok(())
+    }
+
+    /// Caller owns the lifecycle operation lock (public stop or explicit start).
+    async fn stop_locked(&self) -> Result<(), String> {
         self.shutdown.store(true, Ordering::Relaxed);
 
         let mut proc = self.process.write().await;
@@ -685,6 +702,28 @@ impl std::fmt::Debug for FrenzProcessManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_start_cleans_failed_child_but_preserves_active_child() {
+        let manager = FrenzProcessManager::new();
+        // A controlled child waits for stdin, like a sidecar still cleaning up.
+        let child = tokio::process::Command::new("/bin/cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn().unwrap();
+        *manager.process.write().await = Some(child);
+        manager.status.write().await.state = FrenzBridgeState::Streaming;
+        manager.prepare_start().await.unwrap_err();
+        assert!(manager.process.read().await.is_some());
+        manager.status.write().await.state = FrenzBridgeState::Error;
+        // EOF makes the controlled child exit without a timeout or a sleep.
+        manager.process.write().await.as_mut().unwrap().stdin.take();
+        manager.prepare_start().await.unwrap();
+        assert!(manager.process.read().await.is_none());
+        assert_eq!(manager.get_status().await.state, FrenzBridgeState::Stopped);
+    }
 
     #[test]
     fn cleanup_statuses_never_replace_the_first_sidecar_failure() {
