@@ -40,6 +40,10 @@ pub enum FrenzBridgeState {
     Error,
 }
 
+/// Shown while the sidecar waits for macOS's Bluetooth prompt to be answered (frenz_permission.py).
+pub const BLUETOOTH_PERMISSION_PROMPT: &str =
+    "Allow Bluetooth access for HyperStudy Bridge in the macOS prompt to connect the band.";
+
 /// Detailed status of the FRENZ bridge process
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrenzBridgeStatus {
@@ -100,10 +104,11 @@ impl FrenzBridgeStatus {
             }
             "connecting" => {
                 self.state = FrenzBridgeState::Connecting;
-                self.message = parsed
-                    .device_id
-                    .as_ref()
-                    .map(|id| format!("Connecting to {}...", id));
+                self.message = if parsed.phase.as_deref() == Some("waiting_for_bluetooth_permission") {
+                    Some(BLUETOOTH_PERMISSION_PROMPT.to_string())
+                } else {
+                    parsed.device_id.as_ref().map(|id| format!("Connecting to {}...", id))
+                };
                 if let Some(ref phase) = parsed.phase {
                     self.phase = Some(phase.clone());
                 }
@@ -753,6 +758,23 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(clean.message.as_deref(), Some("FRENZ shutdown failed"));
+    }
+
+    #[test]
+    fn waiting_for_bluetooth_permission_says_what_to_do() {
+        let mut status = FrenzBridgeStatus::default();
+        status.apply_python_status(
+            serde_json::from_str(
+                r#"{"status":"connecting","phase":"waiting_for_bluetooth_permission","device_id":"FRENZI85"}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(status.state, FrenzBridgeState::Connecting);
+        assert_eq!(status.message.as_deref(), Some(BLUETOOTH_PERMISSION_PROMPT));
+        status.apply_python_status(
+            serde_json::from_str(r#"{"status":"connecting","phase":"sdk_start","device_id":"FRENZI85"}"#).unwrap(),
+        );
+        assert_eq!(status.message.as_deref(), Some("Connecting to FRENZI85..."));
     }
 
     #[test]

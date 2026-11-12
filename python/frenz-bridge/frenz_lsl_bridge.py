@@ -10,6 +10,7 @@ import time
 import uuid
 from frenz_streams import STREAMS, StreamPublisher, measure_clock_pair, timing_metadata
 from frenz_bluetooth import EEG_COLUMNS, EEG_SUFFIX, EegPacketTap
+from frenz_permission import BluetoothPermissionError, await_bluetooth_permission
 
 shutdown_event = threading.Event()
 protocol_output = sys.stdout
@@ -109,7 +110,11 @@ def main():
             import asyncio
             from frenz_discovery import scan, scan_error
             try:
+                # Bridge reads the scan's output when it exits, so the prompt needs no status of its own.
+                await_bluetooth_permission(threading.Event(), lambda: None)
                 emit({'status': 'discovered', 'devices': asyncio.run(scan())})
+            except BluetoothPermissionError as error:
+                emit({'status': 'scan_error', 'message': str(error)})
             except Exception as error:
                 emit({'status': 'scan_error', 'message': scan_error(error)})
             return
@@ -128,6 +133,10 @@ def main():
         # be relative and absent; a precreated absolute directory is rejected.
         root = Path(tempfile.mkdtemp(prefix='hyperstudy-frenz-'))
         os.chdir(root)
+        phase = "bluetooth_permission"
+        if not await_bluetooth_permission(shutdown_event, lambda: emit(
+                {'status': 'connecting', 'phase': 'waiting_for_bluetooth_permission', 'device_id': device_id})):
+            return  # stopped while the prompt was open
         emit({'status':'connecting','phase':'sdk_start','device_id':device_id})
         phase = "sdk_initialization"
         streamer = Streamer(device_id=device_id, product_key=product_key,
@@ -198,7 +207,7 @@ def main():
                   else f'FRENZ failed during {phase} ({type(error).__name__}).')
         if packet_tap is not None and packet_tap.failure is not None:
             reason = packet_tap.failure  # Fixed allowlisted capture error, no vendor text.
-        if isinstance(error, StreamResourceError):
+        if isinstance(error, (StreamResourceError, BluetoothPermissionError)):
             reason = str(error)
         emit({'status':'error', 'phase':phase, 'message':reason})
     finally:
