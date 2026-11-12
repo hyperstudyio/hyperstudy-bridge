@@ -7,6 +7,7 @@ mod bridge;
 mod commands;
 mod devices;
 mod logging;
+mod open_files;
 mod performance;
 mod storage;
 mod recording;
@@ -57,6 +58,12 @@ async fn main() {
         .init();
 
     info!("Starting HyperStudy Bridge");
+    // Before any LSL inlet or outlet exists: every FRENZ stream's inlet needs sockets (see open_files.rs).
+    match open_files::raise_open_file_limit() {
+        Ok(Some(limit)) => info!("Raised open-file soft limit to {limit}"),
+        Ok(None) => {}
+        Err(error) => warn!("Could not raise the open-file limit; connecting many LSL streams may fail: {error}"),
+    }
 
     let app_state = Arc::new(AppState::new());
     let state_clone = app_state.clone();
