@@ -1,6 +1,6 @@
 [project]
 name = "frenz-lsl-bridge"
-version = "0.1.4"
+version = "0.1.5"
 description = "Bridge between Earable FRENZ brainband (via frenztoolkit) and Lab Streaming Layer"
 requires-python = ">=3.9,<3.10"
 dependencies = ["frenztoolkit==0.3.2", "pylsl>=1.16", "bleak==1.0.1"]

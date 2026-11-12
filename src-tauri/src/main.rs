@@ -23,6 +23,18 @@ use crate::bridge::{AppState, BridgeServer};
 use crate::commands::*;
 use crate::logging::{init_log_emitter, init_log_persister, set_app_handle, TauriLogLayer};
 
+/// Stops the FRENZ sidecar when Bridge exits, after the recording is finalized. Left running, it stayed connected
+/// to the band over Bluetooth, so no later Bridge could connect to it. Runs on a fresh thread: the sidecar belongs to
+/// Tauri's runtime, and the Exit callback is inside a tokio context where blocking on it would panic.
+fn stop_frenz_sidecar(state: &Arc<AppState>) {
+    let manager = state.frenz_process.clone();
+    match std::thread::spawn(move || tauri::async_runtime::block_on(manager.stop())).join() {
+        Ok(Err(error)) => error!("FRENZ sidecar exit stop failed: {error}"),
+        Err(_) => error!("FRENZ sidecar exit stop panicked"),
+        Ok(Ok(())) => {}
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Create filters to prevent log explosion from dependencies.
@@ -291,6 +303,7 @@ async fn main() {
                     Err(error) => error!("Recording exit flush failed: {error}"),
                     _ => {}
                 }
+                stop_frenz_sidecar(&exit_state);
             }
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
                 // Tauri exits the process without guaranteeing manager destructors.
@@ -307,6 +320,7 @@ async fn main() {
                             Err(error) => error!("Recording finalization failed: {error}"),
                             _ => {}
                         }
+                        stop_frenz_sidecar(&state);
                         finished.store(2, Ordering::Release);
                         handle.exit(code.unwrap_or(0));
                     });

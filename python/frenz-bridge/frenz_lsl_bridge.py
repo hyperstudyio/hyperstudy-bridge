@@ -39,8 +39,13 @@ def prepare_lsl_runtime():
 
 
 def emit(status):
-    protocol_output.write(json.dumps(status, separators=(',', ':')) + '\n')
-    protocol_output.flush()
+    # Bridge gone (quit or crashed) means nobody reads statuses. Raising here used to skip streamer.stop() in the
+    # cleanup, leaving the SDK's non-daemon Bluetooth threads connected to the band forever; stop instead.
+    try:
+        protocol_output.write(json.dumps(status, separators=(',', ':')) + '\n')
+        protocol_output.flush()
+    except (BrokenPipeError, ValueError):
+        shutdown_event.set()
 
 
 def stdin_listener():
