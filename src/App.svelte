@@ -1,8 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { listen } from '@tauri-apps/api/event';
   import { tauriService } from './lib/services/tauri.js';
-  import { checkForUpdate, downloadAndInstallUpdate, relaunchApp } from './lib/services/updater.js';
   import RecordingPanel from './lib/components/RecordingPanel.svelte';
   import DeviceCard from './lib/components/DeviceCard.svelte';
   import StatusIndicator from './lib/components/StatusIndicator.svelte';
@@ -12,6 +10,7 @@
   import LslConfigPanel from './lib/components/LslConfigPanel.svelte';
   import PerformancePanel from './lib/components/PerformancePanel.svelte';
   import Toast from './lib/components/Toast.svelte';
+  import UpdateStatus from './lib/components/UpdateStatus.svelte';
   import * as bridgeStore from './lib/stores/websocket.svelte.js';
   import * as toastStore from './lib/stores/toast.svelte.js';
   import { initialize } from './lib/stores/websocket.svelte.js';
@@ -102,95 +101,6 @@
     selectedDevices = selectedDevices.filter(d => d.id !== deviceId);
   }
 
-  // --- Update logic ---
-  let menuUnlisten = null;
-  let isCheckingForUpdate = false;
-  let isUpdating = false;
-  let updateAvailableToastId = null;
-
-  async function performUpdateCheck(isManual) {
-    if (isCheckingForUpdate) return;
-    isCheckingForUpdate = true;
-
-    try {
-      const result = await checkForUpdate();
-
-      if (result.available) {
-        updateAvailableToastId = toastStore.addToast({
-          type: 'update',
-          title: `Update Available: v${result.version}`,
-          message: 'A new version of HyperStudy Bridge is ready.',
-          persistent: true,
-          actions: [
-            { label: 'Update Now', onClick: () => startUpdate() },
-            { label: 'Later', onClick: toastId => toastStore.removeToast(toastId) },
-          ],
-        });
-      } else if (result.error && isManual) {
-        toastStore.addToast({
-          type: 'error',
-          title: 'Update check failed',
-          message: result.error,
-        });
-      } else if (isManual) {
-        toastStore.addToast({
-          type: 'success',
-          title: "You're up to date",
-          message: `HyperStudy Bridge v${appVersion} is the latest version.`,
-        });
-      }
-    } finally {
-      isCheckingForUpdate = false;
-    }
-  }
-
-  async function startUpdate() {
-    if (isUpdating) return;
-    isUpdating = true;
-
-    // Dismiss the "Update Available" toast
-    if (updateAvailableToastId != null) {
-      toastStore.removeToast(updateAvailableToastId);
-      updateAvailableToastId = null;
-    }
-
-    const downloadToastId = toastStore.addToast({
-      type: 'info',
-      title: 'Downloading Update...',
-      message: '0%',
-      persistent: true,
-    });
-
-    try {
-      await downloadAndInstallUpdate(progress => {
-        if (progress.phase === 'downloading') {
-          toastStore.updateToast(downloadToastId, {
-            message: `Downloading... ${progress.percent}%`,
-          });
-        } else if (progress.phase === 'finished') {
-          toastStore.removeToast(downloadToastId);
-        }
-      });
-
-      toastStore.addToast({
-        type: 'success',
-        title: 'Update Installed',
-        message: 'Restarting HyperStudy Bridge...',
-        persistent: true,
-      });
-
-      setTimeout(() => relaunchApp().catch(console.error), 2000);
-    } catch (error) {
-      toastStore.removeToast(downloadToastId);
-      toastStore.addToast({
-        type: 'error',
-        title: 'Update Failed',
-        message: error.message || 'An error occurred while updating.',
-      });
-      isUpdating = false;
-    }
-  }
-
   onMount(async () => {
     // Initialize the WebSocket connection
     initialize();
@@ -208,19 +118,10 @@
       console.error('Failed to fetch app version:', error);
       appVersion = 'unknown';
     }
-
-    // Listen for "Check for Updates" menu item
-    menuUnlisten = await listen('menu-check-for-updates', () => {
-      performUpdateCheck(true);
-    });
-
-    // Auto-check for updates on launch (after a brief delay)
-    setTimeout(() => performUpdateCheck(false), 3000);
   });
 
   onDestroy(() => {
     bridgeStore.disconnect();
-    if (menuUnlisten) menuUnlisten();
   });
 </script>
 
@@ -391,7 +292,7 @@
 
   <footer>
     <p>WebSocket: ws://localhost:9000</p>
-    <p>Version: {appVersion}</p>
+    <UpdateStatus {appVersion} />
   </footer>
 </div>
 

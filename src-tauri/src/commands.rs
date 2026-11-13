@@ -1356,3 +1356,22 @@ pub async fn lsl_bridge_streams(
 ) -> Result<serde_json::Value, String> {
     Ok(state.lsl_bridge_streams().await)
 }
+
+/// The result of the latest update check (Bridge checks on every launch).
+#[tauri::command]
+pub async fn update_status(app: AppHandle) -> crate::updates::UpdateStatus {
+    app.state::<crate::updates::UpdateState>().get().await
+}
+
+/// Checks for an update now.
+#[tauri::command]
+pub async fn check_for_updates(app: AppHandle) -> crate::updates::UpdateStatus {
+    crate::updates::check(&app).await
+}
+
+/// Installs the available update and restarts Bridge; refused while a recording is running.
+#[tauri::command]
+pub async fn install_update(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let recorder_state = state.recording.status().state;
+    crate::updates::install(&app, &recorder_state).await
+}

@@ -11,6 +11,7 @@ mod open_files;
 mod performance;
 mod recording;
 mod storage;
+mod updates;
 mod usb_monitor;
 
 use std::sync::{
@@ -141,6 +142,10 @@ async fn main() {
                         // App continues without persistence
                     }
                 }
+
+                // Check for an update on every launch. Runs after the database step (whatever its outcome) so
+                // the result is persisted with the rest of the log.
+                updates::check(&app_handle_for_db).await;
             });
 
             // Start WebSocket server
@@ -250,13 +255,19 @@ async fn main() {
                     app_handle.exit(0);
                 }
                 if event.id().as_ref() == "check_for_updates" {
+                    // The page shows the result; announce that this check was asked for.
                     let _ = app_handle.emit("menu-check-for-updates", ());
+                    let app_handle = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        updates::check(&app_handle).await;
+                    });
                 }
             });
 
             Ok(())
         })
         .manage(app_state)
+        .manage(updates::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             start_bridge_server,
             stop_bridge_server,
@@ -300,6 +311,9 @@ async fn main() {
             list_study_recordings,
             reveal_recording,
             lsl_bridge_streams,
+            update_status,
+            check_for_updates,
+            install_update,
             recover_lsl_recording,
             scan_frenz_devices,
             start_frenz_bridge,
