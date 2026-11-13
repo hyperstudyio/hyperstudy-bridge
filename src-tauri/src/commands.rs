@@ -1372,6 +1372,6 @@ pub async fn check_for_updates(app: AppHandle) -> crate::updates::UpdateStatus {
 /// Installs the available update and restarts Bridge; refused while a recording is running.
 #[tauri::command]
 pub async fn install_update(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    let recorder_state = state.recording.status().state;
-    crate::updates::install(&app, &recorder_state).await
+    let recording = state.recording.clone();
+    crate::updates::install(&app, move || recording.status().state).await
 }

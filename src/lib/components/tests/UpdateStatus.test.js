@@ -83,6 +83,17 @@ describe('UpdateStatus', () => {
     expect(titles()).toContain("You're up to date");
   });
 
+  it('a menu check offers a dismissed update again', async () => {
+    backend(available);
+    render(UpdateStatus, { appVersion: '0.8.28' });
+    await waitFor(() => expect(titles()).toEqual(['Update available: v0.8.29']));
+    toastStore.removeToast(toasts()[0].id); // "Later"
+    emit('menu-check-for-updates', null);
+    emit('update-status', { state: 'checking' });
+    emit('update-status', available);
+    expect(titles()).toEqual(['Update available: v0.8.29']);
+  });
+
   it('a refused install is explained and the update is offered again', async () => {
     backend(available, {
       install_update: () => {

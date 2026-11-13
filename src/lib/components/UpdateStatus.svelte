@@ -17,7 +17,9 @@
   let progressToastId = null;
 
   function apply(next) {
-    if (next.state === 'available' && offeredVersion !== next.version) {
+    // Offer each version once per launch, and again whenever the user asks (Help > Check for Updates).
+    if (next.state === 'available' && (offeredVersion !== next.version || manualCheck)) {
+      if (offerToastId != null) toastStore.removeToast(offerToastId);
       offeredVersion = next.version;
       offerToastId = toastStore.addToast({
         type: 'update',

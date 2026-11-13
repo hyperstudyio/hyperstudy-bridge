@@ -72,10 +72,15 @@ pub fn install_blocker(identifier: &str, recorder_state: &str) -> Option<String>
                 .into(),
         );
     }
-    if matches!(recorder_state, "starting" | "recording" | "stopping") {
+    if !restart_now(recorder_state) {
         return Some("A recording is running. Install the update after it ends.".into());
     }
     None
+}
+
+/// Whether Bridge may restart now: never while the recorder is starting, recording or finalizing.
+pub fn restart_now(recorder_state: &str) -> bool {
+    !matches!(recorder_state, "starting" | "recording" | "stopping")
 }
 
 async fn publish(app: &AppHandle, status: UpdateStatus) {
@@ -108,25 +113,43 @@ pub async fn check(app: &AppHandle) -> UpdateStatus {
     status
 }
 
-/// Downloads and installs the available update, then restarts Bridge. Progress goes out as `update-progress`
-/// events with the downloaded and total byte counts.
-pub async fn install(app: &AppHandle, recorder_state: &str) -> Result<(), String> {
-    if let Some(reason) = install_blocker(&app.config().identifier, recorder_state) {
+/// Downloads, installs and restarts. Progress goes out as `update-progress` events (downloaded and total bytes).
+/// `recorder_state` is read before downloading and again before installing, because a study can start recording
+/// during the download, and installing ends Bridge (on Windows the installer quits it; elsewhere it restarts).
+pub async fn install(app: &AppHandle, recorder_state: impl Fn() -> String) -> Result<(), String> {
+    if let Some(reason) = install_blocker(&app.config().identifier, &recorder_state()) {
         return Err(reason);
     }
-    let update = app
-        .updater()
-        .map_err(|e| e.to_string())?
-        .check()
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("Bridge is already up to date")?;
-    info!("Installing update {}", update.version);
+    let found = match app.updater() {
+        Ok(updater) => updater.check().await.map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    // A failed or empty re-check is the current answer; publish it so the page stops offering this version.
+    let update = match found {
+        Ok(Some(update)) => update,
+        Ok(None) => {
+            let version = app.package_info().version.to_string();
+            publish(app, UpdateStatus::UpToDate { version }).await;
+            return Err("Bridge is already up to date".into());
+        }
+        Err(error) => {
+            publish(
+                app,
+                UpdateStatus::Failed {
+                    error: error.clone(),
+                },
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    info!("Downloading update {}", update.version);
     publish(app, UpdateStatus::Installing).await;
     let mut downloaded: u64 = 0;
     let progress_app = app.clone();
-    let result = update
-        .download_and_install(
+    // download() verifies the signature before returning the bytes.
+    let bytes = match update
+        .download(
             move |chunk, total| {
                 downloaded += chunk as u64;
                 let _ = progress_app.emit(
@@ -136,17 +159,44 @@ pub async fn install(app: &AppHandle, recorder_state: &str) -> Result<(), String
             },
             || {},
         )
-        .await;
-    if let Err(e) = result {
-        warn!("Update install failed: {e}");
-        let status = UpdateStatus::Failed {
-            error: e.to_string(),
-        };
-        publish(app, status).await;
-        return Err(e.to_string());
+        .await
+    {
+        Ok(bytes) => bytes,
+        Err(e) => return fail(app, format!("Update download failed: {e}")).await,
+    };
+    if !restart_now(&recorder_state()) {
+        info!(
+            "Update {} not installed: a recording started during the download",
+            update.version
+        );
+        let current = app.package_info().version.to_string();
+        let offer = status_from_check(
+            &current,
+            Ok(Some((update.version.clone(), update.body.clone()))),
+        );
+        publish(app, offer).await;
+        return Err(
+            "A recording started while the update downloaded. Install it after the recording ends."
+                .into(),
+        );
+    }
+    if let Err(e) = update.install(&bytes) {
+        return fail(app, format!("Update install failed: {e}")).await;
     }
     info!("Update {} installed; restarting", update.version);
     app.restart();
+}
+
+async fn fail(app: &AppHandle, error: String) -> Result<(), String> {
+    warn!("{error}");
+    publish(
+        app,
+        UpdateStatus::Failed {
+            error: error.clone(),
+        },
+    )
+    .await;
+    Err(error)
 }
 
 #[cfg(test)]
@@ -191,6 +241,18 @@ mod tests {
         );
         assert_eq!(install_blocker(RELEASE_IDENTIFIER, "idle"), None);
         assert_eq!(install_blocker(RELEASE_IDENTIFIER, "completed"), None);
+    }
+
+    /// A recording can start while the update downloads (HyperStudy starts studies over the WebSocket). Installing
+    /// ends Bridge, so the recorder is checked again between download and install.
+    #[test]
+    fn a_recording_that_starts_during_the_download_is_never_cut_short() {
+        for state in ["starting", "recording", "stopping"] {
+            assert!(!restart_now(state));
+        }
+        for state in ["idle", "completed", "failed", "cancelled"] {
+            assert!(restart_now(state));
+        }
     }
 
     #[test]
