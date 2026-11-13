@@ -152,7 +152,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           file: src-tauri/cobertura.xml
           flags: backend
@@ -179,7 +179,7 @@ jobs:
         # run: npm run test:coverage
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           file: coverage/lcov.info
           flags: frontend
