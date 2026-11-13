@@ -12,7 +12,7 @@ def packet(sequence=0, timestamp=1234):
 class PacketTests(unittest.TestCase):
     def test_stop_surfaces_capture_failure_even_with_an_empty_queue(self):
         tap = EegPacketTap(lambda: 42.)
-        tap.capture(b'bad')
+        tap.capture(b'\x00\x06bad')
         self.assertEqual(tap.timing_status()['queued_packets'], 0)
         with self.assertRaisesRegex(RuntimeError, 'layout'):
             tap.finish_and_drain(lambda *args: None)
@@ -121,7 +121,7 @@ class TapTests(unittest.IsolatedAsyncioTestCase):
             client = Client()
             seen = []
             await client.start_notify(EEG_UUID, lambda sender, data: seen.append(data))
-            data = bytearray(b"bad")
+            data = bytearray(b"\x00\x06bad")
             client.callback(None, data)
             self.assertIs(seen[0], data)
             with self.assertRaisesRegex(RuntimeError, "layout"):
@@ -130,20 +130,36 @@ class TapTests(unittest.IsolatedAsyncioTestCase):
             tap.restore()
 
     def test_layout_failure_describes_the_rejected_packet(self):
-        # The band intermittently sends a notification that is not a 178-byte type-6 EEG frame ~0.6 s into streaming.
-        # The fixed message alone could not say what it was; its size, type byte and position are wire numbers only.
+        # A type-6 frame of the wrong length would be decoded by the SDK as 9 invented rows; stop instead, and name it.
         tap = EegPacketTap(lambda: 42.0)
         tap.capture(packet(0))
         tap.capture(packet(1))
-        tap.capture(bytes([7, 9, 1, 2]))
+        tap.capture(packet(2)[:100])
         with self.assertRaisesRegex(
-            RuntimeError, r"^Unsupported EEG packet layout \(4 bytes, type 9, after 2 packets\)$"
+            RuntimeError, r"^Unsupported EEG packet layout \(100 bytes, type 6, after 2 packets\)$"
         ):
             tap.drain(lambda *args: None)
         empty = EegPacketTap(lambda: 42.0)
         empty.capture(b"")
         with self.assertRaisesRegex(RuntimeError, r"\(0 bytes, type none, after 0 packets\)$"):
             empty.drain(lambda *args: None)
+
+    def test_frames_the_sdk_ignores_are_counted_not_fatal(self):
+        # About 0.6 s into some connects the band sends a 178-byte frame of type 106 on the EEG characteristic.
+        # frenztoolkit 0.3.2's own parser returns no samples for any type but 6, so it carries no EEG the SDK uses.
+        # Stopping the connection over it failed about 2 in 8 connects.
+        tap = EegPacketTap(lambda: 42.0)
+        other = bytearray(packet(1))
+        other[1] = 106
+        for frame in (packet(0), bytes(other), packet(2), bytes(other)):
+            tap.capture(frame)
+        published = []
+        tap.drain(lambda *args: published.append(args))
+        self.assertEqual(len(published), 2)
+        self.assertEqual(tap.sample_count, 18)
+        status = tap.timing_status()
+        self.assertEqual(status["skipped_packet_count"], 2)
+        self.assertEqual(status["skipped_packet_types"], {"106": 2})
 
     async def test_second_tap_is_rejected_and_sdk_exceptions_propagate(self):
         class Client:

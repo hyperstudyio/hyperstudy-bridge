@@ -10,6 +10,7 @@ from collections import deque
 
 EEG_UUID = "45420201-0000-ffff-ff45-415241424c45"
 EEG_SUFFIX = "_EEG_bluetooth"
+EEG_PACKET_TYPE = 6  # byte 1 of an EEG frame; it equals the channel count
 EEG_COLUMNS = [
     ("source_timestamp", "seconds"),
     *[(f"adc_channel_{i}", "raw_ADC_counts") for i in range(6)],
@@ -68,6 +69,8 @@ class EegPacketTap:
             "sequence_discontinuity_count": 0,
             "backward_count": 0,
             "last_sequence_discontinuity": None,
+            "skipped_packet_count": 0,
+            "skipped_packet_types": {},
             "acquisition_alignment": "unverified",
         }
         self.client_class = None
@@ -81,7 +84,16 @@ class EegPacketTap:
             with self.lock:
                 if self.failure is not None or not self.accepting:
                     return
-                if len(payload) != 178 or payload[1] != 6:
+                if len(payload) > 1 and payload[1] != EEG_PACKET_TYPE:
+                    # frenztoolkit 0.3.2's parser (get_data_from_eeg_binary_packet) returns no samples for any type
+                    # but 6, so these frames hold no EEG the SDK uses. The band sends a type-106 one about 0.6 s into
+                    # some connects. Count them by type; never decode them.
+                    kind = str(payload[1])
+                    types = self.status["skipped_packet_types"]
+                    types[kind] = types.get(kind, 0) + 1
+                    self.status["skipped_packet_count"] += 1
+                elif len(payload) != 178:
+                    # A short type-6 frame would be decoded by the SDK as 9 invented rows; stop instead.
                     # Wire numbers only (no payload bytes), so the message stays safe to show and log.
                     kind = payload[1] if len(payload) > 1 else "none"
                     self.failure = (f"Unsupported EEG packet layout ({len(payload)} bytes, type {kind}, "
@@ -144,6 +156,8 @@ class EegPacketTap:
         with self.lock:
             return {
                 **self.status,
+                # Copied: the Bluetooth callback thread adds to it while the status is serialized.
+                "skipped_packet_types": dict(self.status["skipped_packet_types"]),
                 "queued_packets": len(self.queue),
                 "captured_packets": self.captured_packets,
                 "capture_closed": not self.accepting,
