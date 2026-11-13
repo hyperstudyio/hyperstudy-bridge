@@ -29,10 +29,10 @@ jobs:
       dmg-intel: ${{ steps.artifacts.outputs.dmg_intel }}
       dmg-arm: ${{ steps.artifacts.outputs.dmg_arm }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
           cache: 'npm'
@@ -167,7 +167,7 @@ jobs:
           echo "dmg_path=$DMG_NAME" >> $GITHUB_OUTPUT
 
       - name: Upload DMG artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dmg-${{ matrix.target }}
           path: ${{ steps.artifacts.outputs.dmg_path }}
@@ -200,7 +200,7 @@ jobs:
 
       - name: Upload updater artifact
         if: steps.updater_artifacts.outputs.targz_path != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: updater-${{ matrix.target }}
           path: |
@@ -224,7 +224,7 @@ jobs:
           - aarch64-apple-darwin
     steps:
       - name: Download DMG artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dmg-${{ matrix.target }}
 
@@ -273,7 +273,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download all DMGs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: dmg-*
           merge-multiple: true
