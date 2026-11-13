@@ -1161,13 +1161,21 @@ pub async fn stop_frenz_bridge(
         state.frenz_process.stop()
     );
     let errors: Vec<String> = [streams.err().map(|e| e.to_string()), process.err()]
-        .into_iter().flatten().collect();
+        .into_iter()
+        .flatten()
+        .collect();
     if errors.is_empty() {
         state.broadcast_device_status(crate::bridge::DeviceStatusEvent::disconnected(
-            "frenz".into(), crate::devices::DeviceType::LSL, "FRENZ disconnected"));
+            "frenz".into(),
+            crate::devices::DeviceType::LSL,
+            "FRENZ disconnected",
+        ));
         Ok(CommandResult::success("FRENZ bridge stopped".to_string()))
     } else {
-        Ok(CommandResult::error(format!("FRENZ cleanup failed: {}", errors.join("; "))))
+        Ok(CommandResult::error(format!(
+            "FRENZ cleanup failed: {}",
+            errors.join("; ")
+        )))
     }
 }
 
@@ -1226,44 +1234,125 @@ pub fn get_app_info() -> AppInfo {
 // Recording operations run off the async executor; native LSL handles stay on
 // the recording thread, independently of browser and display subscriptions.
 #[tauri::command]
-pub async fn discover_recording_streams() -> Result<Vec<crate::recording::StreamDescriptor>,String> {
-    tokio::task::spawn_blocking(crate::recording::discover).await
-        .map_err(|_|"Discovery worker failed".to_string())?.map_err(|e|e.to_string())
+pub async fn discover_recording_streams() -> Result<Vec<crate::recording::StreamDescriptor>, String>
+{
+    tokio::task::spawn_blocking(crate::recording::discover)
+        .await
+        .map_err(|_| "Discovery worker failed".to_string())?
+        .map_err(|e| e.to_string())
 }
 #[tauri::command]
-pub async fn start_lsl_recording(request:crate::recording::RecordingRequest,
-    state:State<'_,Arc<AppState>>) -> Result<crate::recording::RecordingStatus,String> {
-    let manager=state.recording.clone();
-    tokio::task::spawn_blocking(move||manager.start(request)).await
-        .map_err(|_|"Recording worker failed".to_string())?.map_err(|e|e.to_string())
+pub async fn start_lsl_recording(
+    request: crate::recording::RecordingRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::recording::RecordingStatus, String> {
+    let manager = state.recording.clone();
+    tokio::task::spawn_blocking(move || manager.start(request))
+        .await
+        .map_err(|_| "Recording worker failed".to_string())?
+        .map_err(|e| e.to_string())
 }
 #[tauri::command]
-pub async fn stop_lsl_recording(request:Option<crate::recording::RecordingStopRequest>, state:State<'_,Arc<AppState>>) -> Result<crate::recording::RecordingStatus,String> {
-    let manager=state.recording.clone();
-    tokio::task::spawn_blocking(move||manager.stop_with(request.unwrap_or_default())).await
-        .map_err(|_|"Recording worker failed".to_string())?.map_err(|e|e.to_string())
+pub async fn stop_lsl_recording(
+    request: Option<crate::recording::RecordingStopRequest>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::recording::RecordingStatus, String> {
+    let manager = state.recording.clone();
+    tokio::task::spawn_blocking(move || manager.stop_with(request.unwrap_or_default()))
+        .await
+        .map_err(|_| "Recording worker failed".to_string())?
+        .map_err(|e| e.to_string())
 }
 #[tauri::command]
-pub fn lsl_recording_status(state:State<'_,Arc<AppState>>) -> crate::recording::RecordingStatus {
+pub fn lsl_recording_status(state: State<'_, Arc<AppState>>) -> crate::recording::RecordingStatus {
     state.recording.status()
 }
 #[tauri::command]
-pub async fn recover_lsl_recording(path:std::path::PathBuf,state:State<'_,Arc<AppState>>) -> Result<std::path::PathBuf,String> {
-    if matches!(state.recording.status().state.as_str(),"starting"|"recording"|"stopping") {
+pub async fn recover_lsl_recording(
+    path: std::path::PathBuf,
+    state: State<'_, Arc<AppState>>,
+) -> Result<std::path::PathBuf, String> {
+    if matches!(
+        state.recording.status().state.as_str(),
+        "starting" | "recording" | "stopping"
+    ) {
         return Err("Stop acquisition before recovering an interrupted recording".into());
     }
-    tokio::task::spawn_blocking(move||crate::recording::recover(&path)).await
-        .map_err(|_|"Recovery worker failed".to_string())?.map_err(|e|e.to_string())
+    tokio::task::spawn_blocking(move || crate::recording::recover(&path))
+        .await
+        .map_err(|_| "Recovery worker failed".to_string())?
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn scan_frenz_devices(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<Vec<crate::devices::lsl::frenz_process::FrenzBluetoothDevice>, String> {
+pub async fn scan_frenz_devices(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<crate::devices::lsl::frenz_process::FrenzBluetoothDevice>, String> {
     state.frenz_process.scan(&app).await
 }
 
 #[tauri::command]
-pub async fn list_study_recordings(state: State<'_,Arc<AppState>>) -> Result<Vec<crate::recording::study::StudySession>,String> {
+pub async fn list_study_recordings(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<crate::recording::study::StudySession>, String> {
     let manager = state.recording.clone();
-    tokio::task::spawn_blocking(move || manager.list_studies()).await
-        .map_err(|_|"Study status worker failed".to_string())?.map_err(|e|e.to_string())
+    tokio::task::spawn_blocking(move || manager.list_studies())
+        .await
+        .map_err(|_| "Study status worker failed".to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// Shows a recording in Finder (Explorer / the file manager elsewhere). Takes an id, never a path: only files Bridge
+/// recorded can be revealed.
+#[tauri::command]
+pub async fn reveal_recording(
+    recording_id: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let manager = state.recording.clone();
+    tokio::task::spawn_blocking(move || {
+        let path = manager
+            .recorded_file(recording_id.as_deref())
+            .map_err(|e| e.to_string())?;
+        let status = reveal_command(&path)
+            .status()
+            .map_err(|e| format!("Couldn't open the folder: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("Couldn't open the folder ({status})"))
+        }
+    })
+    .await
+    .map_err(|_| "Reveal worker failed".to_string())?
+}
+
+fn reveal_command(path: &std::path::Path) -> std::process::Command {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = std::process::Command::new("open");
+        command.arg("-R").arg(path);
+        command
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = std::process::Command::new("explorer");
+        command.arg(format!("/select,{}", path.display()));
+        command
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(path.parent().unwrap_or(path));
+        command
+    }
+}
+
+/// The LSL streams Bridge receives and publishes, for the LSL panel.
+#[tauri::command]
+pub async fn lsl_bridge_streams(
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    Ok(state.lsl_bridge_streams().await)
 }

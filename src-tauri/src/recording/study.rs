@@ -198,6 +198,28 @@ impl RecordingManager {
         sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         Ok(sessions)
     }
+    /// The file of a recording Bridge made: a study recording by id, or the manual recorder's file. Callers reveal
+    /// it in Finder, so it never resolves a path the frontend supplies.
+    pub fn recorded_file(&self, recording_id: Option<&str>) -> Result<PathBuf> {
+        let path = match recording_id {
+            Some(id) => self
+                .list_studies()?
+                .into_iter()
+                .find(|s| s.recording_id == id)
+                .and_then(|s| s.recording.path)
+                .ok_or_else(|| anyhow::anyhow!("That recording is no longer listed"))?,
+            None => self
+                .status()
+                .path
+                .ok_or_else(|| anyhow::anyhow!("Nothing has been recorded yet"))?,
+        };
+        ensure!(
+            path.exists(),
+            "The recording file is no longer at {}",
+            path.display()
+        );
+        Ok(path)
+    }
     pub fn get_study(&self, context: &RecordingContext) -> Result<Option<StudySession>> {
         validate_context(context)?;
         let sessions = self.list_studies()?;
@@ -409,6 +431,47 @@ mod tests {
         assert_eq!(sessions[0].upload_status, "pending");
         assert_eq!(std::fs::read(path).unwrap(), b"original bytes");
         assert!(sessions[0].upload_error.as_ref().unwrap().contains("fresh"));
+    }
+    #[test]
+    fn recorded_file_resolves_only_recordings_bridge_made() {
+        let directory = directory();
+        let manager = RecordingManager::default();
+        manager
+            .configure_study_directory(directory.clone())
+            .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = directory.join(format!("{id}.sqlite"));
+        std::fs::write(&path, b"x").unwrap();
+        let session = StudySession {
+            recording_id: id.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            context: context(),
+            recording: RecordingStatus {
+                state: "completed".into(),
+                path: Some(path.clone()),
+                ..Default::default()
+            },
+            upload_status: "complete".into(),
+            upload_error: None,
+        };
+        manager
+            .study
+            .lock()
+            .unwrap()
+            .sessions
+            .insert(id.clone(), session);
+        assert_eq!(manager.recorded_file(Some(&id)).unwrap(), path);
+        assert!(manager.recorded_file(Some("../../etc/passwd")).is_err());
+        assert!(
+            manager.recorded_file(None).is_err(),
+            "no manual recording yet"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(manager
+            .recorded_file(Some(&id))
+            .unwrap_err()
+            .to_string()
+            .contains("no longer at"));
     }
     #[test]
     fn wrong_identity_cannot_stop_or_mark_and_duplicate_stop_is_idempotent() {

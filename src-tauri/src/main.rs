@@ -9,11 +9,14 @@ mod devices;
 mod logging;
 mod open_files;
 mod performance;
-mod storage;
 mod recording;
+mod storage;
 mod usb_monitor;
 
-use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 use tracing::{error, info, warn};
@@ -62,7 +65,9 @@ async fn main() {
     match open_files::raise_open_file_limit() {
         Ok(Some(limit)) => info!("Raised open-file soft limit to {limit}"),
         Ok(None) => {}
-        Err(error) => warn!("Could not raise the open-file limit; connecting many LSL streams may fail: {error}"),
+        Err(error) => warn!(
+            "Could not raise the open-file limit; connecting many LSL streams may fail: {error}"
+        ),
     }
 
     let app_state = Arc::new(AppState::new());
@@ -292,6 +297,8 @@ async fn main() {
             stop_lsl_recording,
             lsl_recording_status,
             list_study_recordings,
+            reveal_recording,
+            lsl_bridge_streams,
             recover_lsl_recording,
             scan_frenz_devices,
             start_frenz_bridge,
