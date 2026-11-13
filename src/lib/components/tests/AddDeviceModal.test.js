@@ -17,6 +17,16 @@ describe('AddDeviceModal', () => {
     vi.clearAllMocks();
   });
 
+  it('adds FRENZ with all 20 sensor, model, and marker options enabled', async () => {
+    render(AddDeviceModal, mockProps);
+    await user.click(screen.getByText('Earable FRENZ Brainband'));
+    await user.click(screen.getByRole('button', { name: 'Add (1)' }));
+    const config = mockProps.onAdd.mock.calls[0][0][0].config;
+    expect(Object.keys(config)).toHaveLength(20);
+    expect(Object.values(config).every(value => value === true)).toBe(true);
+    expect(config).toMatchObject({ streamHrRaw: true, streamSpo2Raw: true, streamFirmware: true });
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });

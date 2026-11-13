@@ -36,11 +36,33 @@ async function initStore() {
  * @param {string} key - The key to store under
  * @param {string} value - The secret value to store
  */
-export async function setSecret(key, value) {
-  const store = await getStore();
-  const data = Array.from(new TextEncoder().encode(value));
-  await store.insert(key, data);
-  await strongholdInstance.save();
+let pendingWrite = Promise.resolve();
+let dirty = false;
+
+/** Persist one form's changed values in a single encrypted snapshot. */
+export function setSecrets(values) {
+  const update = pendingWrite.then(async () => {
+    const store = await getStore();
+    for (const [key, value] of Object.entries(values)) {
+      const existing = await store.get(key);
+      const previous = existing?.length ? new TextDecoder().decode(new Uint8Array(existing)) : '';
+      if (previous === (value || '')) continue;
+      // Retain dirty state on any failure; a later user save must commit again.
+      dirty = true;
+      if (value) await store.insert(key, Array.from(new TextEncoder().encode(value)));
+      else await store.remove(key);
+    }
+    if (dirty) {
+      await strongholdInstance.save();
+      dirty = false;
+    }
+  });
+  pendingWrite = update.catch(() => {}); // Serialize operations, never retry them.
+  return update;
+}
+
+export function setSecret(key, value) {
+  return setSecrets({ [key]: value });
 }
 
 /**
@@ -50,25 +72,15 @@ export async function setSecret(key, value) {
  */
 export async function getSecret(key) {
   const store = await getStore();
-  try {
-    const data = await store.get(key);
-    if (!data || data.length === 0) return null;
-    return new TextDecoder().decode(new Uint8Array(data));
-  } catch {
-    return null;
-  }
+  const data = await store.get(key);
+  if (!data || data.length === 0) return null;
+  return new TextDecoder().decode(new Uint8Array(data));
 }
 
 /**
  * Remove a secret from the encrypted vault.
  * @param {string} key - The key to remove
  */
-export async function removeSecret(key) {
-  const store = await getStore();
-  try {
-    await store.remove(key);
-    await strongholdInstance.save();
-  } catch {
-    // Key didn't exist — that's fine
-  }
+export function removeSecret(key) {
+  return setSecrets({ [key]: null });
 }

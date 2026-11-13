@@ -7,11 +7,16 @@ mod bridge;
 mod commands;
 mod devices;
 mod logging;
+mod open_files;
 mod performance;
+mod recording;
 mod storage;
 mod usb_monitor;
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 use tracing::{error, info, warn};
@@ -21,6 +26,19 @@ use tracing_subscriber::EnvFilter;
 use crate::bridge::{AppState, BridgeServer};
 use crate::commands::*;
 use crate::logging::{init_log_emitter, init_log_persister, set_app_handle, TauriLogLayer};
+
+/// Stops the FRENZ sidecar when Bridge exits, after the recording is finalized. Left running, it stayed connected
+/// to the band over Bluetooth, so no later Bridge could connect to it. Runs on a fresh thread: the sidecar belongs to
+/// Tauri's runtime, and the Exit callback is inside a tokio context where blocking on it would panic.
+fn stop_frenz_sidecar(state: &Arc<AppState>) {
+    let manager = state.frenz_process.clone();
+    match std::thread::spawn(move || tauri::async_runtime::block_on(manager.stop_for_exit())).join()
+    {
+        Ok(Err(error)) => error!("FRENZ sidecar exit stop failed: {error}"),
+        Err(_) => error!("FRENZ sidecar exit stop panicked"),
+        Ok(Ok(())) => {}
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -44,9 +62,19 @@ async fn main() {
         .init();
 
     info!("Starting HyperStudy Bridge");
+    // Before any LSL inlet or outlet exists: every FRENZ stream's inlet needs sockets (see open_files.rs).
+    match open_files::raise_open_file_limit() {
+        Ok(Some(limit)) => info!("Raised open-file soft limit to {limit}"),
+        Ok(None) => {}
+        Err(error) => warn!(
+            "Could not raise the open-file limit; connecting many LSL streams may fail: {error}"
+        ),
+    }
 
     let app_state = Arc::new(AppState::new());
     let state_clone = app_state.clone();
+    let exit_state = app_state.clone();
+    let shutdown = Arc::new(AtomicU8::new(0));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -73,6 +101,8 @@ async fn main() {
         .setup(move |app| {
             let state = state_clone.clone();
             let app_handle = app.handle().clone();
+
+            state.recording.configure_study_directory(app_handle.path().app_data_dir()?.join("recordings"))?;
 
             // Set the app handle for the logging layer to enable event emission
             set_app_handle(app_handle.clone());
@@ -165,6 +195,9 @@ async fn main() {
 
             #[cfg(target_os = "macos")]
             {
+                let quit_item = MenuItemBuilder::with_id("quit_after_recording", "Quit HyperStudy Bridge")
+                    .accelerator("CmdOrCtrl+Q")
+                    .build(app)?;
                 let app_submenu = SubmenuBuilder::new(app, "HyperStudy Bridge")
                     .about(None)
                     .item(&check_updates_item)
@@ -175,7 +208,7 @@ async fn main() {
                     .hide_others()
                     .show_all()
                     .separator()
-                    .quit()
+                    .item(&quit_item)
                     .build()?;
 
                 let edit_submenu = SubmenuBuilder::new(app, "Edit")
@@ -213,6 +246,9 @@ async fn main() {
 
             // Handle menu events — forward to frontend via Tauri event
             app.on_menu_event(move |app_handle, event| {
+                if event.id().as_ref() == "quit_after_recording" {
+                    app_handle.exit(0);
+                }
                 if event.id().as_ref() == "check_for_updates" {
                     let _ = app_handle.emit("menu-check-for-updates", ());
                 }
@@ -257,11 +293,53 @@ async fn main() {
             test_ttl_device,
             reset_device,
             get_app_info,
+            discover_recording_streams,
+            start_lsl_recording,
+            stop_lsl_recording,
+            lsl_recording_status,
+            list_study_recordings,
+            reveal_recording,
+            lsl_bridge_streams,
+            recover_lsl_recording,
+            scan_frenz_devices,
             start_frenz_bridge,
             stop_frenz_bridge,
             get_frenz_bridge_status,
             check_frenz_bridge_available
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |app, event| {
+            // Native OS termination (for example the macOS Dock Quit action)
+            // can bypass ExitRequested. The final Exit callback is synchronous.
+            if matches!(event, tauri::RunEvent::Exit) {
+                match exit_state.recording.stop() {
+                    Ok(status) if status.state == "failed" => error!("Recording exit error: {:?}", status.error),
+                    Err(error) => error!("Recording exit flush failed: {error}"),
+                    _ => {}
+                }
+                stop_frenz_sidecar(&exit_state);
+            }
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                // Tauri exits the process without guaranteeing manager destructors.
+                // Stop on a worker, keep the event loop responsive, then permit exit.
+                if shutdown.load(Ordering::Acquire) == 2 { return; }
+                api.prevent_exit();
+                if shutdown.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                    let state = exit_state.clone();
+                    let handle = app.clone();
+                    let finished = shutdown.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        match state.recording.stop() {
+                            Ok(status) if status.state == "failed" => error!("Recording stopped with error: {:?}", status.error),
+                            Err(error) => error!("Recording finalization failed: {error}"),
+                            _ => {}
+                        }
+                        stop_frenz_sidecar(&state);
+                        finished.store(2, Ordering::Release);
+                        handle.exit(code.unwrap_or(0));
+                    });
+                }
+            }
+        });
 }

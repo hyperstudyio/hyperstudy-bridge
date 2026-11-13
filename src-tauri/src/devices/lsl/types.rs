@@ -340,12 +340,20 @@ impl Default for LslConfig {
 /// All known FRENZ LSL stream suffixes.
 /// Streams are named `{DEVICE_ID}_{suffix}` by the Python LSL bridge script.
 pub const FRENZ_STREAM_SUFFIXES: &[&str] = &[
+    "_EEG_bluetooth",
     "_EEG_raw",
     "_EEG_filtered",
     "_EOG_filtered",
     "_EMG_filtered",
     "_PPG_raw",
     "_IMU_raw",
+    "_HR_raw",
+    "_SPO2_raw",
+    "_EEG_firmware",
+    "_PPG_firmware",
+    "_IMU_firmware",
+    "_HR_firmware",
+    "_SPO2_firmware",
     "_POSTURE",
     "_poas",
     "_sleep_stage",
@@ -417,7 +425,7 @@ pub struct DiscoveredFrenzDevice {
 /// Determine the category for a FRENZ stream based on its suffix
 pub fn frenz_stream_category(suffix: &str) -> FrenzStreamCategory {
     match suffix.to_lowercase().as_str() {
-        "_eeg_raw" => FrenzStreamCategory::RawPhysiological,
+        "_eeg_raw" | "_eeg_bluetooth" => FrenzStreamCategory::RawPhysiological,
         "_ppg_raw" => FrenzStreamCategory::Cardiovascular,
         "_imu_raw" => FrenzStreamCategory::Motion,
         "_eeg_filtered" | "_eog_filtered" | "_emg_filtered" => {
@@ -589,12 +597,18 @@ pub struct DiscoveredNeonDevice {
     pub has_gaze_stream: bool,
     /// Whether events stream is available
     pub has_events_stream: bool,
-    /// Number of gaze channels (2 for basic, 6 for eye-state enabled)
+    /// Number of gaze channels; zero when gaze is absent or ambiguous.
     pub gaze_channel_count: u32,
     /// Gaze stream UID (if available)
     pub gaze_stream_uid: Option<String>,
     /// Events stream UID (if available)
     pub events_stream_uid: Option<String>,
+    /// Multiple gaze publishers share this device identity; no UID is selected.
+    #[serde(default)]
+    pub gaze_stream_ambiguous: bool,
+    /// Multiple event publishers share this device identity; no UID is selected.
+    #[serde(default)]
+    pub events_stream_ambiguous: bool,
     /// When this device was first discovered
     pub discovered_at: std::time::SystemTime,
 }

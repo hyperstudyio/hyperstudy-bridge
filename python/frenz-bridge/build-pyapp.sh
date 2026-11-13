@@ -37,16 +37,19 @@ done
 
 # Build wheel first — PyApp requires a file (wheel/sdist), not a directory
 echo "=== Building wheel ==="
-pip install build 2>/dev/null || python -m pip install build
-python -m build --wheel --outdir "$SCRIPT_DIR/dist/"
-WHEEL=$(ls "$SCRIPT_DIR"/dist/*.whl | head -1)
+python -c "import build" 2>/dev/null || python -m pip install build
+WHEEL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/frenz-wheel.XXXXXX")
+trap 'rm -rf "$WHEEL_DIR"' EXIT
+python -m build --wheel --outdir "$WHEEL_DIR" "$SCRIPT_DIR"
+WHEELS=("$WHEEL_DIR"/*.whl)
+WHEEL="${WHEELS[0]}"
 echo "Built wheel: $WHEEL"
 
 # PyApp configuration
 export PYAPP_PROJECT_PATH="$WHEEL"
 export PYAPP_EXEC_CODE="from frenz_lsl_bridge import main; main()"
 export PYAPP_DISTRIBUTION_EMBED=1
-export PYAPP_PYTHON_VERSION=3.11
+export PYAPP_PYTHON_VERSION=3.9
 export PYAPP_PIP_EXTRA_ARGS="--no-cache-dir"
 
 echo ""

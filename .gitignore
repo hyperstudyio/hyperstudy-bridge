@@ -81,3 +81,6 @@ python/frenz-bridge/build/
 *.backup
 *.bak
 *~
+# Python bytecode caches
+__pycache__/
+*.pyc

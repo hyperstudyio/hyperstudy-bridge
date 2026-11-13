@@ -28,10 +28,20 @@
   // FRENZ bridge process status
   let frenzBridgeAvailable = $state(false);
   let frenzBridgeStatus = $state({ state: 'stopped', streams: [], sample_count: 0 });
+  let frenzTimingAnomaly = $derived(
+    Object.entries(frenzBridgeStatus.timing || {}).some(
+      ([suffix, timing]) =>
+        timing.backward_count > 0 ||
+        timing.nonfinite_count > 0 ||
+        timing.sequence_discontinuity_count > 0 ||
+        (suffix.endsWith('_raw') && timing.cadence_deviation_count > 0)
+    )
+  );
   let unlistenFrenzStatus = null;
 
   // FRENZ unified connect progress
   let frenzConnecting = $state(false);
+  let frenzDisconnecting = $state(false);
   let frenzPhaseText = $state('');
 
   // General device connect progress
@@ -77,7 +87,7 @@
       case 'stopped':
         return 'Stopped';
       case 'bootstrapping':
-        return 'Installing...';
+        return 'Starting...';
       case 'connecting':
         return 'Connecting...';
       case 'streaming':
@@ -228,7 +238,6 @@
       try {
         const result = await bridgeStore.connectDevice(deviceId, deviceConfig);
         console.log(`Successfully connected ${deviceName}`, result);
-        alert(`Connected to ${deviceName}`);
       } catch (error) {
         console.error(`Failed to connect ${deviceName}:`, error);
         alert(`Failed to connect: ${error.message || error}`);
@@ -242,7 +251,6 @@
       try {
         await bridgeStore.disconnectDevice(deviceId);
         console.log(`Successfully disconnected ${deviceName}`);
-        alert(`Disconnected from ${deviceName}`);
       } catch (error) {
         console.error(`Failed to disconnect ${deviceName}:`, error);
         alert(`Failed to disconnect: ${error.message || error}`);
@@ -258,7 +266,6 @@
     try {
       const result = await bridgeStore.connectEyeLink(device.config);
       console.log('Successfully connected EyeLink', result);
-      alert('Connected to EyeLink 1000 Plus');
     } catch (error) {
       console.error('Failed to connect EyeLink:', error);
       alert(`Failed to connect: ${error.message || error}`);
@@ -273,7 +280,6 @@
     try {
       await bridgeStore.disconnectEyeLink();
       console.log('Successfully disconnected EyeLink');
-      alert('Disconnected from EyeLink 1000 Plus');
     } catch (error) {
       console.error('Failed to disconnect EyeLink:', error);
       alert(`Failed to disconnect: ${error.message || error}`);
@@ -310,9 +316,7 @@
 
       // Connect LSL streams via WebSocket
       frenzPhaseText = 'Connecting to data streams...';
-      await bridgeStore.connectDevice('frenz', device.config);
-
-      alert('Connected to FRENZ');
+      await bridgeStore.connectDevice('frenz', { ...device.config, device_name: frenzDeviceId });
     } catch (error) {
       alert(`Failed to connect: ${error.message || error}`);
     } finally {
@@ -357,11 +361,15 @@
 
   // FRENZ disconnect: LSL streams + bridge process
   async function handleFrenzDisconnect() {
+    if (frenzDisconnecting) return;
+    frenzDisconnecting = true;
     try {
       await bridgeStore.disconnectDevice('frenz');
-      alert('Disconnected from FRENZ');
+      frenzBridgeStatus = await getFrenzBridgeStatus();
     } catch (error) {
       alert(`Failed to disconnect: ${error.message || error}`);
+    } finally {
+      frenzDisconnecting = false;
     }
   }
 
@@ -422,7 +430,7 @@
 
       // If the device was connected, reconnect with new config
       // disconnectDevice properly awaits completion, so no arbitrary delay needed
-      if (wasConnected) {
+      if (wasConnected && deviceId !== 'frenz') {
         if (deviceId === 'eyelink') {
           await bridgeStore.disconnectEyeLink();
           await bridgeStore.connectEyeLink(newConfig);
@@ -532,7 +540,8 @@
       <div class="config-row">
         <span class="label">URL:</span>
         <span class="value">
-          {device.config.url || (device.config.device_id ? 'Resolved from pinned phone' : 'Not configured')}
+          {device.config.url ||
+            (device.config.device_id ? 'Resolved from pinned phone' : 'Not configured')}
         </span>
       </div>
       <div class="config-row">
@@ -543,8 +552,8 @@
         <div class="config-row">
           <span class="label">Connected:</span>
           <span class="value">
-            {device.info.device_name} · {device.info.device_id} · {device.info.device_ip}{device.info
-              .battery_level != null
+            {device.info.device_name} · {device.info.device_id} · {device.info.device_ip}{device
+              .info.battery_level != null
               ? ` · ${Math.round(device.info.battery_level)}%`
               : ''}
           </span>
@@ -604,6 +613,17 @@
             <span class="label">Samples:</span>
             <span class="value">{frenzBridgeStatus.sample_count.toLocaleString()}</span>
           </div>
+          <div class="config-row">
+            <span class="label">Timestamp quality:</span>
+            <span
+              class="value"
+              style:color={frenzTimingAnomaly ? 'var(--color-warning)' : undefined}
+            >
+              {frenzTimingAnomaly
+                ? 'Source timestamp discontinuities detected'
+                : 'Acquisition alignment unverified'}
+            </span>
+          </div>
         {/if}
       {:else if !frenzBridgeAvailable && frenzBridgeStatus.state !== 'stopped'}
         <div class="config-row">
@@ -648,13 +668,16 @@
       disabled={device.status === 'connecting' ||
         isConnecting ||
         frenzConnecting ||
+        frenzDisconnecting ||
         (device.id === 'ttl' && !device.config.port)}
     >
-      {device.status === 'connected'
-        ? 'Disconnect'
-        : isConnecting || frenzConnecting
-          ? 'Connecting...'
-          : 'Connect'}
+      {frenzDisconnecting
+        ? 'Disconnecting...'
+        : device.status === 'connected'
+          ? 'Disconnect'
+          : isConnecting || frenzConnecting
+            ? 'Connecting...'
+            : 'Connect'}
     </button>
     {#if device.id === 'ttl' && device.status === 'connected'}
       <button class="action-btn pulse-btn" onclick={sendTestPulse}> Send Pulse </button>

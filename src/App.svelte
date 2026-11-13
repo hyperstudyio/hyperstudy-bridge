@@ -3,6 +3,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { tauriService } from './lib/services/tauri.js';
   import { checkForUpdate, downloadAndInstallUpdate, relaunchApp } from './lib/services/updater.js';
+  import RecordingPanel from './lib/components/RecordingPanel.svelte';
   import DeviceCard from './lib/components/DeviceCard.svelte';
   import StatusIndicator from './lib/components/StatusIndicator.svelte';
   import AddDeviceModal from './lib/components/AddDeviceModal.svelte';
@@ -24,6 +25,7 @@
   let showLogViewer = $state(false);
   let showSettingsPanel = $state(false);
   let showLslPanel = $state(false);
+  let showRecordingPanel = $state(false);
   let showPerformancePanel = $state(false);
 
   // Selected devices - user has explicitly added these
@@ -39,7 +41,11 @@
       const wsDevice = wsDevices.get(device.id);
       if (wsDevice) {
         // `info` carries which hardware answered (Neon device_id/IP, recording state)
-        return { ...device, status: wsDevice.status || 'disconnected', info: wsDevice.info ?? device.info };
+        return {
+          ...device,
+          status: wsDevice.status || 'disconnected',
+          info: wsDevice.info ?? device.info,
+        };
       }
       return device;
     })
@@ -275,6 +281,14 @@
 
       <button
         class="header-btn"
+        onclick={() => {
+          showRecordingPanel = true;
+        }}
+        type="button">Recordings</button
+      >
+
+      <button
+        class="header-btn"
         onclick={e => {
           e.preventDefault();
           e.stopPropagation();
@@ -364,6 +378,7 @@
     onClose={() => (showAddDeviceModal = false)}
   />
 
+  <RecordingPanel bind:isOpen={showRecordingPanel} />
   <LslConfigPanel bind:isOpen={showLslPanel} />
 
   <LogViewer bind:isOpen={showLogViewer} />

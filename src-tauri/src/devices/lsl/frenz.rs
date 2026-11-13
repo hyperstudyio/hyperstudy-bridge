@@ -12,7 +12,7 @@
 //!
 //! # FRENZ LSL Streams
 //!
-//! The Python bridge creates up to 16 streams per device, all named `{DEVICE_ID}_{suffix}`:
+//! The Python bridge creates up to 23 streams per device, all named `{DEVICE_ID}_{suffix}`:
 //! - Raw signals: `_EEG_raw`, `_PPG_raw`, `_IMU_raw`
 //! - Filtered signals: `_EEG_filtered`, `_EOG_filtered`, `_EMG_filtered`
 //! - Derived metrics: `_focus`, `_sleep_stage`, `_poas`, `_POSTURE`, `_signal_quality`
@@ -40,11 +40,12 @@ use super::types::{
     frenz_stream_category, ChannelFormat, DiscoveredFrenzDevice, FrenzStreamInfo, LslError, Sample,
     SampleData, StreamInfo, StreamType,
 };
+use futures_util::future::join_all;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 /// A sample received from a FRENZ LSL stream.
@@ -54,6 +55,8 @@ use tracing::{debug, info, warn};
 /// The POSTURE stream uses `string_value`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FrenzSample {
+    /// Original typed sample; integer streams are never coerced into float64.
+    pub data: SampleData,
     /// LSL timestamp
     pub timestamp: f64,
     /// The stream suffix identifying the data type (e.g., "_EEG_raw")
@@ -64,8 +67,31 @@ pub struct FrenzSample {
     pub string_value: Option<String>,
 }
 
+impl FrenzSample {
+    /// Numeric bytes avoid JSON/JavaScript rounding of int64 and non-finite floats.
+    pub fn wire_data(&self) -> serde_json::Value {
+        use base64::Engine;
+        let format = match &self.data {
+            SampleData::Float32(_) => "float32",
+            SampleData::Float64(_) => "float64",
+            SampleData::Int64(_) => "int64",
+            SampleData::Int32(_) => "int32",
+            SampleData::Int16(_) => "int16",
+            SampleData::Int8(_) => "int8",
+            SampleData::String(values) => {
+                return serde_json::json!({
+                "format": "string", "encoding": "json", "values": values })
+            }
+        };
+        serde_json::json!({"format": format, "encoding": "base64-le",
+            "values": base64::engine::general_purpose::STANDARD.encode(self.data.to_bytes())})
+    }
+}
+
 /// Handle for an active FRENZ stream reading task
 struct FrenzStreamTask {
+    /// Keep the inlet identity even if discovery replaces its cache.
+    inlet_uid: String,
     /// Shutdown flag
     shutdown: Arc<AtomicBool>,
     /// Task join handle
@@ -91,6 +117,8 @@ fn buffer_size_for_rate(nominal_srate: f64) -> usize {
 /// Uses the existing LSL infrastructure (resolver, inlet manager, outlet manager)
 /// with FRENZ-specific discovery patterns and generic stream handling.
 pub struct FrenzLslManager {
+    /// Serialize lifecycle requests; individual inlets still open/close concurrently.
+    lifecycle: Mutex<()>,
     /// Stream resolver for discovery (shared with Neon manager)
     resolver: Arc<StreamResolver>,
     /// Inlet manager for consuming streams (shared with Neon manager)
@@ -118,6 +146,7 @@ impl FrenzLslManager {
         outlet_manager: Arc<OutletManager>,
     ) -> Self {
         Self {
+            lifecycle: Mutex::new(()),
             resolver,
             inlet_manager,
             outlet_manager,
@@ -228,6 +257,15 @@ impl FrenzLslManager {
         device_name: &str,
         stream_suffix: &str,
     ) -> Result<mpsc::Receiver<FrenzSample>, LslError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.connect_stream_inner(device_name, stream_suffix).await
+    }
+
+    async fn connect_stream_inner(
+        &self,
+        device_name: &str,
+        stream_suffix: &str,
+    ) -> Result<mpsc::Receiver<FrenzSample>, LslError> {
         info!(
             device = "frenz",
             "Connecting to FRENZ stream: {}{}", device_name, stream_suffix
@@ -282,9 +320,19 @@ impl FrenzLslManager {
             .create_inlet(discovered.clone(), Some(inlet_config))
             .await?;
 
-        self.inlet_manager
+        if let Err(error) = self
+            .inlet_manager
             .open_inlet(stream_uid, Duration::from_secs(10))
-            .await?;
+            .await
+        {
+            // Creation succeeded, so an open/correction failure still owns a worker.
+            if let Err(cleanup) = self.inlet_manager.remove_inlet(stream_uid).await {
+                return Err(LslError::LslLibraryError(format!(
+                    "{error}; inlet cleanup failed: {cleanup}"
+                )));
+            }
+            return Err(error);
+        }
 
         // Create data channel
         let (tx, rx) = mpsc::channel(buf_size);
@@ -297,7 +345,6 @@ impl FrenzLslManager {
         let task_uid = stream_uid.clone();
         let task_device_name = device_name.to_string();
         let task_suffix = stream_suffix.to_string();
-        let channel_format = stream_info.channel_format;
 
         // Use a longer poll timeout for low-rate streams
         let poll_timeout_ms = if stream_info.nominal_srate < 1.0 {
@@ -320,35 +367,19 @@ impl FrenzLslManager {
                     .await
                 {
                     Ok(Some(sample)) => {
-                        let frenz_sample = match &sample.data {
-                            SampleData::Float64(data) => FrenzSample {
-                                timestamp: sample.timestamp,
-                                stream_suffix: task_suffix.clone(),
-                                values: data.clone(),
-                                string_value: None,
+                        let frenz_sample = FrenzSample {
+                            timestamp: sample.timestamp,
+                            stream_suffix: task_suffix.clone(),
+                            values: match &sample.data {
+                                SampleData::Float64(v) => v.clone(),
+                                SampleData::Float32(v) => v.iter().map(|&x| x as f64).collect(),
+                                _ => vec![],
                             },
-                            SampleData::Float32(data) => FrenzSample {
-                                timestamp: sample.timestamp,
-                                stream_suffix: task_suffix.clone(),
-                                values: data.iter().map(|&v| v as f64).collect(),
-                                string_value: None,
+                            string_value: match &sample.data {
+                                SampleData::String(v) => v.first().cloned(),
+                                _ => None,
                             },
-                            SampleData::String(data) => FrenzSample {
-                                timestamp: sample.timestamp,
-                                stream_suffix: task_suffix.clone(),
-                                values: vec![],
-                                string_value: data.first().cloned(),
-                            },
-                            _ => {
-                                warn!(
-                                    device = "frenz",
-                                    "Unexpected data format for {}{} (format: {:?})",
-                                    task_device_name,
-                                    task_suffix,
-                                    channel_format
-                                );
-                                continue;
-                            }
+                            data: sample.data,
                         };
 
                         if task_tx.send(frenz_sample).await.is_err() {
@@ -390,6 +421,7 @@ impl FrenzLslManager {
             tasks.insert(
                 task_key,
                 FrenzStreamTask {
+                    inlet_uid: stream_uid.clone(),
                     shutdown,
                     _handle: handle,
                 },
@@ -412,6 +444,7 @@ impl FrenzLslManager {
         device_name: &str,
         selected_suffixes: &[String],
     ) -> Result<HashMap<String, mpsc::Receiver<FrenzSample>>, LslError> {
+        let _lifecycle = self.lifecycle.lock().await;
         let device = self.get_device(device_name).await.ok_or_else(|| {
             LslError::FrenzDeviceNotFound(format!("Device not found: {}", device_name))
         })?;
@@ -422,64 +455,110 @@ impl FrenzLslManager {
             selected_suffixes.to_vec()
         };
 
-        let mut receivers = HashMap::new();
-        for suffix in &suffixes {
-            match self.connect_stream(device_name, suffix).await {
-                Ok(rx) => {
-                    receivers.insert(suffix.clone(), rx);
+        let mut suffixes = suffixes;
+        suffixes.sort();
+        suffixes.dedup();
+        if suffixes.is_empty() {
+            return Err(LslError::FrenzStreamNotAvailable(format!(
+                "No streams found for {device_name}"
+            )));
+        }
+        // Validate before allocating anything; never roll back pre-existing readers.
+        {
+            let tasks = self.stream_tasks.read().await;
+            for suffix in &suffixes {
+                if !device.streams.contains_key(suffix) {
+                    return Err(LslError::FrenzStreamNotAvailable(format!(
+                        "Stream {suffix} not available for {device_name}"
+                    )));
                 }
-                Err(e) => {
-                    warn!(
-                        device = "frenz",
-                        "Failed to connect stream {}{}: {}", device_name, suffix, e
-                    );
+                if tasks.contains_key(&(device_name.to_string(), suffix.clone())) {
+                    return Err(LslError::LslLibraryError(format!(
+                        "Already connected to stream {device_name}{suffix}"
+                    )));
                 }
             }
         }
 
+        let started = std::time::Instant::now();
+        // Each inlet owns its native worker. Overlap resolution, opening and the
+        // first clock estimate; await every result so failures cannot detach work.
+        let results = join_all(
+            suffixes
+                .iter()
+                .map(|suffix| self.connect_stream_inner(device_name, suffix)),
+        )
+        .await;
+        let mut receivers = HashMap::new();
+        let mut failures = Vec::new();
+        for (suffix, result) in suffixes.iter().zip(results) {
+            match result {
+                Ok(rx) => {
+                    receivers.insert(suffix.clone(), rx);
+                }
+                Err(error) => failures.push(format!("{suffix}: {error}")),
+            }
+        }
+        if !failures.is_empty() {
+            let cleanup = join_all(
+                receivers
+                    .keys()
+                    .map(|suffix| self.disconnect_stream_inner(device_name, suffix)),
+            )
+            .await;
+            for error in cleanup.into_iter().filter_map(Result::err) {
+                failures.push(format!("rollback: {error}"));
+            }
+            return Err(LslError::LslLibraryError(format!(
+                "FRENZ connection failed: {}",
+                failures.join("; ")
+            )));
+        }
         info!(
             device = "frenz",
-            "Connected {}/{} streams for {}",
-            receivers.len(),
-            suffixes.len(),
+            stream_count = receivers.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Connected all selected streams for {}",
             device_name
         );
-
         Ok(receivers)
     }
 
-    /// Disconnect from a single FRENZ stream
+    /// Disconnect from a single FRENZ stream, joining both reader and native inlet.
     pub async fn disconnect_stream(
         &self,
         device_name: &str,
         stream_suffix: &str,
     ) -> Result<(), LslError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.disconnect_stream_inner(device_name, stream_suffix)
+            .await
+    }
+
+    async fn disconnect_stream_inner(
+        &self,
+        device_name: &str,
+        stream_suffix: &str,
+    ) -> Result<(), LslError> {
         let task_key = (device_name.to_string(), stream_suffix.to_string());
-
-        let task = {
-            let mut tasks = self.stream_tasks.write().await;
-            tasks.remove(&task_key)
-        };
-
+        let task = self.stream_tasks.write().await.remove(&task_key);
         if let Some(task) = task {
             task.shutdown.store(true, Ordering::Relaxed);
-            let _ = tokio::time::timeout(Duration::from_secs(2), task._handle).await;
-        }
-
-        // Close the inlet
-        if let Some(device) = self.get_device(device_name).await {
-            if let Some(stream_info) = device.streams.get(stream_suffix) {
-                let _ = self
-                    .inlet_manager
-                    .close_inlet(&stream_info.stream_uid)
-                    .await;
-                let _ = self
-                    .inlet_manager
-                    .remove_inlet(&stream_info.stream_uid)
-                    .await;
+            // A reader may be blocked on a full consumer channel. Cancellation
+            // drops that send future; await the handle rather than detaching it.
+            task._handle.abort();
+            let reader_result = task._handle.await;
+            let cleanup_result = self.inlet_manager.remove_inlet(&task.inlet_uid).await;
+            if let Err(error) = reader_result {
+                if !error.is_cancelled() {
+                    cleanup_result?;
+                    return Err(LslError::LslLibraryError(format!(
+                        "FRENZ reader failed: {error}"
+                    )));
+                }
             }
+            cleanup_result?;
         }
-
         info!(
             device = "frenz",
             "Disconnected FRENZ stream: {}{}", device_name, stream_suffix
@@ -487,26 +566,78 @@ impl FrenzLslManager {
         Ok(())
     }
 
-    /// Disconnect all FRENZ streams
-    pub async fn disconnect_all(&self) -> Result<(), LslError> {
-        let task_keys: Vec<(String, String)> = {
-            let tasks = self.stream_tasks.read().await;
-            tasks.keys().cloned().collect()
-        };
-
-        for (device_name, suffix) in task_keys {
-            let _ = self.disconnect_stream(&device_name, &suffix).await;
+    /// Disconnect only this device's owned readers, independently of discovery.
+    /// The marker outlet is shared and remains available for other devices.
+    pub async fn disconnect_device(&self, device_name: &str) -> Result<(), LslError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let started = std::time::Instant::now();
+        let task_keys: Vec<(String, String)> = self
+            .stream_tasks
+            .read()
+            .await
+            .keys()
+            .filter(|(device, _)| device == device_name)
+            .cloned()
+            .collect();
+        let errors = self.disconnect_tasks_inner(&task_keys).await;
+        if !errors.is_empty() {
+            return Err(LslError::LslLibraryError(format!(
+                "FRENZ disconnect failed for {device_name}: {}",
+                errors.join("; ")
+            )));
         }
+        info!(
+            device = "frenz",
+            device_name,
+            stream_count = task_keys.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Disconnected FRENZ device streams"
+        );
+        Ok(())
+    }
 
-        // Also destroy marker outlet if it exists
-        {
-            let mut outlet_id = self.marker_outlet_id.write().await;
-            if let Some(id) = outlet_id.take() {
-                let _ = self.outlet_manager.remove_outlet(&id).await;
-                info!(device = "frenz", "Removed FRENZ marker outlet");
+    /// Caller holds the lifecycle guard until every native inlet has closed.
+    async fn disconnect_tasks_inner(&self, task_keys: &[(String, String)]) -> Vec<String> {
+        join_all(
+            task_keys
+                .iter()
+                .map(|(device, suffix)| self.disconnect_stream_inner(device, suffix)),
+        )
+        .await
+        .into_iter()
+        .filter_map(Result::err)
+        .map(|error| error.to_string())
+        .collect()
+    }
+
+    /// Disconnect all FRENZ streams concurrently and report any cleanup failures.
+    pub async fn disconnect_all(&self) -> Result<(), LslError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let started = std::time::Instant::now();
+        let task_keys: Vec<(String, String)> =
+            self.stream_tasks.read().await.keys().cloned().collect();
+        let mut errors = self.disconnect_tasks_inner(&task_keys).await;
+        let mut outlet_id = self.marker_outlet_id.write().await;
+        if let Some(id) = outlet_id.as_ref() {
+            match self.outlet_manager.remove_outlet(id).await {
+                Ok(()) => {
+                    *outlet_id = None;
+                }
+                Err(error) => errors.push(error.to_string()),
             }
         }
-
+        if !errors.is_empty() {
+            return Err(LslError::LslLibraryError(format!(
+                "FRENZ disconnect failed: {}",
+                errors.join("; ")
+            )));
+        }
+        info!(
+            device = "frenz",
+            stream_count = task_keys.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Disconnected all FRENZ streams"
+        );
         Ok(())
     }
 
@@ -623,6 +754,127 @@ impl std::fmt::Debug for FrenzLslManager {
 mod tests {
     use super::*;
     use crate::devices::lsl::resolver::StreamFilter;
+
+    fn test_manager() -> FrenzLslManager {
+        let time_sync = Arc::new(crate::devices::lsl::sync::TimeSync::new(false));
+        FrenzLslManager::new(
+            Arc::new(StreamResolver::new(0.1)),
+            Arc::new(InletManager::new(time_sync.clone())),
+            Arc::new(OutletManager::new(time_sync)),
+        )
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_missing_selected_streams() {
+        let manager = test_manager();
+        manager.discovered_devices.write().await.insert(
+            "test".into(),
+            DiscoveredFrenzDevice {
+                device_name: "test".into(),
+                streams: HashMap::new(),
+                discovered_at: std::time::SystemTime::now(),
+            },
+        );
+        let result = manager.connect_streams("test", &["_EEG_raw".into()]).await;
+        assert!(
+            result.is_err(),
+            "A missing selected stream must not appear connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_joins_reader_blocked_on_full_channel() {
+        let manager = test_manager();
+        let (tx, _rx) = mpsc::channel::<u8>(1);
+        tx.send(1).await.unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            let _ = tx.send(2).await;
+        });
+        let abort_handle = handle.abort_handle();
+        started_rx.await.unwrap();
+        manager.stream_tasks.write().await.insert(
+            ("test".into(), "_EEG_raw".into()),
+            FrenzStreamTask {
+                inlet_uid: "test-inlet".into(),
+                shutdown: Arc::new(AtomicBool::new(false)),
+                _handle: handle,
+            },
+        );
+        let result = tokio::time::timeout(
+            Duration::from_millis(250),
+            manager.disconnect_stream("test", "_EEG_raw"),
+        )
+        .await;
+        // Also clean up the old implementation's detached task on assertion failure.
+        abort_handle.abort();
+        assert!(
+            result.is_ok(),
+            "Disconnect must cancel a blocked channel send"
+        );
+        assert!(
+            abort_handle.is_finished(),
+            "Disconnect must join the reader"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_device_preserves_other_device_without_discovery_cache() {
+        let manager = test_manager();
+        let mut handles = HashMap::new();
+        for (device, suffix) in [
+            ("target", "_EEG_raw"),
+            ("target", "_focus"),
+            ("other", "_EEG_raw"),
+        ] {
+            let handle = tokio::spawn(std::future::pending::<()>());
+            handles.insert((device, suffix), handle.abort_handle());
+            manager.stream_tasks.write().await.insert(
+                (device.into(), suffix.into()),
+                FrenzStreamTask {
+                    inlet_uid: format!("{device}{suffix}"),
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                    _handle: handle,
+                },
+            );
+        }
+        assert!(manager.discovered_devices.read().await.is_empty());
+        manager.disconnect_device("target").await.unwrap();
+        let keys: Vec<_> = manager.stream_tasks.read().await.keys().cloned().collect();
+        let target_finished = handles[&("target", "_EEG_raw")].is_finished()
+            && handles[&("target", "_focus")].is_finished();
+        let other_finished = handles[&("other", "_EEG_raw")].is_finished();
+        manager.disconnect_all().await.unwrap();
+        assert_eq!(keys, vec![("other".into(), "_EEG_raw".into())]);
+        assert!(target_finished, "Both target readers must be joined");
+        assert!(
+            !other_finished,
+            "Unrelated device reader must remain active"
+        );
+    }
+
+    #[test]
+    fn websocket_payload_preserves_large_integers() {
+        use base64::Engine;
+        let sample = FrenzSample {
+            data: SampleData::Int64(vec![i64::MIN, i64::MAX]),
+            timestamp: 1.,
+            stream_suffix: "_EEG_firmware".into(),
+            values: vec![],
+            string_value: None,
+        };
+        let payload = sample.wire_data();
+        assert_eq!(payload["format"], "int64");
+        assert_eq!(payload["encoding"], "base64-le");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload["values"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            bytes,
+            [i64::MIN.to_le_bytes(), i64::MAX.to_le_bytes()].concat()
+        );
+    }
 
     #[test]
     fn test_is_frenz_stream() {

@@ -1,843 +1,423 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
-  import * as bridgeStore from '../stores/websocket.svelte.js';
+  import { invoke } from '@tauri-apps/api/core';
 
-  // Props
   let { isOpen = $bindable(false) } = $props();
 
-  // Local state using Svelte 5 runes
-  let availableStreams = $state([]);
-  let activeInlets = $state([]);
-  let activeOutlets = $state([]);
-  let syncStatus = $state({ quality: 0, offset: 0, jitter: 0 });
-  let isRefreshing = $state(false);
-  let isConnecting = $state(false);
-  let streamFilter = $state('');
-  let typeFilter = $state('all');
-  let refreshInterval = $state(null);
+  // Bridge's own inlets/outlets are cheap to read; the network search takes about a second, so it runs less often.
+  const BRIDGE_POLL_MS = 1000;
+  const NETWORK_POLL_MS = 5000;
+  const STALE_AFTER_S = 3;
 
-  // Available stream types for filtering
-  const streamTypes = ['all', 'EEG', 'fNIRS', 'Gaze', 'Markers', 'Audio', 'Accelerometer', 'Other'];
+  let receiving = $state([]);
+  let publishing = $state([]);
+  let network = $state([]);
+  let searched = $state(false);
+  // Each poll owns its error and clears it on its next success.
+  let bridgeError = $state('');
+  let networkError = $state('');
+  let filter = $state('');
 
-  // Filtered streams based on search and type filter
-  const filteredStreams = $derived(
-    availableStreams.filter(stream => {
-      const matchesSearch =
-        !streamFilter ||
-        stream.name.toLowerCase().includes(streamFilter.toLowerCase()) ||
-        stream.source_id.toLowerCase().includes(streamFilter.toLowerCase());
-
-      const matchesType = typeFilter === 'all' || stream.type === typeFilter;
-
-      return matchesSearch && matchesType;
-    })
+  const receivedUids = $derived(new Set(receiving.map(s => s.uid)));
+  const rateByUid = $derived(new Map(network.map(s => [s.uid, Number(s.nominal_rate) || 0])));
+  const publishedNames = $derived(new Set(publishing.map(s => s.name)));
+  const visibleNetwork = $derived(
+    network.filter(s => !filter || s.name.toLowerCase().includes(filter.toLowerCase()))
   );
 
-  // Get sync quality indicator - NOTE: $derived should return a value, not a function
-  const syncQuality = $derived.by(() => {
-    if (syncStatus.quality >= 0.9) return { label: 'Excellent', color: 'var(--color-success)' };
-    if (syncStatus.quality >= 0.7) return { label: 'Good', color: 'var(--color-primary)' };
-    if (syncStatus.quality >= 0.5) return { label: 'Fair', color: 'var(--color-warning)' };
-    return { label: 'Poor', color: 'var(--color-error)' };
-  });
-
-  // Format data rate for display
-  function formatDataRate(rate) {
-    if (rate === 0) return 'irregular';
-    if (rate < 1) return `${(rate * 1000).toFixed(0)}ms`;
-    if (rate >= 1000) return `${(rate / 1000).toFixed(1)}kHz`;
-    return `${rate}Hz`;
-  }
-
-  // Format channel count
-  function formatChannels(count) {
-    if (count === 1) return '1 channel';
-    return `${count} channels`;
-  }
-
-  // Get stream status icon
-  function getStreamStatusIcon(stream) {
-    switch (stream.status) {
-      case 'connected':
-        return '●';
-      case 'connecting':
-        return '◐';
-      case 'error':
-        return '✕';
-      default:
-        return '○';
-    }
-  }
-
-  // Get stream status color
-  function getStreamStatusColor(stream) {
-    switch (stream.status) {
-      case 'connected':
-        return 'var(--color-success)';
-      case 'connecting':
-        return 'var(--color-warning)';
-      case 'error':
-        return 'var(--color-error)';
-      default:
-        return 'var(--color-text-secondary)';
-    }
-  }
-
-  // Refresh available streams
-  async function refreshStreams() {
-    isRefreshing = true;
-    try {
-      const command = {
-        type: 'command',
-        device: 'lsl',
-        action: 'discover',
-        payload: {},
-        id: `discover_${Date.now()}`,
-      };
-
-      bridgeStore.sendMessage(command);
-
-      // The response will be handled by the WebSocket event listener
-      // Wait a moment for the response
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    } catch (error) {
-      console.error('Failed to refresh streams:', error);
-    } finally {
-      isRefreshing = false;
-    }
-  }
-
-  // Connect to an inlet stream
-  async function connectInlet(stream) {
-    isConnecting = true;
-    try {
-      const command = {
-        type: 'command',
-        device: 'lsl',
-        action: 'connect_inlet',
-        payload: {
-          stream_id: stream.uid,
-          name: stream.name,
-          type: stream.type,
-          source_id: stream.source_id,
-        },
-        id: `connect_inlet_${Date.now()}`,
-      };
-
-      bridgeStore.sendMessage(command);
-    } catch (error) {
-      console.error('Failed to connect inlet:', error);
-    } finally {
-      isConnecting = false;
-    }
-  }
-
-  // Disconnect an inlet
-  async function disconnectInlet(inletId) {
-    try {
-      const command = {
-        type: 'command',
-        device: 'lsl',
-        action: 'disconnect_inlet',
-        payload: { inlet_id: inletId },
-        id: `disconnect_inlet_${Date.now()}`,
-      };
-
-      bridgeStore.sendMessage(command);
-    } catch (error) {
-      console.error('Failed to disconnect inlet:', error);
-    }
-  }
-
-  // Get sync status
-  async function getSyncStatus() {
-    try {
-      const command = {
-        type: 'command',
-        device: 'lsl',
-        action: 'get_sync_status',
-        payload: {},
-        id: `sync_status_${Date.now()}`,
-      };
-
-      bridgeStore.sendMessage(command);
-    } catch (error) {
-      console.error('Failed to get sync status:', error);
-    }
-  }
-
-  // Handle LSL messages from WebSocket
-  function handleLslMessage(message) {
-    if (message.device !== 'lsl') return;
-
-    switch (message.type) {
-      case 'stream_list':
-        availableStreams = message.payload.streams || [];
-        break;
-      case 'inlet_connected':
-        activeInlets = [...activeInlets, message.payload.inlet];
-        break;
-      case 'inlet_disconnected':
-        activeInlets = activeInlets.filter(inlet => inlet.id !== message.payload.inlet_id);
-        break;
-      case 'outlet_created':
-        activeOutlets = [...activeOutlets, message.payload.outlet];
-        break;
-      case 'outlet_removed':
-        activeOutlets = activeOutlets.filter(outlet => outlet.id !== message.payload.outlet_id);
-        break;
-      case 'sync_status':
-        syncStatus = message.payload;
-        break;
-      case 'error':
-        console.error('LSL Error:', message.payload);
-        break;
-    }
-  }
-
-  // Store cleanup functions
-  let unsubscribe = null;
-
-  // Refresh interval constant
-  const REFRESH_INTERVAL_MS = 5000;
-
-  // Helper to clear interval safely
-  function clearRefreshInterval() {
-    if (refreshInterval) {
-      clearInterval(refreshInterval);
-      refreshInterval = null;
-    }
-  }
-
-  // Setup WebSocket message listener (one-time setup only)
-  onMount(() => {
-    // Listen for LSL messages
-    unsubscribe = bridgeStore.subscribe(message => {
-      if (message) {
-        handleLslMessage(message);
-      }
-    });
-  });
-
-  onDestroy(() => {
-    // Clean up subscription
-    if (unsubscribe) {
-      unsubscribe();
-      unsubscribe = null;
-    }
-
-    // CRITICAL: Always clean up interval on destroy, regardless of isOpen state
-    // This prevents the interval from running after component unmount
-    clearRefreshInterval();
-  });
-
-  // Effect to handle modal open/close
   $effect(() => {
-    if (isOpen) {
-      // Start fresh when opening
-      refreshStreams();
-      getSyncStatus();
+    if (!isOpen) return;
+    let closed = false;
+    let bridgeBusy = false;
+    let networkBusy = false;
 
-      // Setup interval if not already running
-      if (!refreshInterval) {
-        refreshInterval = setInterval(() => {
-          // Double-check isOpen in case it changed
-          if (isOpen) {
-            refreshStreams();
-            getSyncStatus();
-          }
-        }, REFRESH_INTERVAL_MS);
+    async function readBridge() {
+      if (bridgeBusy) return;
+      bridgeBusy = true;
+      try {
+        const streams = await invoke('lsl_bridge_streams');
+        if (!closed) {
+          receiving = streams.receiving ?? [];
+          bridgeError = '';
+          publishing = streams.publishing ?? [];
+        }
+      } catch (e) {
+        if (!closed) bridgeError = String(e);
+      } finally {
+        bridgeBusy = false;
       }
-    } else {
-      // Clean up when closing
-      clearRefreshInterval();
     }
+
+    async function searchNetwork() {
+      if (networkBusy) return;
+      networkBusy = true;
+      try {
+        const found = await invoke('discover_recording_streams');
+        if (!closed) {
+          network = [...found].sort((a, b) => a.name.localeCompare(b.name));
+          searched = true;
+          networkError = '';
+        }
+      } catch (e) {
+        if (!closed) networkError = String(e);
+      } finally {
+        networkBusy = false;
+      }
+    }
+
+    readBridge();
+    searchNetwork();
+    const bridgeTimer = setInterval(readBridge, BRIDGE_POLL_MS);
+    const networkTimer = setInterval(searchNetwork, NETWORK_POLL_MS);
+    return () => {
+      closed = true;
+      clearInterval(bridgeTimer);
+      clearInterval(networkTimer);
+    };
   });
+
+  const count = n => Number(n || 0).toLocaleString();
+
+  // A regular stream is late after a few of its own sample periods. An irregular one (scores, sleep stage) can be
+  // quiet for long stretches by design, so its gap is reported without calling it a fault.
+  function health(stream) {
+    if (!stream.sample_count) return { text: 'Waiting for data', tone: 'wait' };
+    const since = Number(stream.seconds_since_last_receive || 0);
+    const rate = rateByUid.get(stream.uid) || 0;
+    if (since <= Math.max(STALE_AFTER_S, rate ? 3 / rate : 0))
+      return { text: 'Live', tone: 'live' };
+    const gap = `${Math.round(since)} s`;
+    return rate
+      ? { text: `No data for ${gap}`, tone: 'fail' }
+      : { text: `Last data ${gap} ago`, tone: 'quiet' };
+  }
+
+  function rate(stream) {
+    return stream.nominal_rate ? `${stream.nominal_rate} Hz` : 'irregular';
+  }
+
+  function close() {
+    isOpen = false;
+  }
 </script>
 
-<!-- LSL Configuration Panel -->
 {#if isOpen}
   <div
-    class="lsl-modal-overlay"
+    class="lsl-overlay"
     role="presentation"
-    onclick={() => (isOpen = false)}
-    onkeydown={e => {
-      if (e.key === 'Escape') isOpen = false;
-    }}
+    onclick={close}
+    onkeydown={e => e.key === 'Escape' && close()}
   >
     <div
-      class="lsl-modal"
+      class="lsl-dialog"
       role="dialog"
       aria-modal="true"
+      aria-labelledby="lsl-title"
       tabindex="-1"
       onclick={e => e.stopPropagation()}
-      onkeydown={e => e.key === 'Escape' && (isOpen = false)}
+      onkeydown={e => e.key === 'Escape' && close()}
     >
-      <div class="lsl-header">
-        <div class="lsl-title">
-          <h2>LSL Stream Management</h2>
-          <div class="sync-indicator">
-            <span class="sync-label">Time Sync:</span>
-            <div class="sync-bar">
-              <div
-                class="sync-progress"
-                style="width: {syncStatus.quality * 100}%; background-color: {syncQuality.color}"
-              ></div>
-            </div>
-            <span class="sync-text" style="color: {syncQuality.color}">
-              {syncQuality.label} ({(syncStatus.offset || 0).toFixed(1)}ms)
-            </span>
-          </div>
+      <header class="lsl-header">
+        <div>
+          <h2 id="lsl-title">LSL streams</h2>
+          <p class="lsl-sub">Updates on its own while this window is open.</p>
         </div>
-
-        <div class="lsl-controls">
-          <button
-            class="control-btn"
-            onclick={refreshStreams}
-            disabled={isRefreshing}
-            title="Refresh stream list"
+        <button class="lsl-close" aria-label="Close LSL streams" onclick={close}>
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            aria-hidden="true"
           >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              class:spin={isRefreshing}
-            >
-              <polyline points="23 4 23 10 17 10"></polyline>
-              <polyline points="1 20 1 14 7 14"></polyline>
-              <path d="m20.49 9A9 9 0 0 0 5.64 5.64l1.27 1.27a7 7 0 0 1 11.85 1.09"></path>
-              <path d="m3.51 15a9 9 0 0 0 14.85 4.36l-1.27-1.27a7 7 0 0 1-11.85-1.09"></path>
-            </svg>
-            Refresh
-          </button>
+            <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </header>
 
-          <button class="close-btn" aria-label="Close LSL panel" onclick={() => (isOpen = false)}>
-            <svg
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <line x1="18" y1="6" x2="6" y2="18"></line>
-              <line x1="6" y1="6" x2="18" y2="18"></line>
-            </svg>
-          </button>
-        </div>
-      </div>
+      <div class="lsl-body">
+        {#if bridgeError || networkError}<p class="lsl-alert" role="alert">
+            {bridgeError || networkError}
+          </p>{/if}
 
-      <div class="lsl-content">
-        <!-- Stream Filters -->
-        <div class="filters-section">
-          <div class="filter-group">
-            <input
-              type="text"
-              bind:value={streamFilter}
-              placeholder="Search streams..."
-              class="search-input"
-            />
-          </div>
-          <div class="filter-group">
-            <select bind:value={typeFilter} class="type-filter">
-              {#each streamTypes as type}
-                <option value={type}>{type === 'all' ? 'All Types' : type}</option>
+        <section aria-labelledby="lsl-receiving">
+          <h3 id="lsl-receiving">
+            Bridge is receiving <span class="lsl-count">{receiving.length}</span>
+          </h3>
+          {#if receiving.length === 0}
+            <p class="lsl-empty">
+              Nothing yet. Connect a FRENZ band or Neon on the main screen and its streams appear
+              here.
+            </p>
+          {:else}
+            <ul class="lsl-list">
+              {#each receiving as stream (stream.uid)}
+                {@const state = health(stream)}
+                <li class="lsl-row">
+                  <span class="lsl-dot" data-tone={state.tone} aria-hidden="true"></span>
+                  <span class="lsl-name">{stream.name}</span>
+                  <span class="lsl-num">{count(stream.sample_count)} samples</span>
+                  <span class="lsl-state" data-tone={state.tone}>{state.text}</span>
+                </li>
               {/each}
-            </select>
-          </div>
-        </div>
+            </ul>
+          {/if}
+        </section>
 
-        <!-- Available Streams -->
-        <div class="streams-section">
-          <h3>Available Streams</h3>
-          <div class="streams-list">
-            {#if filteredStreams.length === 0}
-              <div class="empty-streams">
-                <p>No streams found</p>
-                <p class="hint">
-                  {#if isRefreshing}
-                    Searching for streams...
-                  {:else}
-                    Click refresh to scan for LSL streams
-                  {/if}
-                </p>
-              </div>
-            {:else}
-              {#each filteredStreams as stream (stream.uid)}
-                <div class="stream-item">
-                  <div class="stream-info">
-                    <div class="stream-header">
-                      <span class="stream-status" style="color: {getStreamStatusColor(stream)}">
-                        {getStreamStatusIcon(stream)}
-                      </span>
-                      <span class="stream-name">{stream.name}</span>
-                      <span class="stream-type">{stream.type}</span>
-                    </div>
-                    <div class="stream-details">
-                      <span class="stream-detail">{formatChannels(stream.channel_count)}</span>
-                      <span class="stream-detail">{formatDataRate(stream.nominal_srate)}</span>
-                      <span class="stream-detail">Source: {stream.source_id}</span>
-                    </div>
-                  </div>
-                  <div class="stream-actions">
-                    <button
-                      class="connect-btn small"
-                      onclick={() => connectInlet(stream)}
-                      disabled={isConnecting ||
-                        activeInlets.some(inlet => inlet.stream_uid === stream.uid)}
-                    >
-                      {activeInlets.some(inlet => inlet.stream_uid === stream.uid)
-                        ? 'Connected'
-                        : 'Connect'}
-                    </button>
-                  </div>
-                </div>
+        <section aria-labelledby="lsl-publishing">
+          <h3 id="lsl-publishing">
+            Bridge is publishing <span class="lsl-count">{publishing.length}</span>
+          </h3>
+          {#if publishing.length === 0}
+            <p class="lsl-empty">
+              Nothing yet. Bridge publishes a marker stream for study events once a device connects.
+            </p>
+          {:else}
+            <ul class="lsl-list">
+              {#each publishing as stream (stream.name)}
+                <li class="lsl-row">
+                  <span class="lsl-dot" data-tone="live" aria-hidden="true"></span>
+                  <span class="lsl-name">{stream.name}</span>
+                  <span class="lsl-num">{count(stream.sample_count)} sent</span>
+                  <span class="lsl-state" data-tone="quiet">{stream.type}</span>
+                </li>
               {/each}
+            </ul>
+          {/if}
+        </section>
+
+        <section aria-labelledby="lsl-network">
+          <div class="lsl-network-head">
+            <h3 id="lsl-network">
+              On this network <span class="lsl-count">{network.length}</span>
+            </h3>
+            {#if network.length > 8}
+              <input
+                class="lsl-filter"
+                type="search"
+                bind:value={filter}
+                placeholder="Filter by name"
+                aria-label="Filter streams by name"
+              />
             {/if}
           </div>
-        </div>
-
-        <!-- Active Inlets -->
-        {#if activeInlets.length > 0}
-          <div class="inlets-section">
-            <h3>Active Inlets</h3>
-            <div class="inlets-list">
-              {#each activeInlets as inlet (inlet.id)}
-                <div class="inlet-item">
-                  <div class="inlet-info">
-                    <span class="inlet-name">{inlet.name}</span>
-                    <span class="inlet-type">({inlet.type})</span>
-                    <span class="inlet-rate">{formatDataRate(inlet.sample_rate)}</span>
-                  </div>
-                  <button class="disconnect-btn small" onclick={() => disconnectInlet(inlet.id)}>
-                    Disconnect
-                  </button>
-                </div>
+          <p class="lsl-lede">
+            Every LSL stream any app on this network is sending, including ones Bridge isn't using.
+          </p>
+          {#if !searched}
+            <p class="lsl-empty">Looking for streams</p>
+          {:else if network.length === 0}
+            <p class="lsl-empty">
+              No streams found. If a device should be streaming, check that it is on and on the same
+              network.
+            </p>
+          {:else}
+            <ul class="lsl-list">
+              {#each visibleNetwork as stream (stream.uid)}
+                <li class="lsl-row lsl-row-network">
+                  <span class="lsl-name">{stream.name}</span>
+                  <span class="lsl-num">{stream.channels} ch</span>
+                  <span class="lsl-num">{rate(stream)}</span>
+                  <span class="lsl-state" data-tone="quiet">
+                    {receivedUids.has(stream.uid)
+                      ? 'Bridge receives'
+                      : publishedNames.has(stream.name)
+                        ? 'From Bridge'
+                        : ''}
+                  </span>
+                </li>
               {/each}
-            </div>
-          </div>
-        {/if}
-
-        <!-- Active Outlets -->
-        <div class="outlets-section">
-          <h3>Active Outlets</h3>
-          <div class="outlets-list">
-            {#if activeOutlets.length === 0}
-              <div class="empty-outlets">
-                <p>No active outlets</p>
-                <p class="hint">Enable LSL output in device configurations</p>
-              </div>
-            {:else}
-              {#each activeOutlets as outlet (outlet.id)}
-                <div class="outlet-item">
-                  <div class="outlet-info">
-                    <span class="outlet-status">✓</span>
-                    <span class="outlet-name">{outlet.name}</span>
-                    <span class="outlet-type">({outlet.type})</span>
-                    <span class="outlet-rate">{formatChannels(outlet.channel_count)}</span>
-                  </div>
-                  <div class="outlet-stats">
-                    <span class="stat">Sent: {outlet.samples_sent || 0}</span>
-                    <span class="stat">Rate: {formatDataRate(outlet.current_rate || 0)}</span>
-                  </div>
-                </div>
-              {/each}
-            {/if}
-          </div>
-        </div>
+            </ul>
+          {/if}
+        </section>
       </div>
     </div>
   </div>
 {/if}
 
 <style>
-  .lsl-modal-overlay {
+  .lsl-overlay {
     position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.8);
+    inset: 0;
+    z-index: 1000;
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
+    background: rgba(0, 0, 0, 0.8);
     backdrop-filter: blur(4px);
   }
-
-  .lsl-modal {
-    background: var(--color-surface);
-    border-radius: 12px;
-    border: 1px solid var(--color-border);
-    width: 90vw;
-    max-width: 1000px;
-    height: 80vh;
-    max-height: 700px;
+  .lsl-dialog {
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    box-shadow:
-      0 20px 25px -5px rgba(0, 0, 0, 0.1),
-      0 10px 10px -5px rgba(0, 0, 0, 0.04);
+    width: 90vw;
+    max-width: 820px;
+    max-height: 85vh;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    font-variant-numeric: tabular-nums;
   }
-
   .lsl-header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    padding: 1.5rem 2rem;
+    justify-content: space-between;
+    padding: 1.25rem 1.5rem;
     border-bottom: 1px solid var(--color-border);
-    background: var(--color-surface-elevated);
   }
-
-  .lsl-title h2 {
-    margin: 0 0 0.5rem 0;
-    color: var(--color-text-primary);
-    font-size: 1.5rem;
+  .lsl-header h2 {
+    font-size: 1.25rem;
     font-weight: 600;
   }
-
-  .sync-indicator {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    font-size: 0.875rem;
-  }
-
-  .sync-label {
+  .lsl-sub {
+    font-size: 0.8125rem;
     color: var(--color-text-secondary);
-    font-weight: 500;
   }
-
-  .sync-bar {
-    width: 100px;
-    height: 8px;
-    background: rgba(255, 255, 255, 0.1);
-    border-radius: 4px;
-    overflow: hidden;
-  }
-
-  .sync-progress {
-    height: 100%;
-    transition:
-      width 0.3s ease,
-      background-color 0.3s ease;
-  }
-
-  .sync-text {
-    font-weight: 500;
-    min-width: 80px;
-  }
-
-  .lsl-controls {
-    display: flex;
-    gap: 0.75rem;
-    align-items: center;
-  }
-
-  .control-btn {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 0.75rem;
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
-    background: var(--color-surface);
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    transition: all 0.2s;
-    font-size: 0.875rem;
-  }
-
-  .control-btn:hover:not(:disabled) {
-    background: var(--color-primary);
-    border-color: var(--color-primary);
-    color: white;
-  }
-
-  .control-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .close-btn {
-    padding: 0.5rem;
-    border: none;
+  .lsl-close {
+    display: grid;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
     border-radius: 6px;
     background: transparent;
     color: var(--color-text-secondary);
-    cursor: pointer;
-    transition: all 0.2s;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  }
+  .lsl-close:hover {
+    color: var(--color-text-primary);
+    background: var(--color-surface-elevated);
   }
 
-  .close-btn:hover {
-    background: var(--color-error);
-    color: white;
-  }
-
-  .lsl-content {
-    flex: 1;
+  .lsl-body {
     overflow-y: auto;
     padding: 1.5rem;
     display: flex;
     flex-direction: column;
-    gap: 1.5rem;
+    gap: 2rem;
   }
-
-  .filters-section {
-    display: flex;
-    gap: 1rem;
-    align-items: center;
-  }
-
-  .filter-group {
-    flex: 1;
-  }
-
-  .search-input,
-  .type-filter {
-    width: 100%;
-    padding: 0.5rem 0.75rem;
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
-    background: var(--color-surface);
-    color: var(--color-text-primary);
-    font-size: 0.875rem;
-  }
-
-  .search-input:focus,
-  .type-filter:focus {
-    outline: none;
-    border-color: var(--color-primary);
-    box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.1);
-  }
-
-  .streams-section,
-  .inlets-section,
-  .outlets-section {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .streams-section h3,
-  .inlets-section h3,
-  .outlets-section h3 {
-    margin: 0;
-    color: var(--color-text-primary);
-    font-size: 1.125rem;
+  .lsl-body h3 {
+    font-size: 0.9375rem;
     font-weight: 600;
-    padding-bottom: 0.5rem;
+  }
+  .lsl-count {
+    margin-left: 0.375rem;
+    font-weight: 400;
+    color: var(--color-text-secondary);
+  }
+  .lsl-lede,
+  .lsl-empty {
+    font-size: 0.8125rem;
+    color: var(--color-text-secondary);
+  }
+  .lsl-lede {
+    margin-top: 0.25rem;
+  }
+  .lsl-empty {
+    padding: 0.75rem 0;
+  }
+  .lsl-alert {
+    padding: 0.625rem 0.875rem;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    color: #fca5a5;
+  }
+
+  .lsl-list {
+    list-style: none;
+    margin-top: 0.625rem;
+    border-top: 1px solid var(--color-border);
+  }
+  .lsl-row {
+    display: grid;
+    grid-template-columns: 0.5rem minmax(0, 1fr) 8.5rem 8rem;
+    gap: 0.875rem;
+    align-items: center;
+    padding: 0.5rem 0;
     border-bottom: 1px solid var(--color-border);
-  }
-
-  .streams-list,
-  .inlets-list,
-  .outlets-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-    max-height: 200px;
-    overflow-y: auto;
-  }
-
-  .stream-item,
-  .inlet-item,
-  .outlet-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.75rem;
-    background: var(--color-background);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    transition: all 0.2s;
-  }
-
-  .stream-item:hover,
-  .inlet-item:hover,
-  .outlet-item:hover {
-    background: var(--color-surface-elevated);
-    border-color: var(--color-border-hover);
-  }
-
-  .stream-info,
-  .inlet-info,
-  .outlet-info {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    flex: 1;
-  }
-
-  .stream-header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .stream-status {
-    font-size: 0.875rem;
-    font-weight: bold;
-  }
-
-  .stream-name,
-  .inlet-name,
-  .outlet-name {
-    font-weight: 600;
-    color: var(--color-text-primary);
-  }
-
-  .stream-type,
-  .inlet-type,
-  .outlet-type {
-    color: var(--color-secondary);
     font-size: 0.875rem;
   }
-
-  .stream-details {
-    display: flex;
-    gap: 1rem;
-    font-size: 0.813rem;
+  .lsl-row-network {
+    grid-template-columns: minmax(0, 1fr) 3.5rem 5.5rem 8rem;
+  }
+  .lsl-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .lsl-num {
+    text-align: right;
+    font-size: 0.8125rem;
     color: var(--color-text-secondary);
+    white-space: nowrap;
   }
-
-  .inlet-rate,
-  .outlet-rate {
-    color: var(--color-text-secondary);
-    font-size: 0.875rem;
+  .lsl-state {
+    text-align: right;
+    font-size: 0.8125rem;
+    white-space: nowrap;
   }
-
-  .outlet-status {
+  .lsl-state[data-tone='live'] {
     color: var(--color-success);
-    font-weight: bold;
-    margin-right: 0.5rem;
   }
-
-  .outlet-stats {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    align-items: flex-end;
+  .lsl-state[data-tone='wait'] {
+    color: var(--color-warning);
   }
-
-  .stat {
-    font-size: 0.75rem;
+  .lsl-state[data-tone='fail'] {
+    color: var(--color-error);
+  }
+  .lsl-state[data-tone='quiet'] {
     color: var(--color-text-secondary);
   }
-
-  .connect-btn,
-  .disconnect-btn {
-    padding: 0.5rem 1rem;
-    border: none;
-    border-radius: 6px;
-    font-size: 0.875rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s;
+  .lsl-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--color-text-disabled);
   }
-
-  .connect-btn.small,
-  .disconnect-btn.small {
-    padding: 0.375rem 0.75rem;
-    font-size: 0.813rem;
+  .lsl-dot[data-tone='live'] {
+    background: var(--color-success);
   }
-
-  .connect-btn {
-    background: var(--color-primary);
-    color: white;
+  .lsl-dot[data-tone='wait'] {
+    background: var(--color-warning);
   }
-
-  .connect-btn:hover:not(:disabled) {
-    background: var(--color-primary-hover);
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(76, 175, 80, 0.3);
-  }
-
-  .connect-btn:disabled {
-    background: var(--color-surface-elevated);
-    color: var(--color-text-secondary);
-    cursor: not-allowed;
-  }
-
-  .disconnect-btn {
+  .lsl-dot[data-tone='fail'] {
     background: var(--color-error);
-    color: white;
   }
 
-  .disconnect-btn:hover {
-    background: #dc2626;
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+  .lsl-network-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
   }
-
-  .empty-streams,
-  .empty-outlets {
-    text-align: center;
-    padding: 2rem;
-    color: var(--color-text-secondary);
+  .lsl-filter {
+    width: 14rem;
+    padding: 0.375rem 0.625rem;
+    font: inherit;
+    font-size: 0.8125rem;
+    color: inherit;
     background: var(--color-background);
     border: 1px solid var(--color-border);
-    border-radius: 8px;
+    border-radius: 6px;
+  }
+  .lsl-filter:focus {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -1px;
   }
 
-  .empty-streams p,
-  .empty-outlets p {
-    margin: 0.5rem 0;
-  }
-
-  .hint {
-    font-size: 0.875rem;
-    opacity: 0.8;
-  }
-
-  .spin {
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    from {
-      transform: rotate(0deg);
+  @media (max-width: 640px) {
+    .lsl-row {
+      grid-template-columns: 0.5rem minmax(0, 1fr) auto;
     }
-    to {
-      transform: rotate(360deg);
+    .lsl-row .lsl-num {
+      display: none;
     }
-  }
-
-  /* Scrollbar styling */
-  .streams-list::-webkit-scrollbar,
-  .inlets-list::-webkit-scrollbar,
-  .outlets-list::-webkit-scrollbar,
-  .lsl-content::-webkit-scrollbar {
-    width: 6px;
-  }
-
-  .streams-list::-webkit-scrollbar-track,
-  .inlets-list::-webkit-scrollbar-track,
-  .outlets-list::-webkit-scrollbar-track,
-  .lsl-content::-webkit-scrollbar-track {
-    background: var(--color-surface);
-    border-radius: 3px;
-  }
-
-  .streams-list::-webkit-scrollbar-thumb,
-  .inlets-list::-webkit-scrollbar-thumb,
-  .outlets-list::-webkit-scrollbar-thumb,
-  .lsl-content::-webkit-scrollbar-thumb {
-    background: var(--color-surface-elevated);
-    border-radius: 3px;
-  }
-
-  .streams-list::-webkit-scrollbar-thumb:hover,
-  .inlets-list::-webkit-scrollbar-thumb:hover,
-  .outlets-list::-webkit-scrollbar-thumb:hover,
-  .lsl-content::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.2);
+    .lsl-row-network {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+    .lsl-row-network .lsl-num {
+      display: none;
+    }
   }
 </style>

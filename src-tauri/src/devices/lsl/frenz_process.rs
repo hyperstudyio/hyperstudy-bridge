@@ -40,6 +40,10 @@ pub enum FrenzBridgeState {
     Error,
 }
 
+/// Shown while the sidecar waits for macOS's Bluetooth prompt to be answered (frenz_permission.py).
+pub const BLUETOOTH_PERMISSION_PROMPT: &str =
+    "Allow Bluetooth access for HyperStudy Bridge in the macOS prompt to connect the band.";
+
 /// Detailed status of the FRENZ bridge process
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrenzBridgeStatus {
@@ -52,6 +56,10 @@ pub struct FrenzBridgeStatus {
     pub streams: Vec<String>,
     /// Cumulative sample count from the Python process
     pub sample_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_pair: Option<serde_json::Value>,
 }
 
 impl Default for FrenzBridgeStatus {
@@ -62,6 +70,94 @@ impl Default for FrenzBridgeStatus {
             phase: None,
             streams: vec![],
             sample_count: 0,
+            timing: None,
+            clock_pair: None,
+        }
+    }
+}
+
+impl FrenzBridgeStatus {
+    fn apply_python_status(&mut self, parsed: PythonStatusLine) {
+        // The sidecar reports cleanup separately after connection/acquisition
+        // failures. Preserve the first failure and its phase until an explicit
+        // new start resets status; teardown must not hide the cause.
+        if self.state == FrenzBridgeState::Error {
+            return;
+        }
+        match parsed.status.as_str() {
+            "waiting_for_config" => {
+                self.state = FrenzBridgeState::Bootstrapping;
+                self.message = Some("Waiting for configuration...".to_string());
+            }
+            "bootstrapping" => {
+                self.state = FrenzBridgeState::Bootstrapping;
+                self.phase = parsed.phase.clone();
+                if let Some(ref pkg) = parsed.package {
+                    self.message = Some(if parsed.phase.as_deref() == Some("importing") {
+                        format!("Loading {}...", pkg)
+                    } else {
+                        format!("Installing {}...", pkg)
+                    });
+                } else if let Some(ref phase) = parsed.phase {
+                    self.message = Some(format!("{}...", phase));
+                }
+            }
+            "connecting" => {
+                self.state = FrenzBridgeState::Connecting;
+                self.message =
+                    if parsed.phase.as_deref() == Some("waiting_for_bluetooth_permission") {
+                        Some(BLUETOOTH_PERMISSION_PROMPT.to_string())
+                    } else {
+                        parsed
+                            .device_id
+                            .as_ref()
+                            .map(|id| format!("Connecting to {}...", id))
+                    };
+                if let Some(ref phase) = parsed.phase {
+                    self.phase = Some(phase.clone());
+                }
+            }
+            "streaming" => {
+                self.state = FrenzBridgeState::Streaming;
+                self.message = None;
+                if let Some(streams) = parsed.streams {
+                    self.streams = streams;
+                }
+                if let Some(count) = parsed.sample_count {
+                    self.sample_count = count;
+                }
+                self.timing = parsed.timing;
+                self.clock_pair = parsed.clock_pair;
+            }
+            "error" => {
+                self.state = FrenzBridgeState::Error;
+                self.message = parsed.message;
+                self.phase = parsed.phase;
+                self.streams.clear();
+            }
+            "stopped" => {
+                self.state = FrenzBridgeState::Stopped;
+                self.message = None;
+                self.streams.clear();
+            }
+            other => {
+                debug!(
+                    device = "frenz",
+                    "Unknown status from FRENZ bridge: {}", other
+                );
+            }
+        }
+    }
+
+    fn mark_process_exit(&mut self, description: &str, requested: bool) {
+        self.streams.clear();
+        if requested {
+            self.state = FrenzBridgeState::Stopped;
+            self.message = None;
+        } else if self.state != FrenzBridgeState::Error {
+            self.state = FrenzBridgeState::Error;
+            self.phase = Some("process_exit".into());
+            self.message = Some(format!("FRENZ acquisition ended unexpectedly ({description}). Check the band and reconnect."));
         }
     }
 }
@@ -84,6 +180,25 @@ struct PythonStatusLine {
     package: Option<String>,
     #[serde(default)]
     progress: Option<u32>,
+    #[serde(default)]
+    timing: Option<serde_json::Value>,
+    #[serde(default)]
+    clock_pair: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FrenzBluetoothDevice {
+    pub name: String,
+    pub address: String,
+    pub rssi: i32,
+    pub selectable: bool,
+}
+#[derive(Deserialize)]
+struct FrenzScanReply {
+    status: String,
+    #[serde(default)]
+    devices: Vec<FrenzBluetoothDevice>,
+    message: Option<String>,
 }
 
 /// Manages the FRENZ Python bridge process lifecycle
@@ -94,17 +209,28 @@ pub struct FrenzProcessManager {
     status: Arc<RwLock<FrenzBridgeStatus>>,
     /// Shutdown flag for the stdout reader task
     shutdown: Arc<AtomicBool>,
+    /// Serialize scan/start so two processes cannot compete for Bluetooth.
+    operation: tokio::sync::Mutex<()>,
     /// Handle for the stdout reader task
     reader_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    /// Native status subscribers must also observe API-initiated shutdowns.
+    app_handle: RwLock<Option<tauri::AppHandle>>,
+    /// Set once Bridge starts exiting; a scan in progress is woken through `scan_cancel` and refuses to continue.
+    exiting: AtomicBool,
+    scan_cancel: tokio::sync::Notify,
 }
 
 impl FrenzProcessManager {
     pub fn new() -> Self {
         Self {
+            operation: tokio::sync::Mutex::new(()),
             process: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(FrenzBridgeStatus::default())),
             shutdown: Arc::new(AtomicBool::new(false)),
             reader_task: Arc::new(RwLock::new(None)),
+            app_handle: RwLock::new(None),
+            exiting: AtomicBool::new(false),
+            scan_cancel: tokio::sync::Notify::new(),
         }
     }
 
@@ -162,6 +288,67 @@ impl FrenzProcessManager {
         Self::find_binary(app_handle).is_some()
     }
 
+    /// Scan advertisements without credentials or initializing the vendor SDK.
+    pub async fn scan(&self, app: &tauri::AppHandle) -> Result<Vec<FrenzBluetoothDevice>, String> {
+        let binary = Self::find_binary(app).ok_or("FRENZ sidecar is unavailable")?;
+        self.scan_with(binary).await
+    }
+
+    async fn scan_with(&self, binary: PathBuf) -> Result<Vec<FrenzBluetoothDevice>, String> {
+        let _operation = self
+            .operation
+            .try_lock()
+            .map_err(|_| "A FRENZ scan or connection is already starting")?;
+        if self.process.read().await.is_some() {
+            return Err("Disconnect FRENZ before scanning for another band".into());
+        }
+        // Registered before the exiting check, so an exit that starts after the check still wakes this scan.
+        let cancelled = self.scan_cancel.notified();
+        tokio::pin!(cancelled);
+        cancelled.as_mut().enable();
+        if self.exiting.load(Ordering::SeqCst) {
+            return Err("Bridge is quitting".into());
+        }
+        let mut child = tokio::process::Command::new(binary)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| "Could not start Bluetooth scanner")?;
+        let mut input = child.stdin.take().ok_or("Scanner input unavailable")?;
+        input
+            .write_all(b"{\"action\":\"scan\"}\n")
+            .await
+            .map_err(|_| "Could not request Bluetooth scan")?;
+        drop(input);
+        // The helper can wait minutes on the macOS Bluetooth prompt or a first-run install. Quitting must not wait
+        // for that: dropping the child on cancellation kills it (kill_on_drop) and releases the operation lock.
+        let output = tokio::select! {
+            output = tokio::time::timeout(std::time::Duration::from_secs(180), child.wait_with_output()) => output,
+            _ = &mut cancelled => return Err("Bridge is quitting".into()),
+        }
+        .map_err(|_| {
+            "Bluetooth setup or scan timed out. Check network access and Bluetooth permission."
+        })?
+        .map_err(|_| "Bluetooth scanner stopped unexpectedly")?;
+        let reply = String::from_utf8_lossy(&output.stdout);
+        for line in reply.lines() {
+            if let Ok(result) = serde_json::from_str::<FrenzScanReply>(line) {
+                match result.status.as_str() {
+                    "discovered" if output.status.success() => return Ok(result.devices),
+                    "scan_error" => {
+                        return Err(result
+                            .message
+                            .unwrap_or_else(|| "Bluetooth scan failed".into()))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Err("Bluetooth scanner could not initialize. Check the sidecar installation.".into())
+    }
+
     /// Start the FRENZ bridge process
     ///
     /// Spawns the PyApp binary, sends credentials via stdin, and starts
@@ -172,18 +359,17 @@ impl FrenzProcessManager {
         product_key: &str,
         app_handle: &tauri::AppHandle,
     ) -> Result<(), String> {
-        // Check if already running
-        {
-            let proc = self.process.read().await;
-            if proc.is_some() {
-                return Err("FRENZ bridge is already running".to_string());
-            }
-        }
+        let _operation = self
+            .operation
+            .try_lock()
+            .map_err(|_| "Another FRENZ operation is in progress".to_string())?;
+        self.prepare_start().await?;
 
         let binary_path = Self::find_binary(app_handle)
             .ok_or_else(|| "FRENZ bridge binary not found".to_string())?;
 
         info!(device = "frenz", "Starting FRENZ bridge: {:?}", binary_path);
+        *self.app_handle.write().await = Some(app_handle.clone());
 
         // Reset state
         self.shutdown.store(false, Ordering::Relaxed);
@@ -195,6 +381,8 @@ impl FrenzProcessManager {
                 phase: None,
                 streams: vec![],
                 sample_count: 0,
+                timing: None,
+                clock_pair: None,
             };
         }
 
@@ -263,8 +451,13 @@ impl FrenzProcessManager {
                 }
                 Ok(Ok(None)) => {
                     // EOF before any output — process exited immediately
-                    Self::handle_process_exit(&status_clone, &process_clone, &app_handle_clone)
-                        .await;
+                    Self::handle_process_exit(
+                        &status_clone,
+                        &process_clone,
+                        &shutdown_clone,
+                        &app_handle_clone,
+                    )
+                    .await;
                     return;
                 }
                 Ok(Err(e)) => {
@@ -309,8 +502,13 @@ impl FrenzProcessManager {
                         Self::handle_status_line(&line, &status_clone, &app_handle_clone).await;
                     }
                     Ok(None) => {
-                        Self::handle_process_exit(&status_clone, &process_clone, &app_handle_clone)
-                            .await;
+                        Self::handle_process_exit(
+                            &status_clone,
+                            &process_clone,
+                            &shutdown_clone,
+                            &app_handle_clone,
+                        )
+                        .await;
                         break;
                     }
                     Err(e) => {
@@ -336,25 +534,44 @@ impl FrenzProcessManager {
     async fn handle_process_exit(
         status: &Arc<RwLock<FrenzBridgeStatus>>,
         process: &Arc<RwLock<Option<tokio::process::Child>>>,
+        shutdown: &Arc<AtomicBool>,
         app_handle: &tauri::AppHandle,
     ) {
-        info!(
-            device = "frenz",
-            "FRENZ bridge stdout closed (process exited)"
-        );
-        let mut s = status.write().await;
-        if s.state != FrenzBridgeState::Stopped && s.state != FrenzBridgeState::Error {
-            s.state = FrenzBridgeState::Stopped;
-            s.message = Some("Process exited".to_string());
-        }
-
-        // Clean up the process handle
+        // Hold the lifecycle guard through cleanup: a new start must not race
+        // the release of this process's abandoned LSL inlets.
         let mut proc = process.write().await;
-        if let Some(mut child) = proc.take() {
-            let _ = child.wait().await;
+        let Some(mut child) = proc.take() else {
+            return;
+        };
+        let description =
+            match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+                Ok(Ok(exit)) => exit.to_string(),
+                Ok(Err(_)) => "exit status unavailable".into(),
+                Err(_) => {
+                    let _ = child.kill().await;
+                    "output closed before process exit; process terminated".into()
+                }
+            };
+        info!(device = "frenz", "FRENZ sidecar exited: {}", description);
+        let requested = shutdown.load(Ordering::Relaxed);
+        {
+            let mut s = status.write().await;
+            s.mark_process_exit(&description, requested);
+            Self::emit_status_event(&s, app_handle);
         }
-
-        Self::emit_status_event(&s, app_handle);
+        if let Some(state) = app_handle.try_state::<Arc<crate::bridge::AppState>>() {
+            state.broadcast_device_status(crate::bridge::state::DeviceStatusEvent::disconnected(
+                "frenz".into(),
+                crate::devices::DeviceType::LSL,
+                "FRENZ acquisition process exited",
+            ));
+            if let Err(error) = state.frenz_manager.disconnect_all().await {
+                warn!(
+                    device = "frenz",
+                    "Failed to close abandoned FRENZ inlets: {}", error
+                );
+            }
+        }
     }
 
     /// Parse and handle a JSON status line from the Python process
@@ -368,7 +585,7 @@ impl FrenzProcessManager {
             Err(e) => {
                 debug!(
                     device = "frenz",
-                    "Non-JSON line from FRENZ bridge: {} ({})", line, e
+                    "Ignoring non-protocol FRENZ output ({})", e
                 );
                 return;
             }
@@ -376,56 +593,14 @@ impl FrenzProcessManager {
 
         let mut s = status.write().await;
 
-        match parsed.status.as_str() {
-            "waiting_for_config" => {
-                s.state = FrenzBridgeState::Bootstrapping;
-                s.message = Some("Waiting for configuration...".to_string());
-            }
-            "bootstrapping" => {
-                s.state = FrenzBridgeState::Bootstrapping;
-                s.phase = parsed.phase.clone();
-                if let Some(ref pkg) = parsed.package {
-                    s.message = Some(format!("Installing {}...", pkg));
-                } else if let Some(ref phase) = parsed.phase {
-                    s.message = Some(format!("{}...", phase));
-                }
-            }
-            "connecting" => {
-                s.state = FrenzBridgeState::Connecting;
-                s.message = parsed
-                    .device_id
-                    .as_ref()
-                    .map(|id| format!("Connecting to {}...", id));
-                if let Some(ref phase) = parsed.phase {
-                    s.phase = Some(phase.clone());
-                }
-            }
-            "streaming" => {
-                s.state = FrenzBridgeState::Streaming;
-                s.message = None;
-                if let Some(streams) = parsed.streams {
-                    s.streams = streams;
-                }
-                if let Some(count) = parsed.sample_count {
-                    s.sample_count = count;
-                }
-            }
-            "error" => {
-                s.state = FrenzBridgeState::Error;
-                s.message = parsed.message;
-            }
-            "stopped" => {
-                s.state = FrenzBridgeState::Stopped;
-                s.message = None;
-                s.streams.clear();
-            }
-            other => {
-                debug!(
-                    device = "frenz",
-                    "Unknown status from FRENZ bridge: {}", other
-                );
-            }
+        if parsed.status != "streaming" || s.state != FrenzBridgeState::Streaming {
+            // The sidecar's messages are fixed, credential-safe text (it already shows them in the UI); without the
+            // message an error row in the log said only which phase failed, never why.
+            info!(device = "frenz", status = %parsed.status, phase = ?parsed.phase, detail = ?parsed.message,
+                "FRENZ sidecar phase changed");
         }
+
+        s.apply_python_status(parsed);
 
         Self::emit_status_event(&s, app_handle);
     }
@@ -441,8 +616,43 @@ impl FrenzProcessManager {
         }
     }
 
+    /// Bridge is exiting: end any scan first (it holds the operation lock while it waits), then stop the sidecar.
+    pub async fn stop_for_exit(&self) -> Result<(), String> {
+        self.exiting.store(true, Ordering::SeqCst);
+        self.scan_cancel.notify_waiters();
+        self.stop().await
+    }
+
     /// Stop the FRENZ bridge process gracefully
     pub async fn stop(&self) -> Result<(), String> {
+        let _operation = self.operation.lock().await;
+        self.stop_locked().await
+    }
+
+    /// Called only while start owns the operation lock. A user-initiated start
+    /// may reap a failed child still exiting, but must never replace an active one.
+    async fn prepare_start(&self) -> Result<(), String> {
+        let failed = self.status.read().await.state == FrenzBridgeState::Error;
+        if failed && self.process.read().await.is_some() {
+            self.stop_locked().await?;
+            if let Some(app) = self.app_handle.read().await.as_ref() {
+                if let Some(state) = app.try_state::<Arc<crate::bridge::AppState>>() {
+                    state
+                        .frenz_manager
+                        .disconnect_all()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        if self.process.read().await.is_some() {
+            return Err("FRENZ bridge is already running".into());
+        }
+        Ok(())
+    }
+
+    /// Caller owns the lifecycle operation lock (public stop or explicit start).
+    async fn stop_locked(&self) -> Result<(), String> {
         self.shutdown.store(true, Ordering::Relaxed);
 
         let mut proc = self.process.write().await;
@@ -485,8 +695,14 @@ impl FrenzProcessManager {
             let mut t = self.reader_task.write().await;
             t.take()
         };
-        if let Some(handle) = task {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+        if let Some(mut handle) = task {
+            if tokio::time::timeout(std::time::Duration::from_secs(2), &mut handle)
+                .await
+                .is_err()
+            {
+                handle.abort();
+                let _ = handle.await;
+            }
         }
 
         // Update status
@@ -498,7 +714,12 @@ impl FrenzProcessManager {
                 phase: None,
                 streams: vec![],
                 sample_count: 0,
+                timing: None,
+                clock_pair: None,
             };
+            if let Some(app_handle) = self.app_handle.read().await.as_ref() {
+                Self::emit_status_event(&status, app_handle);
+            }
         }
 
         info!(device = "frenz", "FRENZ bridge process stopped");
@@ -506,6 +727,17 @@ impl FrenzProcessManager {
     }
 
     /// Get the current bridge status
+    /// The helper's own error once it has failed (kept until the next start); `None` while it is healthy or stopped.
+    pub async fn failure(&self) -> Option<String> {
+        let status = self.status.read().await;
+        (status.state == FrenzBridgeState::Error).then(|| {
+            status
+                .message
+                .clone()
+                .unwrap_or_else(|| "The FRENZ helper stopped".into())
+        })
+    }
+
     pub async fn get_status(&self) -> FrenzBridgeStatus {
         self.status.read().await.clone()
     }
@@ -520,6 +752,170 @@ impl std::fmt::Debug for FrenzProcessManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A connect that raced the helper's death reported 24 LSL inlet timeouts; the helper's own error is what
+    /// explains it, and it must stay readable until a new start.
+    #[tokio::test]
+    async fn failure_is_the_helpers_own_error() {
+        let manager = FrenzProcessManager::new();
+        assert_eq!(manager.failure().await, None);
+        let error = r#"{"status":"error","phase":"publishing_samples","message":"Unsupported EEG packet layout (178 bytes, type 106, after 20 packets)"}"#;
+        manager
+            .status
+            .write()
+            .await
+            .apply_python_status(serde_json::from_str(error).unwrap());
+        manager
+            .status
+            .write()
+            .await
+            .apply_python_status(serde_json::from_str(r#"{"status":"stopping"}"#).unwrap());
+        assert_eq!(
+            manager.failure().await.as_deref(),
+            Some("Unsupported EEG packet layout (178 bytes, type 106, after 20 packets)")
+        );
+    }
+
+    /// Quitting while a scan waited on the macOS Bluetooth prompt (or a first-run install) blocked exit for up to
+    /// the scan's 180 s timeout: the scan held the operation lock and the exit stop waited for it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exit_ends_a_scan_that_is_still_waiting() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("frenz-scan-exit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let helper = dir.join("never-answers");
+        std::fs::write(&helper, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let manager = Arc::new(FrenzProcessManager::new());
+        let scanning = manager.clone();
+        let scan = tokio::spawn(async move { scanning.scan_with(helper).await });
+        while manager.operation.try_lock().is_ok() {
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), manager.stop_for_exit())
+            .await
+            .expect("exit waited on the scan")
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), scan)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err(), "a cancelled scan reports no devices");
+        assert!(
+            manager.scan_with(dir.join("never-answers")).await.is_err(),
+            "no new scan once Bridge is exiting"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_start_cleans_failed_child_but_preserves_active_child() {
+        let manager = FrenzProcessManager::new();
+        // A controlled child waits for stdin, like a sidecar still cleaning up.
+        let child = tokio::process::Command::new("/bin/cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        *manager.process.write().await = Some(child);
+        manager.status.write().await.state = FrenzBridgeState::Streaming;
+        manager.prepare_start().await.unwrap_err();
+        assert!(manager.process.read().await.is_some());
+        manager.status.write().await.state = FrenzBridgeState::Error;
+        // EOF makes the controlled child exit without a timeout or a sleep.
+        manager.process.write().await.as_mut().unwrap().stdin.take();
+        manager.prepare_start().await.unwrap();
+        assert!(manager.process.read().await.is_none());
+        assert_eq!(manager.get_status().await.state, FrenzBridgeState::Stopped);
+    }
+
+    #[test]
+    fn cleanup_statuses_never_replace_the_first_sidecar_failure() {
+        let mut status = FrenzBridgeStatus::default();
+        status.sample_count = 123;
+        for line in [
+            r#"{"status":"connecting","phase":"sdk_start","device_id":"FRENZI85"}"#,
+            r#"{"status":"error","phase":"connecting_bluetooth","message":"FRENZ failed during connecting_bluetooth (RuntimeError)."}"#,
+            r#"{"status":"stopping"}"#,
+            r#"{"status":"error","message":"FRENZ shutdown failed"}"#,
+            r#"{"status":"stopped"}"#,
+        ] {
+            status.apply_python_status(serde_json::from_str(line).unwrap());
+        }
+        status.mark_process_exit("exit status: 1", false);
+        assert_eq!(status.state, FrenzBridgeState::Error);
+        assert_eq!(status.phase.as_deref(), Some("connecting_bluetooth"));
+        assert_eq!(
+            status.message.as_deref(),
+            Some("FRENZ failed during connecting_bluetooth (RuntimeError).")
+        );
+        assert_eq!(status.sample_count, 123);
+        // A shutdown failure is still the primary error when no earlier failure exists.
+        let mut clean = FrenzBridgeStatus::default();
+        clean.apply_python_status(
+            serde_json::from_str(r#"{"status":"error","message":"FRENZ shutdown failed"}"#)
+                .unwrap(),
+        );
+        assert_eq!(clean.message.as_deref(), Some("FRENZ shutdown failed"));
+    }
+
+    #[test]
+    fn waiting_for_bluetooth_permission_says_what_to_do() {
+        let mut status = FrenzBridgeStatus::default();
+        status.apply_python_status(
+            serde_json::from_str(
+                r#"{"status":"connecting","phase":"waiting_for_bluetooth_permission","device_id":"FRENZI85"}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(status.state, FrenzBridgeState::Connecting);
+        assert_eq!(status.message.as_deref(), Some(BLUETOOTH_PERMISSION_PROMPT));
+        status.apply_python_status(
+            serde_json::from_str(
+                r#"{"status":"connecting","phase":"sdk_start","device_id":"FRENZI85"}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(status.message.as_deref(), Some("Connecting to FRENZI85..."));
+    }
+
+    #[test]
+    fn unexpected_exit_clears_active_streams_and_reports_failure() {
+        let mut status = FrenzBridgeStatus::default();
+        status.state = FrenzBridgeState::Streaming;
+        status.streams = vec!["_EEG_raw".into()];
+        status.sample_count = 123;
+        status.mark_process_exit("exit status: 0", false);
+        assert_eq!(status.state, FrenzBridgeState::Error);
+        assert!(status.streams.is_empty());
+        assert_eq!(status.sample_count, 123);
+        assert!(status.message.unwrap().contains("unexpectedly"));
+    }
+
+    #[test]
+    fn process_exit_preserves_the_original_sdk_error() {
+        let mut status = FrenzBridgeStatus::default();
+        status.state = FrenzBridgeState::Error;
+        status.message = Some("FRENZ failed during publishing_samples (TimeoutError).".into());
+        let expected = status.message.clone();
+        status.mark_process_exit("exit status: 1", false);
+        assert_eq!(status.message, expected);
+        assert_eq!(status.state, FrenzBridgeState::Error);
+    }
+
+    #[test]
+    fn requested_shutdown_is_not_an_unexpected_failure() {
+        let mut status = FrenzBridgeStatus::default();
+        status.state = FrenzBridgeState::Streaming;
+        status.mark_process_exit("exit status: 0", true);
+        assert_eq!(status.state, FrenzBridgeState::Stopped);
+        assert!(status.message.is_none());
+    }
 
     #[test]
     fn test_default_status() {
@@ -538,6 +934,8 @@ mod tests {
             phase: None,
             streams: vec!["_EEG_raw".to_string(), "_PPG_raw".to_string()],
             sample_count: 42,
+            timing: None,
+            clock_pair: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("streaming"));

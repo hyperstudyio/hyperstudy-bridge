@@ -26,6 +26,7 @@ pub enum DisconnectTarget {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub recording: Arc<crate::recording::RecordingManager>,
     pub devices: Arc<RwLock<HashMap<String, Arc<RwLock<BoxedDevice>>>>>,
     pub connections: Arc<DashMap<String, ConnectionInfo>>,
     pub metrics: Arc<RwLock<Metrics>>,
@@ -39,6 +40,10 @@ pub struct AppState {
     pub frenz_manager: Arc<FrenzLslManager>,
     /// FRENZ Python bridge process manager (PyApp lifecycle)
     pub frenz_process: Arc<FrenzProcessManager>,
+    /// The LSL inlets (streams Bridge receives) and outlets (streams it publishes) shared by the Neon and FRENZ
+    /// managers, kept here so the LSL panel can list them.
+    pub lsl_inlets: Arc<InletManager>,
+    pub lsl_outlets: Arc<OutletManager>,
     /// EyeLink manager for SR Research EyeLink 1000 Plus eye tracking
     pub eyelink_manager: Arc<crate::devices::eyelink::EyeLinkManager>,
     /// Broadcast channel for device status change events
@@ -277,8 +282,8 @@ impl AppState {
         let neon_manager = Arc::new(NeonLslManager::new(resolver.clone(), inlet_manager.clone()));
         let frenz_manager = Arc::new(FrenzLslManager::new(
             resolver,
-            inlet_manager,
-            outlet_manager,
+            inlet_manager.clone(),
+            outlet_manager.clone(),
         ));
         let frenz_process = Arc::new(FrenzProcessManager::new());
 
@@ -304,9 +309,29 @@ impl AppState {
             neon_manager,
             frenz_manager,
             frenz_process,
+            lsl_inlets: inlet_manager,
+            lsl_outlets: outlet_manager,
+            recording: Arc::new(crate::recording::RecordingManager::default()),
             eyelink_manager,
             device_status_tx,
         }
+    }
+
+    /// What Bridge itself does on LSL: the streams it receives (FRENZ, Neon) and the ones it publishes (markers).
+    pub async fn lsl_bridge_streams(&self) -> serde_json::Value {
+        fn entries(stats: serde_json::Value, key: &str) -> Vec<serde_json::Value> {
+            let mut list: Vec<_> = stats
+                .get(key)
+                .and_then(|m| m.as_object())
+                .map(|m| m.values().cloned().collect())
+                .unwrap_or_default();
+            list.sort_by(|a: &serde_json::Value, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            list
+        }
+        serde_json::json!({
+            "receiving": entries(self.lsl_inlets.get_all_stats().await, "inlets"),
+            "publishing": entries(self.lsl_outlets.get_all_stats().await, "outlets"),
+        })
     }
 
     /// Subscribe to device status change events.
@@ -1122,5 +1147,37 @@ mod device_identity_tests {
         let without = DeviceStatusEvent::disconnected("kernel".into(), DeviceType::Kernel, "bye");
         let value = serde_json::to_value(&without).unwrap();
         assert!(value.get("info").is_none());
+    }
+}
+
+#[cfg(test)]
+mod lsl_panel_tests {
+    use super::*;
+
+    /// The LSL panel listed nothing because nothing could see Bridge's own inlets and outlets. An outlet created by
+    /// a device manager through the shared manager must appear in what the panel reads.
+    #[tokio::test]
+    async fn streams_bridge_publishes_through_the_shared_manager_are_listed() {
+        let state = AppState::new();
+        assert_eq!(
+            state.lsl_bridge_streams().await["publishing"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        state
+            .lsl_outlets
+            .create_device_outlet("panel_test", "ttl", None)
+            .await
+            .unwrap();
+        let listed = state.lsl_bridge_streams().await;
+        let publishing = listed["publishing"].as_array().unwrap();
+        assert_eq!(publishing.len(), 1);
+        assert!(publishing[0]["name"]
+            .as_str()
+            .unwrap()
+            .contains("panel_test"));
+        assert_eq!(listed["receiving"].as_array().unwrap().len(), 0);
     }
 }
