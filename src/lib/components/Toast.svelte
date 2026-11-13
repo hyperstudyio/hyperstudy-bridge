@@ -25,7 +25,7 @@
       case 'error':
         return 'var(--color-error)';
       case 'update':
-        return 'var(--color-secondary)';
+        return 'var(--color-primary)';
       default:
         return 'var(--color-info)';
     }
@@ -113,7 +113,6 @@
     padding: 0.875rem 1rem;
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
-    border-left: 3px solid var(--toast-color);
     border-radius: 8px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
     animation: toast-slide-in 0.3s ease-out;
