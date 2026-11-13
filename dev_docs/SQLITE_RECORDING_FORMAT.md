@@ -72,9 +72,11 @@ same clock:
   auxiliary evidence of delivery delay and gaps, never a sample time.
 - Study marker stream (`HyperStudy Study Markers`): `timestamps` and `received`
   are both Bridge's LSL clock at the moment HyperStudy's marker was written.
-- `clock_observations`: every 5 s per stream, `correction` is LSL's estimate of
-  (Bridge clock − source clock) at `observed_lsl` (Bridge clock), with its
-  `uncertainty`; a failed estimate records its error instead.
+- `clock_observations`: every 5 s per stream Bridge reads LSL's latest
+  background measurement of (Bridge clock − source clock): `correction`, with
+  its `uncertainty` and the source time it was measured at (`remote_lsl`).
+  `observed_lsl` is Bridge's clock when it was read. A failed read records its
+  error instead.
 
 To put a source's samples on the marker timeline, add that stream's
 `correction` (interpolated across observations) to its `timestamps`. For a

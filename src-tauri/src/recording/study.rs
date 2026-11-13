@@ -89,7 +89,7 @@ impl RecordingManager {
     /// Called once during app setup; capabilities are deliberately absent from disk.
     pub fn configure_study_directory(&self, directory: PathBuf) -> Result<()> {
         std::fs::create_dir_all(&directory)?;
-        let mut registry = lock(&self.study);
+        let mut registry = self.study.lock().unwrap();
         ensure!(
             registry.directory.is_none(),
             "Study recording directory already initialized"
@@ -133,7 +133,7 @@ impl RecordingManager {
     }
     pub fn start_study(&self, request: StudyStartRequest) -> Result<StudySession> {
         validate_context(&request.context)?;
-        let mut registry = lock(&self.study);
+        let mut registry = self.study.lock().unwrap();
         registry.refresh(&self.status())?;
         if let Some(session) = registry
             .sessions
@@ -192,7 +192,7 @@ impl RecordingManager {
         Ok(session)
     }
     pub fn list_studies(&self) -> Result<Vec<StudySession>> {
-        let mut registry = lock(&self.study);
+        let mut registry = self.study.lock().unwrap();
         registry.refresh(&self.status())?;
         let mut sessions: Vec<_> = registry.sessions.values().cloned().collect();
         sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at));
@@ -237,7 +237,7 @@ impl RecordingManager {
     }
     pub fn stop_study(&self, request: StudyScope) -> Result<StudySession> {
         validate_context(&request.context)?;
-        let mut registry = lock(&self.study);
+        let mut registry = self.study.lock().unwrap();
         registry.refresh(&self.status())?;
         let existing = registry
             .sessions
@@ -289,7 +289,7 @@ impl RecordingManager {
             serde_json::to_vec(&marker)?.len() <= 64 * 1024,
             "Marker exceeds 64 KiB"
         );
-        let registry = lock(&self.study);
+        let registry = self.study.lock().unwrap();
         let session = registry
             .sessions
             .get(id)
@@ -298,7 +298,7 @@ impl RecordingManager {
             same_context(&session.context, context),
             "Recording context does not match"
         );
-        let active = lock(&self.active);
+        let active = self.active.lock().unwrap();
         ensure!(
             session.recording.path == self.status().path && self.status().state == "recording",
             "Recording is not active"
@@ -318,7 +318,7 @@ impl RecordingManager {
     /// Legacy WebSocket callers cannot bypass study ownership. The native
     /// RecordingPanel deliberately keeps the explicit local stop control.
     pub fn stop_unmanaged(&self, request: RecordingStopRequest) -> Result<RecordingStatus> {
-        let registry = lock(&self.study);
+        let registry = self.study.lock().unwrap();
         let status = self.status();
         ensure!(
             !active(&status.state)
@@ -331,7 +331,7 @@ impl RecordingManager {
         self.stop_with(request)
     }
     pub fn study_path(&self, id: &str) -> Result<PathBuf> {
-        let mut registry = lock(&self.study);
+        let mut registry = self.study.lock().unwrap();
         registry.refresh(&self.status())?;
         let session = registry
             .sessions
@@ -353,7 +353,7 @@ impl RecordingManager {
         state: &str,
         error: Option<String>,
     ) -> Result<StudySession> {
-        let mut registry = lock(&self.study);
+        let mut registry = self.study.lock().unwrap();
         let session = registry
             .sessions
             .get_mut(id)
@@ -365,7 +365,7 @@ impl RecordingManager {
         Ok(session)
     }
     pub fn begin_upload(&self, id: &str) -> Result<StudySession> {
-        let mut registry = lock(&self.study);
+        let mut registry = self.study.lock().unwrap();
         let session = registry
             .sessions
             .get_mut(id)

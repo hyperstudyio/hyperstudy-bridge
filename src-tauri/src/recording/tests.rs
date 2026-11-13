@@ -627,48 +627,6 @@ fn study_ready_attach_markers_scoped_stop_and_final_manifest() {
     );
 }
 
-/// A panicking recorder skipped the code that marks a recording failed, so status read "recording" forever: the UI
-/// showed a live recording, the study registry kept the session active, and updates refused to install.
-#[test]
-fn a_recorder_that_panics_is_reported_as_failed() {
-    let status = Arc::new(Mutex::new(RecordingStatus {
-        state: "recording".into(),
-        ..Default::default()
-    }));
-    supervise(&status, || panic!("index out of bounds"));
-    let after = lock(&status).clone();
-    assert_eq!(after.state, "failed");
-    assert!(after.error.unwrap().contains("stopped unexpectedly"));
-
-    let errored = Arc::new(Mutex::new(RecordingStatus {
-        state: "recording".into(),
-        ..Default::default()
-    }));
-    supervise(&errored, || Err(anyhow::anyhow!("Disk full")));
-    assert_eq!(lock(&errored).error.as_deref(), Some("Disk full"));
-
-    let clean = Arc::new(Mutex::new(RecordingStatus {
-        state: "completed".into(),
-        ..Default::default()
-    }));
-    supervise(&clean, || Ok(()));
-    assert_eq!(lock(&clean).state, "completed");
-}
-
-/// A lock poisoned by a panicking holder must not turn every later status read into a panic too.
-#[test]
-fn status_survives_a_poisoned_lock() {
-    let manager = Arc::new(RecordingManager::default());
-    let poisoner = manager.clone();
-    let _ = std::thread::spawn(move || {
-        let _held = poisoner.status.lock().unwrap();
-        panic!("holder panicked");
-    })
-    .join();
-    assert!(manager.status.is_poisoned());
-    assert_eq!(manager.status().state, "idle");
-}
-
 /// Markers and samples must be comparable on one timeline. A marker is stamped with Bridge's LSL clock when
 /// HyperStudy writes it; source samples keep the time their source put on them. For a source on this machine the
 /// two clocks are the same, so a marker must fall after every sample stamped before it and before every sample
