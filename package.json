@@ -1,6 +1,6 @@
 {
   "name": "hyperstudy-bridge",
-  "version": "0.8.27",
+  "version": "0.8.28",
   "type": "module",
   "description": "A unified, high-performance desktop application for bridging HyperStudy web experiments with research hardware devices.",
   "main": "index.js",
