@@ -35,6 +35,27 @@ mod hybrid_config_tests {
         assert_eq!(suffixes, vec!["_EEG_raw", "_EEG_bluetooth", "_focus"]);
         assert!(crate::devices::lsl::types::FRENZ_STREAM_SUFFIXES.contains(&"_EEG_bluetooth"));
     }
+
+    #[test]
+    fn a_dead_helper_explains_a_failed_connect() {
+        let inlets =
+            "LSL library error: FRENZ connection failed: _EEG_raw: Inlet thread response timeout"
+                .to_string();
+        let reported =
+            frenz_connect_error(Some("Unsupported EEG packet layout".into()), inlets.clone());
+        assert!(reported.contains("Unsupported EEG packet layout"));
+        assert!(!reported.contains("Inlet thread response timeout"));
+        assert_eq!(frenz_connect_error(None, inlets.clone()), inlets);
+    }
+}
+
+/// A connect that loses the race with a dying FRENZ helper fails on every inlet ("Inlet thread response timeout",
+/// once per stream). The helper's own error is the cause, so it replaces that list.
+fn frenz_connect_error(helper_failure: Option<String>, connect_error: String) -> String {
+    match helper_failure {
+        Some(reason) => format!("The FRENZ helper stopped: {reason}"),
+        None => connect_error,
+    }
 }
 
 /// Maps frontend FRENZ config boolean flags to LSL stream suffixes.
@@ -679,6 +700,20 @@ async fn handle_device_command(
                     return;
                 };
                 let device_name = &selected.device_name;
+                // Discovery answers from LSL's cache for a few seconds after a publisher dies, so a helper that
+                // failed during discovery still looks discoverable; opening its streams would only time out.
+                if let Some(reason) = state.frenz_process.failure().await {
+                    send_response(
+                        tx,
+                        BridgeResponse::device_error(
+                            device_id,
+                            frenz_connect_error(Some(reason), String::new()),
+                            id,
+                        ),
+                    )
+                    .await;
+                    return;
+                }
                 info!("FRENZ connect: using device '{}'", device_name);
 
                 // Create marker outlet if requested
@@ -766,11 +801,10 @@ async fn handle_device_command(
                         .await;
                     }
                     Err(e) => {
-                        send_response(
-                            tx,
-                            BridgeResponse::device_error(device_id, e.to_string(), id),
-                        )
-                        .await;
+                        let message =
+                            frenz_connect_error(state.frenz_process.failure().await, e.to_string());
+                        send_response(tx, BridgeResponse::device_error(device_id, message, id))
+                            .await;
                     }
                 }
                 return;

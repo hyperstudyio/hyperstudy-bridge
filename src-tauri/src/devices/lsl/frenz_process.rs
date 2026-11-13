@@ -727,6 +727,17 @@ impl FrenzProcessManager {
     }
 
     /// Get the current bridge status
+    /// The helper's own error once it has failed (kept until the next start); `None` while it is healthy or stopped.
+    pub async fn failure(&self) -> Option<String> {
+        let status = self.status.read().await;
+        (status.state == FrenzBridgeState::Error).then(|| {
+            status
+                .message
+                .clone()
+                .unwrap_or_else(|| "The FRENZ helper stopped".into())
+        })
+    }
+
     pub async fn get_status(&self) -> FrenzBridgeStatus {
         self.status.read().await.clone()
     }
@@ -741,6 +752,29 @@ impl std::fmt::Debug for FrenzProcessManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A connect that raced the helper's death reported 24 LSL inlet timeouts; the helper's own error is what
+    /// explains it, and it must stay readable until a new start.
+    #[tokio::test]
+    async fn failure_is_the_helpers_own_error() {
+        let manager = FrenzProcessManager::new();
+        assert_eq!(manager.failure().await, None);
+        let error = r#"{"status":"error","phase":"publishing_samples","message":"Unsupported EEG packet layout (178 bytes, type 106, after 20 packets)"}"#;
+        manager
+            .status
+            .write()
+            .await
+            .apply_python_status(serde_json::from_str(error).unwrap());
+        manager
+            .status
+            .write()
+            .await
+            .apply_python_status(serde_json::from_str(r#"{"status":"stopping"}"#).unwrap());
+        assert_eq!(
+            manager.failure().await.as_deref(),
+            Some("Unsupported EEG packet layout (178 bytes, type 106, after 20 packets)")
+        );
+    }
 
     /// Quitting while a scan waited on the macOS Bluetooth prompt (or a first-run install) blocked exit for up to
     /// the scan's 180 s timeout: the scan held the operation lock and the exit stop waited for it.
