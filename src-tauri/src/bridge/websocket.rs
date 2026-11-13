@@ -30,7 +30,8 @@ mod hybrid_config_tests {
 
     #[test]
     fn raw_eeg_selects_bluetooth_and_sdk_comparison_with_focus() {
-        let suffixes = map_frenz_config_to_suffixes(&json!({"streamEegRaw": true, "streamFocus": true}));
+        let suffixes =
+            map_frenz_config_to_suffixes(&json!({"streamEegRaw": true, "streamFocus": true}));
         assert_eq!(suffixes, vec!["_EEG_raw", "_EEG_bluetooth", "_focus"]);
         assert!(crate::devices::lsl::types::FRENZ_STREAM_SUFFIXES.contains(&"_EEG_bluetooth"));
     }
@@ -1943,17 +1944,39 @@ async fn handle_device_command(
         CommandAction::UploadStudyRecording => {
             let result = async {
                 let value = payload.ok_or_else(|| anyhow::anyhow!("Missing upload request"))?;
-                let recording_id = value.get("recording_id").and_then(|v|v.as_str()).ok_or_else(|| anyhow::anyhow!("Missing recording ID"))?.to_string();
-                let base = value.get("api_base_url").and_then(|v|v.as_str()).ok_or_else(|| anyhow::anyhow!("Missing API base URL"))?.to_string();
-                let grant = serde_json::from_value(value.get("grant").cloned().ok_or_else(|| anyhow::anyhow!("Missing upload grant"))?)
-                    .map_err(|_|anyhow::anyhow!("Invalid upload grant"))?;
-                crate::recording::upload::enqueue(state.recording.clone(),recording_id,base,grant).await
-            }.await;
+                let recording_id = value
+                    .get("recording_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing recording ID"))?
+                    .to_string();
+                let base = value
+                    .get("api_base_url")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing API base URL"))?
+                    .to_string();
+                let grant = serde_json::from_value(
+                    value
+                        .get("grant")
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("Missing upload grant"))?,
+                )
+                .map_err(|_| anyhow::anyhow!("Invalid upload grant"))?;
+                crate::recording::upload::enqueue(
+                    state.recording.clone(),
+                    recording_id,
+                    base,
+                    grant,
+                )
+                .await
+            }
+            .await;
             let response = match result {
-                Ok(value) => BridgeResponse::data("recording".into(),value,id),
-                Err(error) => BridgeResponse::device_error("recording".into(),error.to_string(),id),
+                Ok(value) => BridgeResponse::data("recording".into(), value, id),
+                Err(error) => {
+                    BridgeResponse::device_error("recording".into(), error.to_string(), id)
+                }
             };
-            send_response(tx,response).await;
+            send_response(tx, response).await;
         }
         CommandAction::StartStudyRecording
         | CommandAction::GetStudyRecording
@@ -1962,30 +1985,53 @@ async fn handle_device_command(
         | CommandAction::PrepareRecordingUpload
         | CommandAction::ListStudyRecordings => {
             let manager = state.recording.clone();
-            let result = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
-                let value = payload.unwrap_or_else(||json!({}));
-                let field = |name: &str| value.get(name).cloned().ok_or_else(||anyhow::anyhow!("Missing {}",name));
-                match action {
-                    CommandAction::StartStudyRecording => Ok(serde_json::to_value(manager.start_study(serde_json::from_value(value)?)?)?),
-                    CommandAction::GetStudyRecording => Ok(serde_json::to_value(manager.get_study(&serde_json::from_value(field("context")?)?)?)?),
-                    CommandAction::StopStudyRecording => Ok(serde_json::to_value(manager.stop_study(serde_json::from_value(value)?)?)?),
-                    CommandAction::SendStudyMarker => {
-                        let id: String = serde_json::from_value(field("recording_id")?)?;
-                        manager.study_marker(&id,&serde_json::from_value(field("context")?)?,field("marker")?)
+            let result =
+                tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+                    let value = payload.unwrap_or_else(|| json!({}));
+                    let field = |name: &str| {
+                        value
+                            .get(name)
+                            .cloned()
+                            .ok_or_else(|| anyhow::anyhow!("Missing {}", name))
+                    };
+                    match action {
+                        CommandAction::StartStudyRecording => Ok(serde_json::to_value(
+                            manager.start_study(serde_json::from_value(value)?)?,
+                        )?),
+                        CommandAction::GetStudyRecording => Ok(serde_json::to_value(
+                            manager.get_study(&serde_json::from_value(field("context")?)?)?,
+                        )?),
+                        CommandAction::StopStudyRecording => Ok(serde_json::to_value(
+                            manager.stop_study(serde_json::from_value(value)?)?,
+                        )?),
+                        CommandAction::SendStudyMarker => {
+                            let id: String = serde_json::from_value(field("recording_id")?)?;
+                            manager.study_marker(
+                                &id,
+                                &serde_json::from_value(field("context")?)?,
+                                field("marker")?,
+                            )
+                        }
+                        CommandAction::PrepareRecordingUpload => {
+                            let id: String = serde_json::from_value(field("recording_id")?)?;
+                            crate::recording::upload::manifest(&manager.study_path(&id)?, &id)
+                        }
+                        _ => Ok(serde_json::to_value(manager.list_studies()?)?),
                     }
-                    CommandAction::PrepareRecordingUpload => {
-                        let id: String = serde_json::from_value(field("recording_id")?)?;
-                        crate::recording::upload::manifest(&manager.study_path(&id)?,&id)
-                    }
-                    _ => Ok(serde_json::to_value(manager.list_studies()?)?),
-                }
-            }).await;
+                })
+                .await;
             let response = match result {
-                Ok(Ok(value)) => BridgeResponse::data("recording".into(),value,id),
-                Ok(Err(error)) => BridgeResponse::device_error("recording".into(),error.to_string(),id),
-                Err(_) => BridgeResponse::device_error("recording".into(),"Study recording command failed".into(),id),
+                Ok(Ok(value)) => BridgeResponse::data("recording".into(), value, id),
+                Ok(Err(error)) => {
+                    BridgeResponse::device_error("recording".into(), error.to_string(), id)
+                }
+                Err(_) => BridgeResponse::device_error(
+                    "recording".into(),
+                    "Study recording command failed".into(),
+                    id,
+                ),
             };
-            send_response(tx,response).await;
+            send_response(tx, response).await;
         }
         CommandAction::DiscoverRecordingStreams
         | CommandAction::DescribeRecordingStream

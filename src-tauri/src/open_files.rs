@@ -13,7 +13,11 @@ pub fn raised_soft_limit(soft: u64, hard: u64, infinity: u64) -> Option<u64> {
     if soft == infinity || soft >= REQUIRED_OPEN_FILES {
         return None;
     }
-    let target = if hard == infinity { REQUIRED_OPEN_FILES } else { REQUIRED_OPEN_FILES.min(hard) };
+    let target = if hard == infinity {
+        REQUIRED_OPEN_FILES
+    } else {
+        REQUIRED_OPEN_FILES.min(hard)
+    };
     (target > soft).then_some(target)
 }
 
@@ -21,18 +25,30 @@ pub fn raised_soft_limit(soft: u64, hard: u64, infinity: u64) -> Option<u64> {
 /// Returns the new soft limit, or `None` when no change was needed.
 #[cfg(unix)]
 pub fn raise_open_file_limit() -> Result<Option<u64>, String> {
-    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
     // SAFETY: getrlimit/setrlimit only read and write the struct passed to them.
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
-        return Err(format!("getrlimit failed: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "getrlimit failed: {}",
+            std::io::Error::last_os_error()
+        ));
     }
-    let Some(target) = raised_soft_limit(limit.rlim_cur as u64, limit.rlim_max as u64, libc::RLIM_INFINITY as u64)
-    else {
+    let Some(target) = raised_soft_limit(
+        limit.rlim_cur as u64,
+        limit.rlim_max as u64,
+        libc::RLIM_INFINITY as u64,
+    ) else {
         return Ok(None);
     };
     limit.rlim_cur = target as libc::rlim_t;
     if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
-        return Err(format!("setrlimit to {target} failed: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "setrlimit to {target} failed: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     Ok(Some(target))
 }

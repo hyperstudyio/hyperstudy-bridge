@@ -8,10 +8,16 @@
 fn startup_raises_the_finder_default_limit() {
     use hyperstudy_bridge::open_files::{raise_open_file_limit, REQUIRED_OPEN_FILES};
 
-    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
     unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) };
     if limit.rlim_max != libc::RLIM_INFINITY && (limit.rlim_max as u64) < REQUIRED_OPEN_FILES {
-        eprintln!("hard limit {} is below {REQUIRED_OPEN_FILES}; nothing to test", limit.rlim_max);
+        eprintln!(
+            "hard limit {} is below {REQUIRED_OPEN_FILES}; nothing to test",
+            limit.rlim_max
+        );
         return;
     }
     limit.rlim_cur = 256; // what a Finder launch starts with

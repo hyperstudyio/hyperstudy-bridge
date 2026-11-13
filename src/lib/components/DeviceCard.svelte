@@ -29,10 +29,12 @@
   let frenzBridgeAvailable = $state(false);
   let frenzBridgeStatus = $state({ state: 'stopped', streams: [], sample_count: 0 });
   let frenzTimingAnomaly = $derived(
-    Object.entries(frenzBridgeStatus.timing || {}).some(([suffix, timing]) =>
-      timing.backward_count > 0 || timing.nonfinite_count > 0 ||
-      timing.sequence_discontinuity_count > 0 ||
-      (suffix.endsWith('_raw') && timing.cadence_deviation_count > 0)
+    Object.entries(frenzBridgeStatus.timing || {}).some(
+      ([suffix, timing]) =>
+        timing.backward_count > 0 ||
+        timing.nonfinite_count > 0 ||
+        timing.sequence_discontinuity_count > 0 ||
+        (suffix.endsWith('_raw') && timing.cadence_deviation_count > 0)
     )
   );
   let unlistenFrenzStatus = null;
@@ -315,7 +317,6 @@
       // Connect LSL streams via WebSocket
       frenzPhaseText = 'Connecting to data streams...';
       await bridgeStore.connectDevice('frenz', { ...device.config, device_name: frenzDeviceId });
-
     } catch (error) {
       alert(`Failed to connect: ${error.message || error}`);
     } finally {
@@ -539,7 +540,8 @@
       <div class="config-row">
         <span class="label">URL:</span>
         <span class="value">
-          {device.config.url || (device.config.device_id ? 'Resolved from pinned phone' : 'Not configured')}
+          {device.config.url ||
+            (device.config.device_id ? 'Resolved from pinned phone' : 'Not configured')}
         </span>
       </div>
       <div class="config-row">
@@ -550,8 +552,8 @@
         <div class="config-row">
           <span class="label">Connected:</span>
           <span class="value">
-            {device.info.device_name} · {device.info.device_id} · {device.info.device_ip}{device.info
-              .battery_level != null
+            {device.info.device_name} · {device.info.device_id} · {device.info.device_ip}{device
+              .info.battery_level != null
               ? ` · ${Math.round(device.info.battery_level)}%`
               : ''}
           </span>
@@ -613,8 +615,13 @@
           </div>
           <div class="config-row">
             <span class="label">Timestamp quality:</span>
-            <span class="value" style:color={frenzTimingAnomaly ? 'var(--color-warning)' : undefined}>
-              {frenzTimingAnomaly ? 'Source timestamp discontinuities detected' : 'Acquisition alignment unverified'}
+            <span
+              class="value"
+              style:color={frenzTimingAnomaly ? 'var(--color-warning)' : undefined}
+            >
+              {frenzTimingAnomaly
+                ? 'Source timestamp discontinuities detected'
+                : 'Acquisition alignment unverified'}
             </span>
           </div>
         {/if}
@@ -664,11 +671,13 @@
         frenzDisconnecting ||
         (device.id === 'ttl' && !device.config.port)}
     >
-      {frenzDisconnecting ? 'Disconnecting...' : device.status === 'connected'
-        ? 'Disconnect'
-        : isConnecting || frenzConnecting
-          ? 'Connecting...'
-          : 'Connect'}
+      {frenzDisconnecting
+        ? 'Disconnecting...'
+        : device.status === 'connected'
+          ? 'Disconnect'
+          : isConnecting || frenzConnecting
+            ? 'Connecting...'
+            : 'Connect'}
     </button>
     {#if device.id === 'ttl' && device.status === 'connected'}
       <button class="action-btn pulse-btn" onclick={sendTestPulse}> Send Pulse </button>

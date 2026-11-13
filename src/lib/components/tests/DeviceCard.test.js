@@ -136,7 +136,9 @@ describe('DeviceCard', () => {
       };
       render(DeviceCard, { device: connected });
 
-      expect(screen.getByText(/Neon P2 · a41fe4fe2bccf6c3 · 192\.168\.50\.220 · 82%/)).toBeInTheDocument();
+      expect(
+        screen.getByText(/Neon P2 · a41fe4fe2bccf6c3 · 192\.168\.50\.220 · 82%/)
+      ).toBeInTheDocument();
       expect(screen.getByText(/started elsewhere/)).toBeInTheDocument();
     });
 

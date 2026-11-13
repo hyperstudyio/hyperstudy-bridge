@@ -150,7 +150,11 @@
         secretKey: 'frenz_product_key',
       },
       // Raw Signals
-      streamEegRaw: { label: 'EEG: Bluetooth raw and SDK comparison (125Hz)', type: 'checkbox', default: true },
+      streamEegRaw: {
+        label: 'EEG: Bluetooth raw and SDK comparison (125Hz)',
+        type: 'checkbox',
+        default: true,
+      },
       streamPpgRaw: { label: 'PPG Raw (4ch, 25Hz)', type: 'checkbox', default: true },
       streamImuRaw: { label: 'IMU Raw (4ch, 50Hz)', type: 'checkbox', default: true },
       streamHrRaw: { label: 'Heart rate', type: 'checkbox', default: true },
@@ -299,7 +303,8 @@
     if (!config) return;
 
     const generation = ++loadGeneration;
-    isLoading = device.id === 'frenz'; saveError = '';
+    isLoading = device.id === 'frenz';
+    saveError = '';
     const newFormData = {};
     const newSecureFields = {};
     const existingConfig = device.config || {};
@@ -403,8 +408,14 @@
     }
 
     if (device?.id === 'frenz') {
-      if (!secureFields.frenzDeviceId) { newErrors.frenzDeviceId = 'Scan for FRENZ bands and select your band.'; hasErrors = true; }
-      if (!secureFields.frenzProductKey) { newErrors.frenzProductKey = 'Enter your Earable product key.'; hasErrors = true; }
+      if (!secureFields.frenzDeviceId) {
+        newErrors.frenzDeviceId = 'Scan for FRENZ bands and select your band.';
+        hasErrors = true;
+      }
+      if (!secureFields.frenzProductKey) {
+        newErrors.frenzProductKey = 'Enter your Earable product key.';
+        hasErrors = true;
+      }
     }
     errors = newErrors;
     return !hasErrors;
@@ -460,7 +471,8 @@
       return;
     }
 
-    isSubmitting = true; saveError = '';
+    isSubmitting = true;
+    saveError = '';
     try {
       // Persist secure fields to stronghold (separate from regular config)
       const config = deviceConfigs[device.id];
@@ -583,317 +595,330 @@
           }}
         >
           <fieldset disabled={isSubmitting || isLoading}>
-          {#if activeTab === 'device'}
-            <!-- Device Configuration Tab -->
-            {#if deviceConfigs[device.id]}
-              {#each Object.entries(deviceConfigs[device.id]) as [fieldName, fieldConfig]}
-                {#if device.id === 'frenz' && fieldName === 'streamEegRaw'}
-                  <div class="frenz-stream-actions">
-                    <span>Sensor and model streams</span>
-                    <button type="button" class="reveal-btn" onclick={enableAllFrenzStreams}>Enable all</button>
-                  </div>
-                {/if}
-                <div class="form-group">
-                  <label for={fieldName} class="form-label">
-                    {fieldConfig.label}
-                    {#if fieldConfig.required}
-                      <span class="required">*</span>
-                    {/if}
-                    {#if fieldConfig.secure && fieldName !== 'frenzDeviceId'}
-                      <span class="secure-badge">Encrypted</span>
-                    {/if}
-                  </label>
-
-                  {#if device.id === 'frenz' && fieldName === 'frenzDeviceId'}
-                    <FrenzDevicePicker id={fieldName} value={secureFields.frenzDeviceId || ''}
-                      disabled={isLoading || isSubmitting}
-                      onSelect={name => { secureFields.frenzDeviceId = name; delete errors.frenzDeviceId; }} />
-                    {#if errors.frenzDeviceId}<p role="alert">{errors.frenzDeviceId}</p>{/if}
-                  {:else if fieldConfig.secure}
-                    <div class="input-with-button">
-                      <input
-                        id={fieldName}
-                        type={fieldConfig.type === 'password' && visibleSecrets[fieldName] ? 'text' : fieldConfig.type}
-                        class="form-input"
-                        class:readonly={fieldConfig.readOnly}
-                        placeholder={fieldConfig.placeholder || ''}
-                        value={secureFields[fieldName] || ''}
-                        readonly={fieldConfig.readOnly}
-                        spellcheck={false}
-                        autocapitalize="none"
-                        oninput={e => (secureFields[fieldName] = e.target.value)}
-                      />
-                      {#if fieldConfig.type === 'password'}
-                        <button
-                          type="button"
-                          class="reveal-btn"
-                          aria-label={`${visibleSecrets[fieldName] ? 'Hide' : 'Show'} ${fieldConfig.label}`}
-                          aria-controls={fieldName}
-                          aria-pressed={!!visibleSecrets[fieldName]}
-                          onclick={() => (visibleSecrets[fieldName] = !visibleSecrets[fieldName])}
-                        >
-                          {visibleSecrets[fieldName] ? 'Hide' : 'Show'}
-                        </button>
-                      {/if}
-                      {#if !fieldConfig.readOnly && secureFields[fieldName]}
-                        <button
-                          type="button"
-                          class="clear-btn"
-                          title="Clear stored key"
-                          onclick={() => (secureFields[fieldName] = '')}
-                        >
-                          Clear
-                        </button>
-                      {/if}
+            {#if activeTab === 'device'}
+              <!-- Device Configuration Tab -->
+              {#if deviceConfigs[device.id]}
+                {#each Object.entries(deviceConfigs[device.id]) as [fieldName, fieldConfig]}
+                  {#if device.id === 'frenz' && fieldName === 'streamEegRaw'}
+                    <div class="frenz-stream-actions">
+                      <span>Sensor and model streams</span>
+                      <button type="button" class="reveal-btn" onclick={enableAllFrenzStreams}
+                        >Enable all</button
+                      >
                     </div>
-                  {:else if fieldConfig.type === 'select'}
-                    <select
-                      id={fieldName}
-                      class="form-input"
-                      class:error={errors[fieldName]}
-                      value={formData[fieldName]}
-                      onchange={e => handleFieldChange(fieldName, e.target.value)}
-                    >
-                      <option value="">Select {fieldConfig.label}</option>
-                      {#each fieldConfig.options as option}
-                        <option value={option}>{option}</option>
-                      {/each}
-                    </select>
-                  {:else if fieldConfig.type === 'checkbox'}
-                    <label class="checkbox-wrapper">
-                      <input
-                        id={fieldName}
-                        type="checkbox"
-                        class="form-checkbox"
-                        checked={formData[fieldName]}
-                        onchange={e => handleFieldChange(fieldName, e.target.checked)}
-                      />
-                      <span class="checkbox-label">Enable {fieldConfig.label}</span>
-                    </label>
-                  {:else}
-                    <div class="input-with-button">
-                      <input
-                        id={fieldName}
-                        type={fieldConfig.type}
-                        class="form-input"
-                        class:error={errors[fieldName]}
-                        placeholder={fieldConfig.placeholder || ''}
-                        min={fieldConfig.min}
-                        max={fieldConfig.max}
-                        value={formData[fieldName]}
-                        oninput={e => handleFieldChange(fieldName, e.target.value)}
-                      />
-                      {#if device.id === 'ttl' && fieldName === 'port'}
-                        <button
-                          type="button"
-                          class="detect-btn"
-                          onclick={detectTtlDevices}
-                          disabled={isDetecting}
-                        >
-                          {isDetecting ? 'Detecting...' : 'Detect'}
-                        </button>
-                      {/if}
-                    </div>
-
-                    <!-- Show detected devices dropdown for TTL port -->
-                    {#if device.id === 'ttl' && fieldName === 'port' && showDeviceSelector && detectedTtlDevices.length > 0}
-                      <div class="device-selector">
-                        <div class="selector-header">
-                          Found {detectedTtlDevices.length} device(s):
-                        </div>
-                        {#each detectedTtlDevices as ttlDevice}
-                          <button
-                            type="button"
-                            class="device-option"
-                            onclick={() => selectDetectedDevice(ttlDevice.port)}
-                          >
-                            <div class="device-option-main">
-                              <strong>{ttlDevice.port}</strong>
-                              <span class="device-serial">S/N: {ttlDevice.serial_number}</span>
-                            </div>
-                            <div class="device-option-details">
-                              {ttlDevice.manufacturer} - {ttlDevice.product}
-                            </div>
-                          </button>
-                        {/each}
-                      </div>
-                    {/if}
                   {/if}
-
-                  {#if errors[fieldName]}
-                    <div class="form-error">{errors[fieldName]}</div>
-                  {/if}
-                </div>
-              {/each}
-
-              {#if device.id === 'pupil'}
-                <div class="phone-finder">
-                  <div class="phone-finder-header">
-                    <span class="form-label">Phones on this network</span>
-                    <button
-                      type="button"
-                      class="phone-btn"
-                      onclick={findPhones}
-                      disabled={isDiscoveringPhones}
-                    >
-                      {isDiscoveringPhones ? 'Searching…' : 'Find phones'}
-                    </button>
-                  </div>
-                  <p class="phone-hint">
-                    Pick the phone this station should always use. The bridge then connects by hardware
-                    ID and refuses any other phone that answers to the same name.
-                  </p>
-                  {#if phoneDiscoveryError}
-                    <p class="phone-error">{phoneDiscoveryError}</p>
-                  {/if}
-                  {#if discoveredPhones.length > 0}
-                    <ul class="phone-list">
-                      {#each discoveredPhones as phone (phone.device_id)}
-                        <li class="phone-row" class:selected={formData.device_id === phone.device_id}>
-                          <div class="phone-main">
-                            <span class="phone-name">{phone.device_name}</span>
-                            <span class="phone-id">{phone.device_id}</span>
-                          </div>
-                          <div class="phone-meta">
-                            <span>{phone.ip}:{phone.port}</span>
-                            {#if phone.reachable}
-                              {#if phone.battery_level != null}
-                                <span>{Math.round(phone.battery_level)}% battery</span>
-                              {/if}
-                              {#if phone.recording_id}
-                                <span class="phone-flag busy">recording</span>
-                              {/if}
-                              {#if phone.glasses_connected === false}
-                                <span class="phone-flag warn">no glasses</span>
-                              {/if}
-                            {:else}
-                              <span class="phone-flag warn">unreachable</span>
-                            {/if}
-                          </div>
-                          <button type="button" class="phone-btn small" onclick={() => usePhone(phone)}>
-                            {formData.device_id === phone.device_id ? 'Pinned' : 'Use this phone'}
-                          </button>
-                        </li>
-                      {/each}
-                    </ul>
-                  {:else if phoneSearched && !isDiscoveringPhones && !phoneDiscoveryError}
-                    <p class="phone-hint">
-                      No Neon Companion phones found. Make sure the app is open and the phone is on the
-                      same Wi-Fi as this computer.
-                    </p>
-                  {/if}
-                </div>
-              {/if}
-            {:else}
-              <div class="no-config">
-                <p>No configuration options available for this device type.</p>
-              </div>
-            {/if}
-          {:else if activeTab === 'lsl'}
-            <!-- LSL Configuration Tab -->
-            <div class="lsl-config-section">
-              <p class="section-description">
-                Configure Lab Streaming Layer (LSL) output for this device. When enabled, device
-                data will be published as an LSL stream for use by other applications.
-              </p>
-
-              {#each Object.entries(deviceConfigs.lsl) as [fieldName, fieldConfig]}
-                <div class="form-group">
-                  {#if fieldConfig.type === 'checkbox'}
-                    <label class="checkbox-wrapper">
-                      <input
-                        id="lsl-{fieldName}"
-                        type="checkbox"
-                        class="form-checkbox"
-                        checked={lslConfig[fieldName]}
-                        onchange={e => handleFieldChange(fieldName, e.target.checked, true)}
-                      />
-                      <span class="checkbox-label">
-                        {fieldConfig.label}
-                        {#if fieldConfig.required}
-                          <span class="required">*</span>
-                        {/if}
-                      </span>
-                    </label>
-                  {:else}
-                    <label for="lsl-{fieldName}" class="form-label">
+                  <div class="form-group">
+                    <label for={fieldName} class="form-label">
                       {fieldConfig.label}
                       {#if fieldConfig.required}
                         <span class="required">*</span>
                       {/if}
+                      {#if fieldConfig.secure && fieldName !== 'frenzDeviceId'}
+                        <span class="secure-badge">Encrypted</span>
+                      {/if}
                     </label>
 
-                    {#if fieldConfig.type === 'select'}
+                    {#if device.id === 'frenz' && fieldName === 'frenzDeviceId'}
+                      <FrenzDevicePicker
+                        id={fieldName}
+                        value={secureFields.frenzDeviceId || ''}
+                        disabled={isLoading || isSubmitting}
+                        onSelect={name => {
+                          secureFields.frenzDeviceId = name;
+                          delete errors.frenzDeviceId;
+                        }}
+                      />
+                      {#if errors.frenzDeviceId}<p role="alert">{errors.frenzDeviceId}</p>{/if}
+                    {:else if fieldConfig.secure}
+                      <div class="input-with-button">
+                        <input
+                          id={fieldName}
+                          type={fieldConfig.type === 'password' && visibleSecrets[fieldName]
+                            ? 'text'
+                            : fieldConfig.type}
+                          class="form-input"
+                          class:readonly={fieldConfig.readOnly}
+                          placeholder={fieldConfig.placeholder || ''}
+                          value={secureFields[fieldName] || ''}
+                          readonly={fieldConfig.readOnly}
+                          spellcheck={false}
+                          autocapitalize="none"
+                          oninput={e => (secureFields[fieldName] = e.target.value)}
+                        />
+                        {#if fieldConfig.type === 'password'}
+                          <button
+                            type="button"
+                            class="reveal-btn"
+                            aria-label={`${visibleSecrets[fieldName] ? 'Hide' : 'Show'} ${fieldConfig.label}`}
+                            aria-controls={fieldName}
+                            aria-pressed={!!visibleSecrets[fieldName]}
+                            onclick={() => (visibleSecrets[fieldName] = !visibleSecrets[fieldName])}
+                          >
+                            {visibleSecrets[fieldName] ? 'Hide' : 'Show'}
+                          </button>
+                        {/if}
+                        {#if !fieldConfig.readOnly && secureFields[fieldName]}
+                          <button
+                            type="button"
+                            class="clear-btn"
+                            title="Clear stored key"
+                            onclick={() => (secureFields[fieldName] = '')}
+                          >
+                            Clear
+                          </button>
+                        {/if}
+                      </div>
+                    {:else if fieldConfig.type === 'select'}
                       <select
-                        id="lsl-{fieldName}"
+                        id={fieldName}
                         class="form-input"
                         class:error={errors[fieldName]}
-                        value={lslConfig[fieldName]}
-                        onchange={e => handleFieldChange(fieldName, e.target.value, true)}
+                        value={formData[fieldName]}
+                        onchange={e => handleFieldChange(fieldName, e.target.value)}
                       >
                         <option value="">Select {fieldConfig.label}</option>
                         {#each fieldConfig.options as option}
                           <option value={option}>{option}</option>
                         {/each}
                       </select>
+                    {:else if fieldConfig.type === 'checkbox'}
+                      <label class="checkbox-wrapper">
+                        <input
+                          id={fieldName}
+                          type="checkbox"
+                          class="form-checkbox"
+                          checked={formData[fieldName]}
+                          onchange={e => handleFieldChange(fieldName, e.target.checked)}
+                        />
+                        <span class="checkbox-label">Enable {fieldConfig.label}</span>
+                      </label>
                     {:else}
-                      <input
-                        id="lsl-{fieldName}"
-                        type={fieldConfig.type}
-                        class="form-input"
-                        class:error={errors[fieldName]}
-                        placeholder={fieldConfig.placeholder || ''}
-                        min={fieldConfig.min}
-                        max={fieldConfig.max}
-                        value={lslConfig[fieldName]}
-                        oninput={e => handleFieldChange(fieldName, e.target.value, true)}
-                        disabled={!lslConfig.enableOutlet && fieldName !== 'enableOutlet'}
-                      />
+                      <div class="input-with-button">
+                        <input
+                          id={fieldName}
+                          type={fieldConfig.type}
+                          class="form-input"
+                          class:error={errors[fieldName]}
+                          placeholder={fieldConfig.placeholder || ''}
+                          min={fieldConfig.min}
+                          max={fieldConfig.max}
+                          value={formData[fieldName]}
+                          oninput={e => handleFieldChange(fieldName, e.target.value)}
+                        />
+                        {#if device.id === 'ttl' && fieldName === 'port'}
+                          <button
+                            type="button"
+                            class="detect-btn"
+                            onclick={detectTtlDevices}
+                            disabled={isDetecting}
+                          >
+                            {isDetecting ? 'Detecting...' : 'Detect'}
+                          </button>
+                        {/if}
+                      </div>
+
+                      <!-- Show detected devices dropdown for TTL port -->
+                      {#if device.id === 'ttl' && fieldName === 'port' && showDeviceSelector && detectedTtlDevices.length > 0}
+                        <div class="device-selector">
+                          <div class="selector-header">
+                            Found {detectedTtlDevices.length} device(s):
+                          </div>
+                          {#each detectedTtlDevices as ttlDevice}
+                            <button
+                              type="button"
+                              class="device-option"
+                              onclick={() => selectDetectedDevice(ttlDevice.port)}
+                            >
+                              <div class="device-option-main">
+                                <strong>{ttlDevice.port}</strong>
+                                <span class="device-serial">S/N: {ttlDevice.serial_number}</span>
+                              </div>
+                              <div class="device-option-details">
+                                {ttlDevice.manufacturer} - {ttlDevice.product}
+                              </div>
+                            </button>
+                          {/each}
+                        </div>
+                      {/if}
                     {/if}
-                  {/if}
 
-                  {#if errors[fieldName]}
-                    <div class="form-error">{errors[fieldName]}</div>
-                  {/if}
-                </div>
-              {/each}
-
-              {#if lslConfig.enableOutlet}
-                <div class="lsl-info">
-                  <h4>Stream Preview</h4>
-                  <div class="stream-preview">
-                    <div class="preview-item">
-                      <strong>Name:</strong>
-                      {lslConfig.streamName || 'HyperStudy_Bridge'}
-                    </div>
-                    <div class="preview-item">
-                      <strong>Type:</strong>
-                      {lslConfig.streamType || 'Markers'}
-                    </div>
-                    <div class="preview-item">
-                      <strong>Source ID:</strong>
-                      {lslConfig.sourceId || 'hyperstudy-bridge'}
-                    </div>
-                    <div class="preview-item">
-                      <strong>Buffer Size:</strong>
-                      {lslConfig.bufferSize || 1000} samples
-                    </div>
+                    {#if errors[fieldName]}
+                      <div class="form-error">{errors[fieldName]}</div>
+                    {/if}
                   </div>
+                {/each}
+
+                {#if device.id === 'pupil'}
+                  <div class="phone-finder">
+                    <div class="phone-finder-header">
+                      <span class="form-label">Phones on this network</span>
+                      <button
+                        type="button"
+                        class="phone-btn"
+                        onclick={findPhones}
+                        disabled={isDiscoveringPhones}
+                      >
+                        {isDiscoveringPhones ? 'Searching…' : 'Find phones'}
+                      </button>
+                    </div>
+                    <p class="phone-hint">
+                      Pick the phone this station should always use. The bridge then connects by
+                      hardware ID and refuses any other phone that answers to the same name.
+                    </p>
+                    {#if phoneDiscoveryError}
+                      <p class="phone-error">{phoneDiscoveryError}</p>
+                    {/if}
+                    {#if discoveredPhones.length > 0}
+                      <ul class="phone-list">
+                        {#each discoveredPhones as phone (phone.device_id)}
+                          <li
+                            class="phone-row"
+                            class:selected={formData.device_id === phone.device_id}
+                          >
+                            <div class="phone-main">
+                              <span class="phone-name">{phone.device_name}</span>
+                              <span class="phone-id">{phone.device_id}</span>
+                            </div>
+                            <div class="phone-meta">
+                              <span>{phone.ip}:{phone.port}</span>
+                              {#if phone.reachable}
+                                {#if phone.battery_level != null}
+                                  <span>{Math.round(phone.battery_level)}% battery</span>
+                                {/if}
+                                {#if phone.recording_id}
+                                  <span class="phone-flag busy">recording</span>
+                                {/if}
+                                {#if phone.glasses_connected === false}
+                                  <span class="phone-flag warn">no glasses</span>
+                                {/if}
+                              {:else}
+                                <span class="phone-flag warn">unreachable</span>
+                              {/if}
+                            </div>
+                            <button
+                              type="button"
+                              class="phone-btn small"
+                              onclick={() => usePhone(phone)}
+                            >
+                              {formData.device_id === phone.device_id ? 'Pinned' : 'Use this phone'}
+                            </button>
+                          </li>
+                        {/each}
+                      </ul>
+                    {:else if phoneSearched && !isDiscoveringPhones && !phoneDiscoveryError}
+                      <p class="phone-hint">
+                        No Neon Companion phones found. Make sure the app is open and the phone is
+                        on the same Wi-Fi as this computer.
+                      </p>
+                    {/if}
+                  </div>
+                {/if}
+              {:else}
+                <div class="no-config">
+                  <p>No configuration options available for this device type.</p>
                 </div>
               {/if}
-            </div>
-          {/if}
+            {:else if activeTab === 'lsl'}
+              <!-- LSL Configuration Tab -->
+              <div class="lsl-config-section">
+                <p class="section-description">
+                  Configure Lab Streaming Layer (LSL) output for this device. When enabled, device
+                  data will be published as an LSL stream for use by other applications.
+                </p>
+
+                {#each Object.entries(deviceConfigs.lsl) as [fieldName, fieldConfig]}
+                  <div class="form-group">
+                    {#if fieldConfig.type === 'checkbox'}
+                      <label class="checkbox-wrapper">
+                        <input
+                          id="lsl-{fieldName}"
+                          type="checkbox"
+                          class="form-checkbox"
+                          checked={lslConfig[fieldName]}
+                          onchange={e => handleFieldChange(fieldName, e.target.checked, true)}
+                        />
+                        <span class="checkbox-label">
+                          {fieldConfig.label}
+                          {#if fieldConfig.required}
+                            <span class="required">*</span>
+                          {/if}
+                        </span>
+                      </label>
+                    {:else}
+                      <label for="lsl-{fieldName}" class="form-label">
+                        {fieldConfig.label}
+                        {#if fieldConfig.required}
+                          <span class="required">*</span>
+                        {/if}
+                      </label>
+
+                      {#if fieldConfig.type === 'select'}
+                        <select
+                          id="lsl-{fieldName}"
+                          class="form-input"
+                          class:error={errors[fieldName]}
+                          value={lslConfig[fieldName]}
+                          onchange={e => handleFieldChange(fieldName, e.target.value, true)}
+                        >
+                          <option value="">Select {fieldConfig.label}</option>
+                          {#each fieldConfig.options as option}
+                            <option value={option}>{option}</option>
+                          {/each}
+                        </select>
+                      {:else}
+                        <input
+                          id="lsl-{fieldName}"
+                          type={fieldConfig.type}
+                          class="form-input"
+                          class:error={errors[fieldName]}
+                          placeholder={fieldConfig.placeholder || ''}
+                          min={fieldConfig.min}
+                          max={fieldConfig.max}
+                          value={lslConfig[fieldName]}
+                          oninput={e => handleFieldChange(fieldName, e.target.value, true)}
+                          disabled={!lslConfig.enableOutlet && fieldName !== 'enableOutlet'}
+                        />
+                      {/if}
+                    {/if}
+
+                    {#if errors[fieldName]}
+                      <div class="form-error">{errors[fieldName]}</div>
+                    {/if}
+                  </div>
+                {/each}
+
+                {#if lslConfig.enableOutlet}
+                  <div class="lsl-info">
+                    <h4>Stream Preview</h4>
+                    <div class="stream-preview">
+                      <div class="preview-item">
+                        <strong>Name:</strong>
+                        {lslConfig.streamName || 'HyperStudy_Bridge'}
+                      </div>
+                      <div class="preview-item">
+                        <strong>Type:</strong>
+                        {lslConfig.streamType || 'Markers'}
+                      </div>
+                      <div class="preview-item">
+                        <strong>Source ID:</strong>
+                        {lslConfig.sourceId || 'hyperstudy-bridge'}
+                      </div>
+                      <div class="preview-item">
+                        <strong>Buffer Size:</strong>
+                        {lslConfig.bufferSize || 1000} samples
+                      </div>
+                    </div>
+                  </div>
+                {/if}
+              </div>
+            {/if}
           </fieldset>
         </form>
       </div>
 
       <div class="modal-footer">
         <button class="cancel-btn" onclick={handleClose} disabled={isSubmitting}> Cancel </button>
-        <button
-          class="save-btn"
-          onclick={handleSave}
-          disabled={isSubmitting || isLoading}
-        >
+        <button class="save-btn" onclick={handleSave} disabled={isSubmitting || isLoading}>
           {isSubmitting ? 'Saving...' : 'Save Configuration'}
         </button>
       </div>
@@ -902,7 +927,12 @@
 {/if}
 
 <style>
-  fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+  fieldset {
+    border: 0;
+    padding: 0;
+    margin: 0;
+    min-width: 0;
+  }
   .modal-overlay {
     position: fixed;
     top: 0;

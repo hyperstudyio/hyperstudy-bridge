@@ -41,7 +41,11 @@
       const wsDevice = wsDevices.get(device.id);
       if (wsDevice) {
         // `info` carries which hardware answered (Neon device_id/IP, recording state)
-        return { ...device, status: wsDevice.status || 'disconnected', info: wsDevice.info ?? device.info };
+        return {
+          ...device,
+          status: wsDevice.status || 'disconnected',
+          info: wsDevice.info ?? device.info,
+        };
       }
       return device;
     })
@@ -275,7 +279,13 @@
         LSL
       </button>
 
-      <button class="header-btn" onclick={() => { showRecordingPanel = true; }} type="button">Recordings</button>
+      <button
+        class="header-btn"
+        onclick={() => {
+          showRecordingPanel = true;
+        }}
+        type="button">Recordings</button
+      >
 
       <button
         class="header-btn"
