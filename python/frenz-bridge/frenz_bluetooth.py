@@ -82,7 +82,10 @@ class EegPacketTap:
                 if self.failure is not None or not self.accepting:
                     return
                 if len(payload) != 178 or payload[1] != 6:
-                    self.failure = "Unsupported EEG packet layout"
+                    # Wire numbers only (no payload bytes), so the message stays safe to show and log.
+                    kind = payload[1] if len(payload) > 1 else "none"
+                    self.failure = (f"Unsupported EEG packet layout ({len(payload)} bytes, type {kind}, "
+                                    f"after {self.captured_packets} packets)")
                 elif len(self.queue) >= self.queue_limit:
                     self.failure = "EEG capture queue overflow"
                 else:

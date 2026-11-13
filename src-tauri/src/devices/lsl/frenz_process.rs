@@ -104,11 +104,15 @@ impl FrenzBridgeStatus {
             }
             "connecting" => {
                 self.state = FrenzBridgeState::Connecting;
-                self.message = if parsed.phase.as_deref() == Some("waiting_for_bluetooth_permission") {
-                    Some(BLUETOOTH_PERMISSION_PROMPT.to_string())
-                } else {
-                    parsed.device_id.as_ref().map(|id| format!("Connecting to {}...", id))
-                };
+                self.message =
+                    if parsed.phase.as_deref() == Some("waiting_for_bluetooth_permission") {
+                        Some(BLUETOOTH_PERMISSION_PROMPT.to_string())
+                    } else {
+                        parsed
+                            .device_id
+                            .as_ref()
+                            .map(|id| format!("Connecting to {}...", id))
+                    };
                 if let Some(ref phase) = parsed.phase {
                     self.phase = Some(phase.clone());
                 }
@@ -573,7 +577,9 @@ impl FrenzProcessManager {
         let mut s = status.write().await;
 
         if parsed.status != "streaming" || s.state != FrenzBridgeState::Streaming {
-            info!(device = "frenz", status = %parsed.status, phase = ?parsed.phase,
+            // The sidecar's messages are fixed, credential-safe text (it already shows them in the UI); without the
+            // message an error row in the log said only which phase failed, never why.
+            info!(device = "frenz", status = %parsed.status, phase = ?parsed.phase, detail = ?parsed.message,
                 "FRENZ sidecar phase changed");
         }
 
@@ -607,7 +613,11 @@ impl FrenzProcessManager {
             self.stop_locked().await?;
             if let Some(app) = self.app_handle.read().await.as_ref() {
                 if let Some(state) = app.try_state::<Arc<crate::bridge::AppState>>() {
-                    state.frenz_manager.disconnect_all().await.map_err(|e| e.to_string())?;
+                    state
+                        .frenz_manager
+                        .disconnect_all()
+                        .await
+                        .map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -717,7 +727,8 @@ mod tests {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .kill_on_drop(true)
-            .spawn().unwrap();
+            .spawn()
+            .unwrap();
         *manager.process.write().await = Some(child);
         manager.status.write().await.state = FrenzBridgeState::Streaming;
         manager.prepare_start().await.unwrap_err();
@@ -772,7 +783,10 @@ mod tests {
         assert_eq!(status.state, FrenzBridgeState::Connecting);
         assert_eq!(status.message.as_deref(), Some(BLUETOOTH_PERMISSION_PROMPT));
         status.apply_python_status(
-            serde_json::from_str(r#"{"status":"connecting","phase":"sdk_start","device_id":"FRENZI85"}"#).unwrap(),
+            serde_json::from_str(
+                r#"{"status":"connecting","phase":"sdk_start","device_id":"FRENZI85"}"#,
+            )
+            .unwrap(),
         );
         assert_eq!(status.message.as_deref(), Some("Connecting to FRENZI85..."));
     }

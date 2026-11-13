@@ -129,6 +129,22 @@ class TapTests(unittest.IsolatedAsyncioTestCase):
         finally:
             tap.restore()
 
+    def test_layout_failure_describes_the_rejected_packet(self):
+        # The band intermittently sends a notification that is not a 178-byte type-6 EEG frame ~0.6 s into streaming.
+        # The fixed message alone could not say what it was; its size, type byte and position are wire numbers only.
+        tap = EegPacketTap(lambda: 42.0)
+        tap.capture(packet(0))
+        tap.capture(packet(1))
+        tap.capture(bytes([7, 9, 1, 2]))
+        with self.assertRaisesRegex(
+            RuntimeError, r"^Unsupported EEG packet layout \(4 bytes, type 9, after 2 packets\)$"
+        ):
+            tap.drain(lambda *args: None)
+        empty = EegPacketTap(lambda: 42.0)
+        empty.capture(b"")
+        with self.assertRaisesRegex(RuntimeError, r"\(0 bytes, type none, after 0 packets\)$"):
+            empty.drain(lambda *args: None)
+
     async def test_second_tap_is_rejected_and_sdk_exceptions_propagate(self):
         class Client:
             async def start_notify(self, characteristic, callback):

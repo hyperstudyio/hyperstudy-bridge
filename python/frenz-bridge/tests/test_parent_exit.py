@@ -58,6 +58,7 @@ CHILD = textwrap.dedent('''
     bridge.create_outlets = lambda *_: {}
     bridge.measure_clock_pair = lambda *_: {'offset_seconds': 0.0}
     bridge.prepare_lsl_runtime = lambda: None
+    bridge.await_bluetooth_permission = lambda *_: True  # the host's real permission is not under test here
     bridge.main()
 ''')
 
