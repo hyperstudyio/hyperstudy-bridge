@@ -60,6 +60,27 @@ float32/float64/int8/int16/int32/int64 type. String frames are UTF-8 JSON arrays
 Original float bits and int64 precision are retained; equal timestamps are valid.
 No interpolation, resampling, timestamp correction or deduplication is applied.
 
+### Timestamps
+
+Every time is LSL time in seconds (`lsl::local_clock`), but not all from the
+same clock:
+
+- `blocks.timestamps`: the time the source put on each sample, exactly as its
+  inlet delivered it (`pull_sample`, no postprocessing). It is in the **source
+  machine's** LSL clock. This is the sample time to analyze.
+- `blocks.received`: Bridge's LSL clock when it pulled the sample. It is
+  auxiliary evidence of delivery delay and gaps, never a sample time.
+- Study marker stream (`HyperStudy Study Markers`): `timestamps` and `received`
+  are both Bridge's LSL clock at the moment HyperStudy's marker was written.
+- `clock_observations`: every 5 s per stream, `correction` is LSL's estimate of
+  (Bridge clock − source clock) at `observed_lsl` (Bridge clock), with its
+  `uncertainty`; a failed estimate records its error instead.
+
+To put a source's samples on the marker timeline, add that stream's
+`correction` (interpolated across observations) to its `timestamps`. For a
+source on the same machine as Bridge the correction is about 0. Do not use
+`received` for alignment: it includes Bridge's polling and transport delay.
+
 Processed FRENZ raw streams preserve the SDK UNIX timestamp as channel 0 and use
 a session-fixed UNIX-to-LSL offset for their LSL timestamps. Firmware channel 0
 is preserved too, including repeated timestamps. Filtered/model/firmware streams

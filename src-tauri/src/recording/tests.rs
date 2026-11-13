@@ -626,3 +626,152 @@ fn study_ready_attach_markers_scoped_stop_and_final_manifest() {
         "hyperstudy-bridge-study"
     );
 }
+
+/// A panicking recorder skipped the code that marks a recording failed, so status read "recording" forever: the UI
+/// showed a live recording, the study registry kept the session active, and updates refused to install.
+#[test]
+fn a_recorder_that_panics_is_reported_as_failed() {
+    let status = Arc::new(Mutex::new(RecordingStatus {
+        state: "recording".into(),
+        ..Default::default()
+    }));
+    supervise(&status, || panic!("index out of bounds"));
+    let after = lock(&status).clone();
+    assert_eq!(after.state, "failed");
+    assert!(after.error.unwrap().contains("stopped unexpectedly"));
+
+    let errored = Arc::new(Mutex::new(RecordingStatus {
+        state: "recording".into(),
+        ..Default::default()
+    }));
+    supervise(&errored, || Err(anyhow::anyhow!("Disk full")));
+    assert_eq!(lock(&errored).error.as_deref(), Some("Disk full"));
+
+    let clean = Arc::new(Mutex::new(RecordingStatus {
+        state: "completed".into(),
+        ..Default::default()
+    }));
+    supervise(&clean, || Ok(()));
+    assert_eq!(lock(&clean).state, "completed");
+}
+
+/// A lock poisoned by a panicking holder must not turn every later status read into a panic too.
+#[test]
+fn status_survives_a_poisoned_lock() {
+    let manager = Arc::new(RecordingManager::default());
+    let poisoner = manager.clone();
+    let _ = std::thread::spawn(move || {
+        let _held = poisoner.status.lock().unwrap();
+        panic!("holder panicked");
+    })
+    .join();
+    assert!(manager.status.is_poisoned());
+    assert_eq!(manager.status().state, "idle");
+}
+
+/// Markers and samples must be comparable on one timeline. A marker is stamped with Bridge's LSL clock when
+/// HyperStudy writes it; source samples keep the time their source put on them. For a source on this machine the
+/// two clocks are the same, so a marker must fall after every sample stamped before it and before every sample
+/// stamped after it, and nothing may be re-stamped on the way into the file.
+#[test]
+fn markers_and_samples_share_one_timeline() {
+    use lsl::ExPushable;
+    use std::time::{Duration, Instant};
+    let name = format!("HyperStudy-marker-timing-{}", uuid::Uuid::new_v4());
+    let info =
+        lsl::StreamInfo::new(&name, "Test", 1, 0., lsl::ChannelFormat::Double64, &name).unwrap();
+    let outlet = lsl::StreamOutlet::new(&info, 0, 60).unwrap();
+    let uid = outlet.info().unwrap().uid();
+    let manager = RecordingManager::default();
+    manager
+        .configure_study_directory(std::env::temp_dir().join(&name))
+        .unwrap();
+    let context = RecordingContext {
+        experiment_id: Some("e".into()),
+        room_id: Some("r".into()),
+        participant_id: Some("p".into()),
+        session_id: Some("s".into()),
+        label: None,
+    };
+    let started = manager
+        .start_study(super::study::StudyStartRequest {
+            stream_uids: vec![uid],
+            context: context.clone(),
+        })
+        .unwrap();
+    assert!(outlet.wait_for_consumers(5.));
+
+    let mut before = Vec::new();
+    for i in 0..20 {
+        let t = lsl::local_clock();
+        outlet.push_sample_ex(&vec![i as f64], t, true).unwrap();
+        before.push(t);
+    }
+    let ack = manager
+        .study_marker(
+            &started.recording_id,
+            &context,
+            serde_json::json!({"eventType":"stimulus.on"}),
+        )
+        .unwrap();
+    let marker = ack["marker_lsl_timestamp"].as_f64().unwrap();
+    let mut after = Vec::new();
+    for i in 20..40 {
+        let t = lsl::local_clock();
+        outlet.push_sample_ex(&vec![i as f64], t, true).unwrap();
+        after.push(t);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while manager.status().committed_samples < 41 && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    let stopped = manager
+        .stop_study(super::study::StudyScope {
+            recording_id: started.recording_id.clone(),
+            context,
+            end_marker: None,
+        })
+        .unwrap();
+    assert_eq!(
+        stopped.recording.state, "completed",
+        "{:?}",
+        stopped.recording
+    );
+
+    let db =
+        rusqlite::Connection::open(manager.study_path(&started.recording_id).unwrap()).unwrap();
+    let floats = |bytes: Vec<u8>| -> Vec<f64> {
+        bytes
+            .chunks_exact(8)
+            .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+            .collect()
+    };
+    let column = |stream: i64, name: &str| -> Vec<f64> {
+        let sql = format!("SELECT {name} FROM blocks WHERE stream_id=? ORDER BY first_sequence");
+        let mut query = db.prepare(&sql).unwrap();
+        let rows = query
+            .query_map([stream], |r| r.get::<_, Vec<u8>>(0))
+            .unwrap();
+        rows.flat_map(|r| floats(r.unwrap())).collect()
+    };
+    // Stream 0 is the source, stream 1 the study marker stream.
+    let samples = column(0, "timestamps");
+    let mut pushed = before.clone();
+    pushed.extend(&after);
+    assert_eq!(
+        samples, pushed,
+        "source times are stored exactly as stamped"
+    );
+    assert!(before.iter().all(|&t| t < marker) && after.iter().all(|&t| t > marker));
+    assert_eq!(column(1, "timestamps"), vec![marker]);
+    assert_eq!(
+        column(1, "received"),
+        vec![marker],
+        "a marker is stamped once, when written"
+    );
+    let received = column(0, "received");
+    assert!(
+        received.iter().zip(&samples).all(|(r, t)| r >= t),
+        "receipt never precedes the stamp"
+    );
+}

@@ -162,6 +162,30 @@ struct Active {
     stream_uids: Vec<String>,
     handle: JoinHandle<()>,
 }
+/// Locks recorder state even after a holder panicked. Every writer replaces whole fields, so the data stays valid,
+/// and a poisoned lock must not turn every later status read (polled each second by the UI) into a panic.
+pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Runs the recorder and records how it ended. A panic used to skip the failure branch and leave status
+/// "recording" for good: the UI showed a live recording, the study registry kept the session active, and updates
+/// refused to install.
+fn supervise(status: &Arc<Mutex<RecordingStatus>>, work: impl FnOnce() -> Result<()>) {
+    let error = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => error.to_string(),
+        Err(_) => {
+            "The recorder stopped unexpectedly. Samples saved before this are in the file.".into()
+        }
+    };
+    let mut s = lock(status);
+    s.state = "failed".into();
+    s.error = Some(error);
+}
+
 #[derive(Default)]
 pub struct RecordingManager {
     active: Mutex<Option<Active>>,
@@ -170,7 +194,7 @@ pub struct RecordingManager {
 }
 impl RecordingManager {
     pub fn status(&self) -> RecordingStatus {
-        self.status.lock().unwrap().clone()
+        lock(&self.status).clone()
     }
     pub fn start(&self, request: RecordingRequest) -> Result<RecordingStatus> {
         self.start_internal(request, false, None)
@@ -198,7 +222,7 @@ impl RecordingManager {
                 == request.stream_uids.len(),
             "Duplicate stream UID"
         );
-        let mut active = self.active.lock().unwrap();
+        let mut active = lock(&self.active);
         if active.as_ref().is_some_and(|a| a.handle.is_finished()) {
             if let Some(old) = active.take() {
                 let _ = old.handle.join();
@@ -210,7 +234,7 @@ impl RecordingManager {
             "{}.sqlite",
             recording_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
         ));
-        *self.status.lock().unwrap() = RecordingStatus {
+        *lock(&self.status) = RecordingStatus {
             state: "starting".into(),
             path: Some(path.clone()),
             committed_samples: 0,
@@ -223,13 +247,10 @@ impl RecordingManager {
         let status = self.status.clone();
         let (ready_tx, ready_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
-            if let Err(error) =
-                worker::record(request, &path, receiver, status.clone(), study, ready_tx)
-            {
-                let mut s = status.lock().unwrap();
-                s.state = "failed".into();
-                s.error = Some(error.to_string());
-            }
+            let worker_status = status.clone();
+            supervise(&status, move || {
+                worker::record(request, &path, receiver, worker_status, study, ready_tx)
+            });
         });
         *active = Some(Active {
             stop,
@@ -263,7 +284,7 @@ impl RecordingManager {
         expected_path: Option<&std::path::Path>,
     ) -> Result<RecordingStatus> {
         // Hold lifecycle lock through join so a new start cannot race finalization.
-        let mut active = self.active.lock().unwrap();
+        let mut active = lock(&self.active);
         if let Some(expected) = expected_path {
             ensure!(
                 self.status().path.as_deref() == Some(expected),

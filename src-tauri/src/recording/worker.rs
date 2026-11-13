@@ -79,7 +79,7 @@ fn commit(
 ) -> Result<()> {
     let count = store.commit(pending)?;
     pending.clear(); // Never discard unacknowledged data on an insert failure.
-    status.lock().unwrap().committed_samples = count;
+    lock(&status).committed_samples = count;
     Ok(())
 }
 pub fn record(
@@ -95,7 +95,7 @@ pub fn record(
     let mut specs = Vec::new();
     for uid in &request.stream_uids {
         if stop.try_recv().is_ok() {
-            status.lock().unwrap().state = "cancelled".into();
+            lock(&status).state = "cancelled".into();
             return Ok(());
         }
         let info = available
@@ -132,8 +132,8 @@ pub fn record(
         None
     };
     let mut store = Store::create(path, &request.context, &specs)?;
-    status.lock().unwrap().state = "recording".into();
-    status.lock().unwrap().streams = specs.len();
+    lock(&status).state = "recording".into();
+    lock(&status).streams = specs.len();
     let _ = ready.send(());
     let mut evidence: Vec<_> = specs.iter().cloned().map(StreamEvidence::new).collect();
     let mut pending = Vec::with_capacity(4096);
@@ -223,7 +223,7 @@ pub fn record(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     };
-    status.lock().unwrap().state = "stopping".into();
+    lock(&status).state = "stopping".into();
     if let Some(marker) = signal.end_marker.take() {
         signal.requested_lsl =
             write_marker(&mut store, &mut pending, &status, marker_index, marker)?;
@@ -296,7 +296,7 @@ pub fn record(
         unmapped_streams,
     };
     store.save_end_report(&report)?;
-    status.lock().unwrap().end_report = Some(report);
+    lock(&status).end_report = Some(report);
     let finalization_started = Instant::now();
     store.finish(path, "completed")?;
     let finalization_ms = finalization_started.elapsed().as_millis();
@@ -309,7 +309,7 @@ pub fn record(
         inlet_teardown_ms = teardown_started.elapsed().as_millis(),
         "Recording file finalized and native inlets closed"
     );
-    status.lock().unwrap().state = "completed".into();
+    lock(&status).state = "completed".into();
     Ok(())
 }
 
