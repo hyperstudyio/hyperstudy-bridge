@@ -85,7 +85,7 @@ jobs:
           EOF
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.get_version.outputs.version }}
           name: HyperStudy Bridge ${{ steps.get_version.outputs.version }}
@@ -135,7 +135,7 @@ jobs:
           ls -la
 
       - name: Upload all assets to Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.create-release.outputs.version }}
           files: |
@@ -213,7 +213,7 @@ jobs:
           cat latest.json
 
       - name: Upload latest.json to Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.create-release.outputs.version }}
           files: latest.json
