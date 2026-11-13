@@ -12,7 +12,9 @@
   let publishing = $state([]);
   let network = $state([]);
   let searched = $state(false);
-  let error = $state('');
+  // Each poll owns its error and clears it on its next success.
+  let bridgeError = $state('');
+  let networkError = $state('');
   let filter = $state('');
 
   const receivedUids = $derived(new Set(receiving.map(s => s.uid)));
@@ -35,10 +37,11 @@
         const streams = await invoke('lsl_bridge_streams');
         if (!closed) {
           receiving = streams.receiving ?? [];
+          bridgeError = '';
           publishing = streams.publishing ?? [];
         }
       } catch (e) {
-        if (!closed) error = String(e);
+        if (!closed) bridgeError = String(e);
       } finally {
         bridgeBusy = false;
       }
@@ -52,9 +55,10 @@
         if (!closed) {
           network = [...found].sort((a, b) => a.name.localeCompare(b.name));
           searched = true;
+          networkError = '';
         }
       } catch (e) {
-        if (!closed) error = String(e);
+        if (!closed) networkError = String(e);
       } finally {
         networkBusy = false;
       }
@@ -133,7 +137,9 @@
       </header>
 
       <div class="lsl-body">
-        {#if error}<p class="lsl-alert" role="alert">{error}</p>{/if}
+        {#if bridgeError || networkError}<p class="lsl-alert" role="alert">
+            {bridgeError || networkError}
+          </p>{/if}
 
         <section aria-labelledby="lsl-receiving">
           <h3 id="lsl-receiving">

@@ -21,15 +21,21 @@
   let directory = $state('');
   let label = $state('');
   let error = $state('');
+  let pollError = $state('');
   let busy = $state(false);
   let searching = $state(false);
   let manualOpen = $state(false);
   let recoveredPath = $state('');
 
+  // Study and manual recordings share one recorder, so its status alone cannot say whose recording it is. The
+  // study registry can: a recorder file that belongs to a listed study is that study's.
   const active = $derived(['starting', 'recording', 'stopping'].includes(status.state));
   const liveStudy = $derived(
     studies.find(s => ['starting', 'recording', 'stopping'].includes(s.state))
   );
+  const studyFile = $derived(!!status.path && studies.some(s => s.path === status.path));
+  const manualActive = $derived(active && !liveStudy && !studyFile);
+  const manualFile = $derived(!!status.path && !active && !studyFile);
   const newestFirst = $derived(
     [...studies].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
   );
@@ -50,9 +56,10 @@
         if (!closed) {
           status = next;
           studies = sessions;
+          pollError = '';
         }
       } catch (e) {
-        if (!closed) error = String(e);
+        if (!closed) pollError = String(e);
       } finally {
         pending = false;
       }
@@ -239,7 +246,7 @@
         </button>
       </header>
 
-      {#if active}
+      {#if manualActive}
         <div class="rec-live" role="status">
           <span class="rec-live-dot" aria-hidden="true"></span>
           <div class="rec-live-text">
@@ -269,8 +276,8 @@
       {/if}
 
       <div class="rec-body">
-        {#if error || status.error}<p class="rec-alert" role="alert">
-            {error || status.error}
+        {#if error || pollError || status.error}<p class="rec-alert" role="alert">
+            {error || pollError || status.error}
           </p>{/if}
 
         <section aria-labelledby="study-title">
@@ -332,7 +339,7 @@
           {/if}
         </section>
 
-        <details class="manual" open={manualOpen || active} ontoggle={toggleManual}>
+        <details class="manual" open={manualOpen || manualActive} ontoggle={toggleManual}>
           <summary>
             <span class="manual-title">Record streams yourself</span>
             <span class="manual-sub"
@@ -417,10 +424,14 @@
                   ? `Start recording ${plural(selected.length, 'stream')}`
                   : 'Start recording'}
               </button>
-              <span class="rec-hint">Recording continues if you close this window.</span>
+              <span class="rec-hint">
+                {active && !manualActive
+                  ? 'A study is recording. You can start your own recording when it ends.'
+                  : 'Recording continues if you close this window.'}
+              </span>
             </div>
 
-            {#if status.path && !active}
+            {#if manualFile}
               <div class="manual-result">
                 <p>
                   <strong>Last recording:</strong>

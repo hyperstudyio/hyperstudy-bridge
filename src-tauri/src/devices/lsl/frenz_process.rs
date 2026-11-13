@@ -215,6 +215,9 @@ pub struct FrenzProcessManager {
     reader_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// Native status subscribers must also observe API-initiated shutdowns.
     app_handle: RwLock<Option<tauri::AppHandle>>,
+    /// Set once Bridge starts exiting; a scan in progress is woken through `scan_cancel` and refuses to continue.
+    exiting: AtomicBool,
+    scan_cancel: tokio::sync::Notify,
 }
 
 impl FrenzProcessManager {
@@ -226,6 +229,8 @@ impl FrenzProcessManager {
             shutdown: Arc::new(AtomicBool::new(false)),
             reader_task: Arc::new(RwLock::new(None)),
             app_handle: RwLock::new(None),
+            exiting: AtomicBool::new(false),
+            scan_cancel: tokio::sync::Notify::new(),
         }
     }
 
@@ -285,6 +290,11 @@ impl FrenzProcessManager {
 
     /// Scan advertisements without credentials or initializing the vendor SDK.
     pub async fn scan(&self, app: &tauri::AppHandle) -> Result<Vec<FrenzBluetoothDevice>, String> {
+        let binary = Self::find_binary(app).ok_or("FRENZ sidecar is unavailable")?;
+        self.scan_with(binary).await
+    }
+
+    async fn scan_with(&self, binary: PathBuf) -> Result<Vec<FrenzBluetoothDevice>, String> {
         let _operation = self
             .operation
             .try_lock()
@@ -292,7 +302,13 @@ impl FrenzProcessManager {
         if self.process.read().await.is_some() {
             return Err("Disconnect FRENZ before scanning for another band".into());
         }
-        let binary = Self::find_binary(app).ok_or("FRENZ sidecar is unavailable")?;
+        // Registered before the exiting check, so an exit that starts after the check still wakes this scan.
+        let cancelled = self.scan_cancel.notified();
+        tokio::pin!(cancelled);
+        cancelled.as_mut().enable();
+        if self.exiting.load(Ordering::SeqCst) {
+            return Err("Bridge is quitting".into());
+        }
         let mut child = tokio::process::Command::new(binary)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -306,11 +322,12 @@ impl FrenzProcessManager {
             .await
             .map_err(|_| "Could not request Bluetooth scan")?;
         drop(input);
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(180),
-            child.wait_with_output(),
-        )
-        .await
+        // The helper can wait minutes on the macOS Bluetooth prompt or a first-run install. Quitting must not wait
+        // for that: dropping the child on cancellation kills it (kill_on_drop) and releases the operation lock.
+        let output = tokio::select! {
+            output = tokio::time::timeout(std::time::Duration::from_secs(180), child.wait_with_output()) => output,
+            _ = &mut cancelled => return Err("Bridge is quitting".into()),
+        }
         .map_err(|_| {
             "Bluetooth setup or scan timed out. Check network access and Bluetooth permission."
         })?
@@ -599,6 +616,13 @@ impl FrenzProcessManager {
         }
     }
 
+    /// Bridge is exiting: end any scan first (it holds the operation lock while it waits), then stop the sidecar.
+    pub async fn stop_for_exit(&self) -> Result<(), String> {
+        self.exiting.store(true, Ordering::SeqCst);
+        self.scan_cancel.notify_waiters();
+        self.stop().await
+    }
+
     /// Stop the FRENZ bridge process gracefully
     pub async fn stop(&self) -> Result<(), String> {
         let _operation = self.operation.lock().await;
@@ -717,6 +741,41 @@ impl std::fmt::Debug for FrenzProcessManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Quitting while a scan waited on the macOS Bluetooth prompt (or a first-run install) blocked exit for up to
+    /// the scan's 180 s timeout: the scan held the operation lock and the exit stop waited for it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exit_ends_a_scan_that_is_still_waiting() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("frenz-scan-exit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let helper = dir.join("never-answers");
+        std::fs::write(&helper, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let manager = Arc::new(FrenzProcessManager::new());
+        let scanning = manager.clone();
+        let scan = tokio::spawn(async move { scanning.scan_with(helper).await });
+        while manager.operation.try_lock().is_ok() {
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), manager.stop_for_exit())
+            .await
+            .expect("exit waited on the scan")
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), scan)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err(), "a cancelled scan reports no devices");
+        assert!(
+            manager.scan_with(dir.join("never-answers")).await.is_err(),
+            "no new scan once Bridge is exiting"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[cfg(unix)]
     #[tokio::test]

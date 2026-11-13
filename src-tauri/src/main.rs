@@ -32,7 +32,8 @@ use crate::logging::{init_log_emitter, init_log_persister, set_app_handle, Tauri
 /// Tauri's runtime, and the Exit callback is inside a tokio context where blocking on it would panic.
 fn stop_frenz_sidecar(state: &Arc<AppState>) {
     let manager = state.frenz_process.clone();
-    match std::thread::spawn(move || tauri::async_runtime::block_on(manager.stop())).join() {
+    match std::thread::spawn(move || tauri::async_runtime::block_on(manager.stop_for_exit())).join()
+    {
         Ok(Err(error)) => error!("FRENZ sidecar exit stop failed: {error}"),
         Err(_) => error!("FRENZ sidecar exit stop panicked"),
         Ok(Ok(())) => {}

@@ -171,4 +171,49 @@ describe('RecordingPanel', () => {
     expect(await screen.findByText(/Acquisition coverage is unverified/)).toBeInTheDocument();
     expect(screen.getByText(/raw-1: timed_out/)).toBeInTheDocument();
   });
+  // Study and manual recordings share one recorder status. The panel offered "Stop and save" for a study, which
+  // stopped the study's recording mid-session.
+  it('shows a running study as a study recording, with no stop', async () => {
+    const running = study('s1', '2026-11-12T04:59:10Z', { state: 'recording' });
+    backend({
+      status: {
+        ...idle,
+        state: 'recording',
+        committed_samples: 900,
+        streams: 25,
+        path: running.path,
+      },
+      studies: [running],
+    });
+    render(RecordingPanel, { isOpen: true });
+    expect(await screen.findByText('Study recording')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Stop and save' })).not.toBeInTheDocument();
+    expect(screen.getByText(/A study is recording/)).toBeInTheDocument();
+  });
+
+  it('never presents a finished study file as the last manual recording', async () => {
+    const done = study('s1', '2026-11-12T04:59:10Z');
+    backend({
+      status: { ...idle, state: 'completed', committed_samples: 61922, path: done.path },
+      studies: [done],
+    });
+    render(RecordingPanel, { isOpen: true });
+    await screen.findByText('Uploaded');
+    expect(screen.queryByText(/Last recording/)).not.toBeInTheDocument();
+  });
+
+  it('clears a failed refresh once Bridge answers again', async () => {
+    let fail = true;
+    invoke.mockImplementation(async command => {
+      if (command === 'lsl_recording_status' && fail) throw new Error('Bridge busy');
+      if (command === 'list_study_recordings') return [];
+      return idle;
+    });
+    render(RecordingPanel, { isOpen: true });
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bridge busy');
+    fail = false;
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument(), {
+      timeout: 2500,
+    });
+  });
 });

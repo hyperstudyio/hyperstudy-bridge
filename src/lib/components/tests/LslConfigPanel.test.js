@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, cleanup, within } from '@testing-library/svelte';
+import { render, screen, cleanup, within, waitFor } from '@testing-library/svelte';
 import { invoke } from '@tauri-apps/api/core';
 import LslConfigPanel from '../LslConfigPanel.svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -72,5 +72,19 @@ describe('LslConfigPanel', () => {
     render(LslConfigPanel, { isOpen: true });
     expect(await screen.findByText(/Connect a FRENZ band or Neon/)).toBeInTheDocument();
     expect(await screen.findByText(/No streams found/)).toBeInTheDocument();
+  });
+  it('clears a failed refresh once Bridge answers again', async () => {
+    let fail = true;
+    invoke.mockImplementation(async command => {
+      if (command === 'lsl_bridge_streams' && fail) throw new Error('Bridge busy');
+      if (command === 'lsl_bridge_streams') return { receiving: [], publishing: [] };
+      return [];
+    });
+    render(LslConfigPanel, { isOpen: true });
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bridge busy');
+    fail = false;
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument(), {
+      timeout: 2500,
+    });
   });
 });
