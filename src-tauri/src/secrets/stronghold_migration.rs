@@ -2,10 +2,12 @@
 //! used before 0.9 into the system credential store.
 //!
 //! That vault was opened with a password and salt hardcoded in the public source, so anyone with the file could
-//! decrypt it. On launch, if the vault exists, its allowlisted keys are copied into the credential store (an entry
-//! the store already has is kept, since it is newer), each copy is read back, and the vault is deleted. If the vault
-//! cannot be read or a copy fails, the vault is left in place and a warning is logged; the user can re-enter the key
-//! under Configure, and the next launch tries the move again.
+//! decrypt it. On launch, if the vault exists, its allowlisted keys are copied into the credential store, each copy
+//! is read back, and the vault is deleted. An entry the store already has is kept. If the vault's value for it
+//! differs (the installed and development builds share the store but each has its own vault), the vault is renamed
+//! to `vault.hold.conflict` instead of deleted, so that value is not destroyed; the migration then does not run
+//! again. If the vault cannot be read or a copy fails, the vault is left in place and a warning is logged; the user
+//! can re-enter the key under Configure, and the next launch tries the move again.
 //!
 //! The vault is read with the Stronghold engine (`stronghold_engine`: snapshot decryption and its own data types),
 //! not with `iota_stronghold`, whose dependency on crypto-bigint 0.5.5 (RUSTSEC-2026-0387) this avoids. Only the
@@ -16,7 +18,7 @@
 // TODO: Remove after 2027-03-01 (Stronghold vault migration)
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use engine::store::Cache;
 use engine::vault::{BoxProvider, ClientId, DbView, Key, VaultId};
@@ -132,6 +134,10 @@ pub enum Outcome {
     NoVault,
     /// The vault was read, its keys are in the store, and the vault is deleted. Lists the keys copied.
     Migrated(Vec<&'static str>),
+    /// The vault was read and its other keys copied, but it held a value that differs from the one already in the
+    /// store. The store's value is kept, and the vault is renamed to this path rather than deleted, so its value is
+    /// not lost. Lists the keys copied.
+    SetAside(Vec<&'static str>, PathBuf),
     /// The vault is still on disk, for this reason.
     LeftInPlace(String),
 }
@@ -160,6 +166,7 @@ pub fn migrate(store: &SecretStore, vault: &Path) -> Outcome {
     };
 
     let mut copied = Vec::new();
+    let mut conflicting = Vec::new();
     for (key, value) in &secrets {
         match store.get(key) {
             Ok(Some(saved)) => {
@@ -170,6 +177,7 @@ pub fn migrate(store: &SecretStore, vault: &Path) -> Outcome {
                         "The old vault's {key} differs from the one in the system credential store; kept the \
                          credential store's"
                     );
+                    conflicting.push(*key);
                 }
                 continue;
             }
@@ -185,6 +193,23 @@ pub fn migrate(store: &SecretStore, vault: &Path) -> Outcome {
             Ok(_) => return leave(format!("{key} did not read back from the credential store")),
             Err(error) => return leave(error.to_string()),
         }
+    }
+
+    if !conflicting.is_empty() {
+        let aside = vault.with_extension("hold.conflict");
+        if let Err(error) = std::fs::rename(vault, &aside) {
+            return leave(format!(
+                "it holds a different {} than the credential store, and renaming it failed ({error})",
+                conflicting.join(" and ")
+            ));
+        }
+        warn!(
+            "Kept the old Stronghold vault as {}: its {} differs from the system credential store's. If the saved \
+             value is rejected, re-enter it under Configure.",
+            aside.display(),
+            conflicting.join(" and ")
+        );
+        return Outcome::SetAside(copied, aside);
     }
 
     if let Err(error) = std::fs::remove_file(vault) {
@@ -285,12 +310,22 @@ mod tests {
 
         let outcome = migrate(&secrets, &vault.path());
 
-        assert_eq!(outcome, Outcome::Migrated(vec!["frenz_device_id"]));
+        // The differing vault value must not be destroyed: the vault is renamed, byte for byte, not deleted.
+        let aside = vault.path().with_extension("hold.conflict");
+        assert_eq!(
+            outcome,
+            Outcome::SetAside(vec!["frenz_device_id"], aside.clone())
+        );
         assert_eq!(
             raw_value(&backing, "frenz_product_key").as_deref(),
             Some("test-only-newer-key")
         );
+        assert_eq!(
+            raw_value(&backing, "frenz_device_id").as_deref(),
+            Some("FRENZTEST01")
+        );
         assert!(!vault.path().exists());
+        assert_eq!(std::fs::read(&aside).unwrap(), LEGACY_VAULT);
     }
 
     #[test]

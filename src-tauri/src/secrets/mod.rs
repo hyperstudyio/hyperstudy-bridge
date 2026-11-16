@@ -80,7 +80,8 @@ impl SecretStore {
     }
 
     /// Saves each value, or removes the entry when the value is `None` or empty. Values equal to what is saved are
-    /// not written again. Every key is checked before anything is written. Returns the keys that changed.
+    /// not written again. Every key is checked before anything is written, and if a write fails part-way the keys
+    /// already changed are put back, so a save lands whole or not at all. Returns the keys that changed.
     pub fn set_many(
         &self,
         values: &HashMap<String, Option<String>>,
@@ -91,32 +92,61 @@ impl SecretStore {
             checked.insert(allowed_key(key)?, value);
         }
 
-        let mut changed = Vec::new();
+        let mut changed: Vec<(&'static str, Option<String>)> = Vec::new();
         for (key, value) in checked {
-            if self.get(key)?.as_deref() == value {
-                continue;
-            }
-            let entry = self.entry(key)?;
-            match value {
-                Some(value) => entry
-                    .set_password(value)
-                    .map_err(|error| store_error(key, error))?,
-                None => match entry.delete_credential() {
-                    Ok(()) | Err(StoreError::NoEntry) => {}
-                    Err(error) => return Err(store_error(key, error)),
-                },
-            }
-            info!(
-                "{} saved credential {key}",
-                if value.is_some() {
-                    "Updated"
-                } else {
-                    "Removed"
+            let result = self.get(key).and_then(|previous| {
+                if previous.as_deref() == value {
+                    return Ok(None);
                 }
-            );
-            changed.push(key);
+                self.write(key, value)?;
+                Ok(Some(previous))
+            });
+            match result {
+                Ok(None) => {}
+                Ok(Some(previous)) => {
+                    info!(
+                        "{} saved credential {key}",
+                        if value.is_some() {
+                            "Updated"
+                        } else {
+                            "Removed"
+                        }
+                    );
+                    changed.push((key, previous));
+                }
+                Err(error) => {
+                    self.restore(&changed);
+                    return Err(error);
+                }
+            }
         }
-        Ok(changed)
+        Ok(changed.into_iter().map(|(key, _)| key).collect())
+    }
+
+    /// Saves `value` under `key`, or removes the entry when it is `None`.
+    fn write(&self, key: &'static str, value: Option<&str>) -> Result<(), SecretError> {
+        let entry = self.entry(key)?;
+        match value {
+            Some(value) => entry
+                .set_password(value)
+                .map_err(|error| store_error(key, error)),
+            None => match entry.delete_credential() {
+                Ok(()) | Err(StoreError::NoEntry) => Ok(()),
+                Err(error) => Err(store_error(key, error)),
+            },
+        }
+    }
+
+    /// Puts back the previous values of keys a failed save already changed.
+    fn restore(&self, changed: &[(&'static str, Option<String>)]) {
+        for (key, previous) in changed {
+            match self.write(key, previous.as_deref()) {
+                Ok(()) => warn!("A save failed part-way; put credential {key} back as it was"),
+                Err(error) => warn!(
+                    "A save failed part-way and credential {key} could not be put back: {error}"
+                ),
+            }
+        }
     }
 }
 
@@ -400,6 +430,39 @@ pub(crate) mod tests {
             .to_string();
         assert!(error.contains("frenz_product_key"), "{error}");
         assert!(!error.contains("test-only-key"), "{error}");
+    }
+
+    #[test]
+    fn a_save_that_fails_part_way_changes_nothing() {
+        let (secrets, backing) = mock_store();
+        secrets
+            .set_many(&values(&[
+                ("frenz_device_id", Some("FRENZTEST01")),
+                ("frenz_product_key", Some("test-only-old-key")),
+            ]))
+            .unwrap();
+        // The second key (in write order) fails, after the first has been written.
+        let entry = backing.build(SERVICE, "frenz_product_key", None).unwrap();
+        let mock: &mock::Cred = entry.as_any().downcast_ref().unwrap();
+        mock.set_error(StoreError::Invalid(
+            "test".to_string(),
+            "store failure".to_string(),
+        ));
+
+        let result = secrets.set_many(&values(&[
+            ("frenz_device_id", Some("FRENZTEST02")),
+            ("frenz_product_key", Some("test-only-new-key")),
+        ]));
+
+        assert!(result.is_err());
+        assert_eq!(
+            raw_value(&backing, "frenz_device_id").as_deref(),
+            Some("FRENZTEST01")
+        );
+        assert_eq!(
+            raw_value(&backing, "frenz_product_key").as_deref(),
+            Some("test-only-old-key")
+        );
     }
 
     #[tokio::test]

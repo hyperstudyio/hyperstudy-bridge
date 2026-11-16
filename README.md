@@ -237,8 +237,10 @@ its account. The name does not depend on the app identifier, so the installed ap
 same saved key. On macOS, the first time one build reads an entry the other saved, macOS may ask to allow access.
 
 Bridge 0.8 and earlier kept these values in an encrypted Stronghold file, `vault.hold`, in the app data folder.
-On first launch, a newer Bridge moves them into the credential store and deletes that file. If the file cannot be
-read, it is left in place, a warning is logged, and the product key can be entered again under **Configure**.
+On first launch, a newer Bridge moves them into the credential store and deletes that file. A value the credential
+store already has is kept; if the file held a different one (for example, the installed app and a development
+build had different keys saved), the file is renamed to `vault.hold.conflict` instead of deleted. If the file cannot
+be read, it is left in place, a warning is logged, and the product key can be entered again under **Configure**.
 
 ## Troubleshooting
 
