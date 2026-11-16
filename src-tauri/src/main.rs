@@ -18,7 +18,7 @@ use hyperstudy_bridge::commands::{self, *};
 use hyperstudy_bridge::logging::{
     init_log_emitter, init_log_persister, set_app_handle, TauriLogLayer,
 };
-use hyperstudy_bridge::{open_files, storage, updates, usb_monitor};
+use hyperstudy_bridge::{open_files, secrets, storage, updates, usb_monitor};
 
 /// Stops the FRENZ sidecar when Bridge exits, after the recording is finalized. Left running, it stayed connected
 /// to the band over Bluetooth, so no later Bridge could connect to it. Runs on a fresh thread: the sidecar belongs to
@@ -82,24 +82,6 @@ async fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(
-            tauri_plugin_stronghold::Builder::new(|password| {
-                use argon2::{hash_raw, Config, Variant, Version};
-                let config = Config {
-                    lanes: 4,
-                    mem_cost: 10_000,
-                    time_cost: 10,
-                    variant: Variant::Argon2id,
-                    version: Version::Version13,
-                    ..Default::default()
-                };
-                let salt = b"hyperstudy-bridge-vault-salt";
-                hash_raw(password.as_ref(), salt, &config)
-                    .expect("failed to hash password")
-                    .to_vec()
-            })
-            .build(),
-        )
         .setup(move |app| {
             let state = state_clone.clone();
             let app_handle = app.handle().clone();
@@ -111,6 +93,12 @@ async fn main() {
 
             // Initialize log emitter for batched frontend events
             init_log_emitter();
+
+            // Saved device credentials live in the OS credential store. Before any page can ask for them, start
+            // moving the keys out of the old Stronghold vault (the migration holds the store until it is done).
+            // TODO: Remove after 2027-03-01 (Stronghold vault migration)
+            let secrets_state = app.state::<secrets::SecretsState>();
+            secrets_state.migrate_stronghold_vault(app_handle.path().app_data_dir()?.join("vault.hold"));
 
             // Initialize database storage
             let app_handle_for_db = app_handle.clone();
@@ -293,6 +281,7 @@ async fn main() {
             Ok(())
         })
         .manage(app_state)
+        .manage(secrets::SecretsState::new(secrets::SecretStore::platform()))
         .manage(updates::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             send_ttl_pulse,
@@ -318,7 +307,9 @@ async fn main() {
             scan_frenz_devices,
             start_frenz_bridge,
             get_frenz_bridge_status,
-            check_frenz_bridge_available
+            check_frenz_bridge_available,
+            secrets::get_secret,
+            secrets::set_secrets
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

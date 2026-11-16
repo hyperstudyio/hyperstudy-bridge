@@ -8,7 +8,7 @@
     getFrenzBridgeStatus,
     checkFrenzBridgeAvailable,
   } from '../services/tauri.js';
-  import { getSecret } from '../services/stronghold.js';
+  import { getSecret } from '../services/secrets.js';
   import { listen } from '@tauri-apps/api/event';
   import DeviceConfigModal from './DeviceConfigModal.svelte';
 
@@ -120,7 +120,7 @@
       frenzDeviceId = deviceId || null;
       frenzKeyConfigured = !!productKey;
     } catch {
-      // Stronghold not initialized yet — that's fine
+      // Credential store unavailable — the card shows the band as not configured
     }
   }
 

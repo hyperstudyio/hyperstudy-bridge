@@ -1,6 +1,6 @@
 <script>
   import { listTtlDevices } from '../services/tauri.js';
-  import { getSecret, setSecrets } from '../services/stronghold.js';
+  import { getSecret, setSecrets } from '../services/secrets.js';
   import * as bridgeStore from '../stores/websocket.svelte.js';
 
   import FrenzDevicePicker from './FrenzDevicePicker.svelte';
@@ -98,7 +98,7 @@
       },
     },
     frenz: {
-      // Credentials (stored in encrypted vault, not in regular config)
+      // Credentials (kept in the system credential store, not in regular config)
       frenzDeviceId: {
         label: 'FRENZ band',
         type: 'text',
@@ -276,7 +276,7 @@
 
     for (const [key, fieldConfig] of Object.entries(config)) {
       if (fieldConfig.secure) {
-        // Load secure fields from stronghold
+        // Load secure fields from the system credential store
         try {
           const value = await getSecret(fieldConfig.secretKey);
           newSecureFields[key] = value || '';
@@ -439,7 +439,7 @@
     isSubmitting = true;
     saveError = '';
     try {
-      // Persist secure fields to stronghold (separate from regular config)
+      // Persist secure fields to the system credential store (separate from regular config)
       const config = deviceConfigs[device.id];
       const secrets = {};
       for (const [key, fieldConfig] of Object.entries(config)) {

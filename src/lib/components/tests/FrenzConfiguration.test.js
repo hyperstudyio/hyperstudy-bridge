@@ -1,8 +1,8 @@
 import { it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import DeviceConfigModal from '../DeviceConfigModal.svelte';
-import { getSecret, setSecrets } from '../../services/stronghold.js';
-vi.mock('../../services/stronghold.js', () => ({ getSecret: vi.fn(), setSecrets: vi.fn() }));
+import { getSecret, setSecrets } from '../../services/secrets.js';
+vi.mock('../../services/secrets.js', () => ({ getSecret: vi.fn(), setSecrets: vi.fn() }));
 const device = { id: 'frenz', name: 'FRENZ', config: {} };
 it('enables every FRENZ option by default', async () => {
   render(DeviceConfigModal, { device, isOpen: true });
@@ -34,7 +34,7 @@ it('preserves explicit choices and enables them all on request', async () => {
 beforeEach(() => {
   vi.clearAllMocks();
   getSecret.mockImplementation(async k => (k === 'frenz_device_id' ? 'FRENZI85' : 'test-only'));
-  setSecrets.mockResolvedValue();
+  setSecrets.mockResolvedValue([]);
 });
 it('saves the selected band and key in one operation without waiting for acquisition', async () => {
   const onSave = vi.fn(),
@@ -54,7 +54,7 @@ it('saves the selected band and key in one operation without waiting for acquisi
   );
 });
 it('shows persistence failure and keeps configuration open', async () => {
-  setSecrets.mockRejectedValue(Error('test disk failure'));
+  setSecrets.mockRejectedValue('Credential store error for frenz_product_key: test failure');
   const onClose = vi.fn();
   render(DeviceConfigModal, { device, isOpen: true, onSave: vi.fn(), onClose });
   await screen.findByText('Selected band: FRENZI85');

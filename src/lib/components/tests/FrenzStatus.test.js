@@ -15,7 +15,7 @@ vi.mock('../../services/tauri.js', () => ({
     sample_count: 10,
   })),
 }));
-vi.mock('../../services/stronghold.js', () => ({ getSecret: vi.fn(async () => 'test-only') }));
+vi.mock('../../services/secrets.js', () => ({ getSecret: vi.fn(async () => 'test-only') }));
 vi.mock('../../stores/websocket.svelte.js', () => ({
   connectDevice: vi.fn(),
   disconnectDevice: vi.fn(),

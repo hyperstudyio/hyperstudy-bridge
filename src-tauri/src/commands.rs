@@ -326,7 +326,7 @@ pub async fn export_logs(
 
 /// Start the FRENZ Python bridge process (PyApp binary).
 ///
-/// Credentials are passed from the frontend (read from Stronghold vault)
+/// Credentials are passed from the frontend (read from the system credential store, see `secrets`)
 /// and forwarded to the child process via stdin.
 #[tauri::command]
 pub async fn start_frenz_bridge(

@@ -1,0 +1,23 @@
+# Writes the test vault used by the Stronghold migration tests in src-tauri/src/secrets/.
+#
+# It is a separate crate on purpose: iota_stronghold depends on crypto-bigint 0.5.5 (RUSTSEC-2026-0387), and keeping it
+# here keeps it out of the app's Cargo.lock. Nothing in the app builds or links this crate.
+#
+#   cargo run --manifest-path scripts/stronghold-vault-fixture/Cargo.toml -- src-tauri/src/secrets/testdata/legacy-vault.hold
+#
+# TODO: Remove after 2027-03-01 (Stronghold vault migration)
+
+[package]
+name = "stronghold-vault-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Not part of any workspace.
+[workspace]
+
+[dependencies]
+# The versions the Bridge shipped with: tauri-plugin-stronghold 2.3.2 uses iota_stronghold 2.1.0.
+iota_stronghold = "=2.1.0"
+rust-argon2 = "2"
+zeroize = "1"

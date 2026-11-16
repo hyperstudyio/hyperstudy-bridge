@@ -67,11 +67,22 @@ libloading = { version = "0.8", optional = true }
 
 # Plugins
 tauri-plugin-dialog = "2"
-tauri-plugin-stronghold = "2"
 tauri-plugin-updater = "2"
 
-# Credential storage (rust-argon2 provides hash_raw API used by stronghold examples)
+# Saved device credentials, in the OS credential store (src/secrets). keyring's default `v1` feature selects the
+# macOS Keychain, the Windows Credential Manager, or the Secret Service on Linux; keyring-core provides the store API
+# (and the in-memory mock the tests use).
+keyring = "4"
+keyring-core = "1"
+
+# Reading the pre-0.9 Stronghold vault once, to move its keys into the credential store (src/secrets/stronghold_migration.rs).
+# The engine alone reads the snapshot; iota_stronghold (and its crypto-bigint 0.5.5 dependency) is not needed.
+# TODO: Remove after 2027-03-01 (Stronghold vault migration)
+stronghold_engine = "2.0.1"
 rust-argon2 = "2"
+bincode = "1.3"
+hmac = "0.12"
+zeroize = "1"
 
 [dev-dependencies]
 rand = "0.9"
@@ -91,9 +102,12 @@ lto = true
 opt-level = "z"
 strip = true
 
-# Stronghold snapshot encryption must not spend minutes in unoptimized rounds.
-# Work factors and encryption settings are unchanged.
+# Opening the old Stronghold vault (scrypt for the snapshot, argon2 for its password) must not spend minutes in
+# unoptimized rounds in dev builds and tests. Work factors are unchanged.
+# TODO: Remove after 2027-03-01 (Stronghold vault migration)
 [profile.dev.package.scrypt]
 opt-level = 3
 [profile.dev.package.salsa20]
+opt-level = 3
+[profile.dev.package.rust-argon2]
 opt-level = 3
