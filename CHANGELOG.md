@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Bundled SQLite upgraded (rusqlite 0.43, libsqlite3-sys 0.40) for RUSTSEC-2026-0459
+
+### Changed
+- The log database uses rusqlite, the same SQLite library as study recordings; sqlx is removed. Existing log databases open unchanged
+
+### Removed
+- Unused LSL time-series store (`lsl_streams` / `lsl_samples`); new log databases no longer create these tables, existing ones keep them
+
 ## [0.8.2] - 2026-02-01
 
 ### Added
