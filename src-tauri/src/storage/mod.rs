@@ -2,14 +2,14 @@
 //!
 //! This module provides persistent storage for:
 //! - Application logs (replaces in-memory circular buffer for history)
-//! - LSL time-series data (samples from connected streams)
 //! - Session metadata (recording sessions with timestamps)
+//!
+//! Study recordings are not stored here: each one is its own SQLite file (see `crate::recording`).
 //!
 //! Uses SQLite with WAL mode for high-performance concurrent access.
 
 pub mod logs;
 pub mod schema;
-pub mod timeseries;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::path::Path;
@@ -214,14 +214,6 @@ impl Storage {
             .fetch_one(&self.pool)
             .await?;
 
-        let sample_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM lsl_samples")
-            .fetch_one(&self.pool)
-            .await?;
-
-        let stream_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM lsl_streams")
-            .fetch_one(&self.pool)
-            .await?;
-
         let session_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sessions")
             .fetch_one(&self.pool)
             .await?;
@@ -236,8 +228,6 @@ impl Storage {
 
         Ok(StorageStats {
             log_count: log_count.0,
-            sample_count: sample_count.0,
-            stream_count: stream_count.0,
             session_count: session_count.0,
             database_size_bytes: page_info.0 * page_info.1,
         })
@@ -273,27 +263,6 @@ impl Storage {
         info!("Deleted {} old log entries", deleted);
         Ok(deleted)
     }
-
-    /// Delete LSL samples older than the specified duration.
-    pub async fn cleanup_old_samples(&self, older_than_days: i64) -> StorageResult<u64> {
-        // LSL timestamps are in seconds since some epoch, so we need to handle them differently
-        // For simplicity, we'll use session-based cleanup instead
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(older_than_days);
-        let cutoff_str = cutoff.to_rfc3339();
-
-        // Delete samples from sessions that ended before the cutoff
-        let result = sqlx::query(
-            "DELETE FROM lsl_samples WHERE session_id IN
-             (SELECT id FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?)",
-        )
-        .bind(&cutoff_str)
-        .execute(&self.pool)
-        .await?;
-
-        let deleted = result.rows_affected();
-        info!("Deleted {} old LSL samples", deleted);
-        Ok(deleted)
-    }
 }
 
 /// Session metadata stored in the database.
@@ -309,8 +278,6 @@ pub struct Session {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StorageStats {
     pub log_count: i64,
-    pub sample_count: i64,
-    pub stream_count: i64,
     pub session_count: i64,
     pub database_size_bytes: i64,
 }
@@ -493,8 +460,6 @@ mod tests {
         let stats = storage.get_stats().await.unwrap();
         assert_eq!(stats.log_count, 0);
         assert_eq!(stats.session_count, 0);
-        assert_eq!(stats.stream_count, 0);
-        assert_eq!(stats.sample_count, 0);
 
         // Add a session
         storage.start_session(None).await.unwrap();

@@ -52,6 +52,10 @@ pub async fn run_migrations(pool: &SqlitePool) -> StorageResult<()> {
 }
 
 /// Migration to version 1: Initial schema.
+///
+/// Databases created before the LSL time-series store was removed also hold `lsl_streams` and `lsl_samples`
+/// (and their indexes). Nothing reads or writes them any more. They are left in place rather than dropped, so
+/// opening an existing database never deletes data; new databases simply don't get them.
 async fn migrate_v1(pool: &SqlitePool) -> StorageResult<()> {
     info!("Applying migration v1: Initial schema");
 
@@ -97,54 +101,6 @@ async fn migrate_v1(pool: &SqlitePool) -> StorageResult<()> {
         .execute(pool)
         .await?;
 
-    // LSL streams metadata table
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS lsl_streams (
-            uid TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            stream_type TEXT NOT NULL,
-            channel_count INTEGER NOT NULL,
-            sample_rate REAL NOT NULL,
-            channel_format TEXT NOT NULL,
-            source_id TEXT,
-            hostname TEXT,
-            metadata TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (session_id) REFERENCES sessions(id)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_lsl_streams_session ON lsl_streams(session_id)")
-        .execute(pool)
-        .await?;
-
-    // LSL samples table - stores time-series data
-    // channel_data is a BLOB containing packed float32/float64 values
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS lsl_samples (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            stream_uid TEXT NOT NULL,
-            timestamp REAL NOT NULL,
-            channel_data BLOB NOT NULL,
-            FOREIGN KEY (session_id) REFERENCES sessions(id),
-            FOREIGN KEY (stream_uid) REFERENCES lsl_streams(uid)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Composite index for efficient time-range queries per stream
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_lsl_samples_stream_time
-         ON lsl_samples(session_id, stream_uid, timestamp)",
-    )
-    .execute(pool)
-    .await?;
-
     // Record migration
     let applied_at = chrono::Utc::now().to_rfc3339();
     sqlx::query("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
@@ -185,8 +141,6 @@ mod tests {
         let table_names: Vec<&str> = tables.iter().map(|t| t.0.as_str()).collect();
         assert!(table_names.contains(&"sessions"));
         assert!(table_names.contains(&"logs"));
-        assert!(table_names.contains(&"lsl_streams"));
-        assert!(table_names.contains(&"lsl_samples"));
         assert!(table_names.contains(&"schema_version"));
     }
 
@@ -222,6 +176,5 @@ mod tests {
         assert!(index_names.contains(&"idx_logs_timestamp"));
         assert!(index_names.contains(&"idx_logs_level"));
         assert!(index_names.contains(&"idx_logs_device"));
-        assert!(index_names.contains(&"idx_lsl_samples_stream_time"));
     }
 }

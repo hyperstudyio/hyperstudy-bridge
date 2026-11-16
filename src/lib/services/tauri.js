@@ -81,7 +81,7 @@ export async function getLogStats() {
 
 /**
  * Get storage statistics (database size, record counts).
- * @returns {Promise<{logCount: number, sampleCount: number, streamCount: number, sessionCount: number, databaseSizeBytes: number}>}
+ * @returns {Promise<{success: boolean, data?: {log_count: number, session_count: number, database_size_bytes: number}, error?: string}>}
  */
 export async function getStorageStats() {
   try {
