@@ -44,5 +44,20 @@ class RuntimeTests(unittest.TestCase):
             bridge.prepare_lsl_runtime()
 
 
+
+class FailureReasonTests(unittest.TestCase):
+    def test_rejected_key_says_where_to_fix_it(self):
+        # frenztoolkit 0.3.2's own wording for a key its local check refuses.
+        error = ValueError('Invalid product key, please contact to our sale department')
+        reason = bridge.failure_reason(error, 'sdk_initialization')
+        self.assertIn('rejected the product key', reason)
+        self.assertIn('Configure', reason)
+        self.assertNotIn('sale department', reason)
+
+    def test_other_failures_name_the_phase_without_vendor_text(self):
+        reason = bridge.failure_reason(RuntimeError('vendor detail'), 'connecting_bluetooth')
+        self.assertEqual(reason, 'FRENZ failed during connecting_bluetooth (RuntimeError).')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -29,13 +29,6 @@
       config: { url: 'neon.local:8080' },
     },
     {
-      id: 'eyelink',
-      name: 'EyeLink 1000 Plus',
-      type: 'Eye Tracker',
-      connection: 'Ethernet (TCP)',
-      config: { ip: '100.1.1.1', sample_rate: 1000 },
-    },
-    {
       id: 'frenz',
       name: 'Earable FRENZ Brainband',
       type: 'EEG/Biosignals',

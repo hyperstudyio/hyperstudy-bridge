@@ -54,7 +54,6 @@ const filterConfig = $state({
 
 // View state
 const viewState = $state({
-  autoScroll: true,
   isListening: false,
   isSettingUp: false,
   lastError: null,
@@ -73,49 +72,24 @@ const dbState = $state({
 // FILTER INDEX - Pre-computed for O(1) access
 // ============================================================================
 
-// Filter index: array of indices into streamBuffer.logs that match current filters
-// null = no filtering (show all)
-let filterIndex = $state(null);
-let filterDebounceTimeout = null;
+// The viewer shows at most a few thousand loaded entries, so filtering them on each read is cheap and never stale.
+// Changing a filter also re-queries the database (see refreshForFilters), so matches beyond the loaded page appear.
+function matchesFilters(log) {
+  const { level, device, search } = filterConfig;
+  if (level !== 'all' && log.level !== level) return false;
+  if (device !== 'all' && log.device !== device) return false;
+  const searchLower = search.toLowerCase().trim();
+  if (!searchLower) return true;
+  return (
+    log.message.toLowerCase().includes(searchLower) ||
+    (log.device && log.device.toLowerCase().includes(searchLower)) ||
+    log.source.toLowerCase().includes(searchLower)
+  );
+}
 
-// Rebuild the filter index when filters change
-function rebuildFilterIndex() {
-  if (filterDebounceTimeout) clearTimeout(filterDebounceTimeout);
-
-  filterDebounceTimeout = setTimeout(() => {
-    const { level, device, search } = filterConfig;
-
-    // If no filters active, use null to indicate "show all"
-    if (level === 'all' && device === 'all' && !search.trim()) {
-      filterIndex = null;
-      return;
-    }
-
-    const searchLower = search.toLowerCase().trim();
-    const newIndex = [];
-
-    for (let i = 0; i < streamBuffer.logs.length; i++) {
-      const log = streamBuffer.logs[i];
-
-      // Level filter
-      if (level !== 'all' && log.level !== level) continue;
-
-      // Device filter
-      if (device !== 'all' && log.device !== device) continue;
-
-      // Search filter
-      if (searchLower) {
-        const messageMatch = log.message.toLowerCase().includes(searchLower);
-        const deviceMatch = log.device && log.device.toLowerCase().includes(searchLower);
-        const sourceMatch = log.source.toLowerCase().includes(searchLower);
-        if (!messageMatch && !deviceMatch && !sourceMatch) continue;
-      }
-
-      newIndex.push(i);
-    }
-
-    filterIndex = newIndex;
-  }, 100); // 100ms debounce
+function filtersActive() {
+  const { level, device, search } = filterConfig;
+  return level !== 'all' || device !== 'all' || search.trim() !== '';
 }
 
 // ============================================================================
@@ -144,22 +118,11 @@ function clearOldHashes() {
 
 // Add a single log entry
 function addLog(level, message, device = null, source = 'frontend') {
-  // Invalidate filter index before adding (unshift changes all indices)
-  const hadActiveFilter = filterIndex !== null;
-  if (hadActiveFilter) {
-    filterIndex = null;
-  }
-
   const entry = new LogEntry(level, message, new Date(), device, source);
   streamBuffer.logs.unshift(entry);
 
   if (streamBuffer.logs.length > streamBuffer.maxSize) {
     streamBuffer.logs.length = streamBuffer.maxSize;
-  }
-
-  // Rebuild filter index if we had an active filter
-  if (hadActiveFilter) {
-    rebuildFilterIndex();
   }
 }
 
@@ -178,12 +141,6 @@ function addLogFromEvent(logData) {
     return;
   }
 
-  // Invalidate filter index before adding (unshift changes all indices)
-  const hadActiveFilter = filterIndex !== null;
-  if (hadActiveFilter) {
-    filterIndex = null;
-  }
-
   const entry = new LogEntry(
     level,
     message,
@@ -200,23 +157,11 @@ function addLogFromEvent(logData) {
   if (streamBuffer.logs.length > streamBuffer.maxSize) {
     streamBuffer.logs.length = streamBuffer.maxSize;
   }
-
-  // Rebuild filter index if we had an active filter
-  if (hadActiveFilter) {
-    rebuildFilterIndex();
-  }
 }
 
 // Handle batched logs from backend (new optimized path)
 function handleLogBatch(batch) {
   if (!Array.isArray(batch) || batch.length === 0) return;
-
-  // Invalidate filter index BEFORE adding logs to prevent stale index access
-  // (unshift changes all indices, making existing filterIndex invalid)
-  const hadActiveFilter = filterIndex !== null;
-  if (hadActiveFilter) {
-    filterIndex = null;
-  }
 
   let addedCount = 0;
   for (const logData of batch) {
@@ -247,11 +192,6 @@ function handleLogBatch(batch) {
     streamBuffer.logs.length = streamBuffer.maxSize;
   }
 
-  // Rebuild filter index if we had an active filter and added logs
-  if (addedCount > 0 && hadActiveFilter) {
-    rebuildFilterIndex();
-  }
-
   clearOldHashes();
 }
 
@@ -259,22 +199,14 @@ function handleLogBatch(batch) {
 // GETTERS - Access to filtered/derived data
 // ============================================================================
 
-// Get filtered logs using the pre-computed index
+// Loaded entries that match the current filters (new live entries included)
 function getFilteredLogs() {
-  if (filterIndex === null) {
-    // No filtering - return all logs
-    return streamBuffer.logs;
-  }
-  // Use filter index for O(1) access per item
-  return filterIndex.map(i => streamBuffer.logs[i]).filter(Boolean);
+  return filtersActive() ? streamBuffer.logs.filter(matchesFilters) : streamBuffer.logs;
 }
 
-// Get total count (respecting filters)
+// Number of loaded entries that match the current filters
 function getTotalCount() {
-  if (filterIndex === null) {
-    return streamBuffer.logs.length;
-  }
-  return filterIndex.length;
+  return getFilteredLogs().length;
 }
 
 // Get unique device list from logs
@@ -402,10 +334,16 @@ async function fetchHistoricalLogs() {
   }
 }
 
+// Each query gets a generation; results from a query that a newer one (or a clear) superseded are dropped, so a slow
+// query for an old filter can never overwrite the current view.
+let queryGeneration = 0;
+
 // Query logs from database with filtering and pagination
 async function queryFromDatabase(options = {}) {
-  if (dbState.isQuerying) return;
+  // Paging only continues the current query; a filter change always starts a new one.
+  if (options.append && dbState.isQuerying) return;
 
+  const generation = ++queryGeneration;
   dbState.isQuerying = true;
   try {
     const queryOptions = {
@@ -417,8 +355,9 @@ async function queryFromDatabase(options = {}) {
     };
 
     const result = await queryLogsFromDb(queryOptions);
+    if (generation !== queryGeneration) return;
 
-    if (result.success && result.data) {
+    if (result?.success && result.data) {
       const dbLogs = result.data.logs.map(
         log => new LogEntry(log.level, log.message, new Date(log.timestamp), log.device, log.source)
       );
@@ -426,26 +365,43 @@ async function queryFromDatabase(options = {}) {
       if (options.append) {
         streamBuffer.logs.push(...dbLogs);
       } else {
+        // The log database is written in batches, so the newest live entries may not be in it yet. Keep loaded
+        // entries newer than its newest row; the rest of the view comes from the database.
+        const newestSaved = dbLogs.length ? dbLogs[0].timestamp.getTime() : -Infinity;
+        const unsaved = streamBuffer.logs.filter(entry => entry.timestamp.getTime() > newestSaved);
         streamBuffer.logs.length = 0;
-        streamBuffer.logs.push(...dbLogs);
+        streamBuffer.logs.push(...unsaved, ...dbLogs);
       }
 
       dbState.totalCount = result.data.total_count;
       dbState.hasMore = result.data.has_more;
       dbState.offset = queryOptions.offset + dbLogs.length;
       viewState.lastError = null;
-
-      // Clear filter index when loading from DB (filters applied server-side)
-      filterIndex = null;
     } else {
-      throw new Error(result.error || 'Failed to query logs');
+      throw new Error(result?.error || 'Failed to query logs');
     }
   } catch (error) {
+    if (generation !== queryGeneration) return;
     console.error('Failed to query logs from database:', error);
     viewState.lastError = error?.message || 'Query failed';
   } finally {
-    dbState.isQuerying = false;
+    if (generation === queryGeneration) dbState.isQuerying = false;
   }
+}
+
+// Re-run the database query for the current filters. Typing in the search box waits for a pause.
+let searchRefreshTimeout = null;
+function refreshForFilters({ debounce = false } = {}) {
+  if (searchRefreshTimeout) clearTimeout(searchRefreshTimeout);
+  searchRefreshTimeout = null;
+  if (!debounce) {
+    refreshLogsFromDatabase();
+    return;
+  }
+  searchRefreshTimeout = setTimeout(() => {
+    searchRefreshTimeout = null;
+    refreshLogsFromDatabase();
+  }, 250);
 }
 
 // Load more logs from database (pagination)
@@ -496,7 +452,8 @@ async function getDbLogStats() {
 function clearLogs() {
   streamBuffer.logs.length = 0;
   recentLogHashes.clear();
-  filterIndex = null;
+  queryGeneration++; // results of any query still in flight belong to the cleared view
+  dbState.isQuerying = false;
 }
 
 // Export logs to file with save dialog
@@ -584,7 +541,10 @@ async function init() {
 // Cleanup
 function cleanup() {
   stopListening();
-  if (filterDebounceTimeout) clearTimeout(filterDebounceTimeout);
+  if (searchRefreshTimeout) clearTimeout(searchRefreshTimeout);
+  searchRefreshTimeout = null;
+  queryGeneration++;
+  dbState.isQuerying = false;
 }
 
 // ============================================================================
@@ -594,7 +554,6 @@ function cleanup() {
 // Getters that access reactive state
 export const getLogs = () => streamBuffer.logs;
 export const getMaxLogs = () => streamBuffer.maxSize;
-export const getAutoScroll = () => viewState.autoScroll;
 export const getIsListening = () => viewState.isListening;
 export const getLastError = () => viewState.lastError;
 export const getLevelFilter = () => filterConfig.level;
@@ -626,23 +585,23 @@ export {
 
 // Filter setter exports - these trigger filter index rebuild
 export const setLevelFilter = level => {
+  if (filterConfig.level === level) return;
   filterConfig.level = level;
-  rebuildFilterIndex();
+  refreshForFilters();
 };
 
 export const setDeviceFilter = device => {
+  if (filterConfig.device === device) return;
   filterConfig.device = device;
-  rebuildFilterIndex();
+  refreshForFilters();
 };
 
 export const setSearchQuery = query => {
+  if (filterConfig.search === query) return;
   filterConfig.search = query;
-  rebuildFilterIndex();
+  refreshForFilters({ debounce: true });
 };
 
-export const setAutoScroll = enabled => {
-  viewState.autoScroll = enabled;
-};
 export const setMaxLogs = max => {
   streamBuffer.maxSize = max;
 };

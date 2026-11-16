@@ -14,10 +14,15 @@ pub struct StudySession {
     pub upload_status: String,
     pub upload_error: Option<String>,
 }
+/// The connection that started (or last reattached to) a study recording: true once that WebSocket has closed.
+pub type StudyOwner = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
 #[derive(Default)]
 pub(super) struct StudyRegistry {
     directory: Option<PathBuf>,
     sessions: BTreeMap<String, StudySession>,
+    /// In memory only: after a restart no connection owns anything, so nothing is running either.
+    owners: std::collections::HashMap<String, StudyOwner>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,6 +90,17 @@ impl StudyRegistry {
         Ok(())
     }
 }
+/// Reads one `*.session.json` and checks it describes a recording in `directory`.
+fn load_session(path: &std::path::Path, directory: &std::path::Path) -> Result<StudySession> {
+    let session: StudySession = serde_json::from_slice(&std::fs::read(path)?)?;
+    uuid::Uuid::parse_str(&session.recording_id)?;
+    ensure!(
+        session.recording.path == Some(directory.join(format!("{}.sqlite", session.recording_id))),
+        "Invalid managed recording path"
+    );
+    Ok(session)
+}
+
 impl RecordingManager {
     /// Called once during app setup; capabilities are deliberately absent from disk.
     pub fn configure_study_directory(&self, directory: PathBuf) -> Result<()> {
@@ -103,13 +119,17 @@ impl RecordingManager {
             {
                 continue;
             }
-            let mut session: StudySession = serde_json::from_slice(&std::fs::read(&path)?)?;
-            uuid::Uuid::parse_str(&session.recording_id)?;
-            ensure!(
-                session.recording.path
-                    == Some(directory.join(format!("{}.sqlite", session.recording_id))),
-                "Invalid managed recording path"
-            );
+            // One bad file must not stop Bridge from starting: skip it, say so, and leave it on disk for inspection.
+            let mut session = match load_session(&path, &directory) {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::warn!(
+                        "Skipped an unreadable study recording file {}: {error:#}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
             if active(&session.recording.state) {
                 // A process restart cannot resume native acquisition. Retain WAL and
                 // original file; local recovery is explicit and creates a new file.
@@ -124,14 +144,23 @@ impl RecordingManager {
                 session.upload_error =
                     Some("Bridge restarted; fresh upload authorization is required".into());
             }
-            registry.persist(&session)?;
+            if let Err(error) = registry.persist(&session) {
+                tracing::warn!(
+                    "Couldn't update study recording file {}: {error:#}",
+                    path.display()
+                );
+            }
             registry
                 .sessions
                 .insert(session.recording_id.clone(), session);
         }
         Ok(())
     }
-    pub fn start_study(&self, request: StudyStartRequest) -> Result<StudySession> {
+    pub fn start_study(
+        &self,
+        request: StudyStartRequest,
+        owner: StudyOwner,
+    ) -> Result<StudySession> {
         validate_context(&request.context)?;
         let mut registry = self.study.lock().unwrap();
         registry.refresh(&self.status())?;
@@ -139,13 +168,52 @@ impl RecordingManager {
             .sessions
             .values()
             .find(|s| same_context(&s.context, &request.context) && active(&s.recording.state))
+            .cloned()
         {
-            return Ok(session.clone());
+            // A reload or reconnect of the same study attaches; the new connection now owns the recording.
+            registry.owners.insert(session.recording_id.clone(), owner);
+            return Ok(session);
         }
-        ensure!(
-            !active(&self.status().state),
-            "Another recording is active; reconnect with its study identity or stop locally"
-        );
+        // Checked before anything below can stop a running recording.
+        super::validate_stream_uids(&request.stream_uids)?;
+        // One study records at a time on a station (one band, one participant). A study recording whose connection
+        // has closed was abandoned (its boot failed, its tab closed, it crashed without stopping): save it and record
+        // the new study, rather than blocking every later study until Bridge is quit. While that connection is open
+        // the study is live (a second participant in another tab, say) and is never cut. A recording started in
+        // Bridge's own window is the operator's and is never cut either.
+        let current = self.status();
+        if active(&current.state) {
+            let abandoned = registry
+                .sessions
+                .values()
+                .find(|s| active(&s.recording.state) && s.recording.path == current.path)
+                .cloned();
+            let Some(abandoned) = abandoned else {
+                anyhow::bail!(
+                    "A recording started in Bridge is running. Stop it in Bridge's Recordings panel, then try again."
+                );
+            };
+            let still_connected = registry
+                .owners
+                .get(&abandoned.recording_id)
+                .is_some_and(|closed| !closed.load(std::sync::atomic::Ordering::Relaxed));
+            ensure!(
+                !still_connected,
+                "Another study is recording on this Bridge and is still connected. Finish that study, or stop its \
+                 recording in Bridge's Recordings panel, then try again."
+            );
+            tracing::info!(
+                "Saving study recording {} (room {:?}): a different study on this station started recording",
+                abandoned.recording_id,
+                abandoned.context.room_id
+            );
+            let signal = StopSignal::new(RecordingStopRequest {
+                boundaries: vec![],
+                timeout_ms: 0,
+            });
+            let stopped = self.stop_signal_scoped(signal, abandoned.recording.path.as_deref())?;
+            registry.refresh(&stopped)?;
+        }
         let directory = registry
             .directory
             .clone()
@@ -188,6 +256,7 @@ impl RecordingManager {
             }
         }
         registry.persist(&session)?;
+        registry.owners.insert(recording_id.clone(), owner);
         registry.sessions.insert(recording_id, session.clone());
         Ok(session)
     }
@@ -235,6 +304,22 @@ impl RecordingManager {
             })
             .cloned())
     }
+    /// Stops a study recording from Bridge's own window. The operator names it by id; its study identity comes from
+    /// Bridge's records, so nothing the page supplies decides what is stopped.
+    pub fn stop_study_locally(&self, recording_id: &str) -> Result<StudySession> {
+        let context = self
+            .list_studies()?
+            .into_iter()
+            .find(|s| s.recording_id == recording_id)
+            .map(|s| s.context)
+            .context("That study recording is no longer listed")?;
+        self.stop_study(StudyScope {
+            recording_id: recording_id.to_string(),
+            context,
+            end_marker: None,
+        })
+    }
+
     pub fn stop_study(&self, request: StudyScope) -> Result<StudySession> {
         validate_context(&request.context)?;
         let mut registry = self.study.lock().unwrap();
@@ -315,21 +400,6 @@ impl RecordingManager {
             .map_err(anyhow::Error::msg)?;
         Ok(json!({ "recording_id": id, "marker_lsl_timestamp": timestamp }))
     }
-    /// Legacy WebSocket callers cannot bypass study ownership. The native
-    /// RecordingPanel deliberately keeps the explicit local stop control.
-    pub fn stop_unmanaged(&self, request: RecordingStopRequest) -> Result<RecordingStatus> {
-        let registry = self.study.lock().unwrap();
-        let status = self.status();
-        ensure!(
-            !active(&status.state)
-                || !registry
-                    .sessions
-                    .values()
-                    .any(|s| s.recording.path == status.path),
-            "Study recordings require recording_id and context; use scoped stop or stop locally"
-        );
-        self.stop_with(request)
-    }
     pub fn study_path(&self, id: &str) -> Result<PathBuf> {
         let mut registry = self.study.lock().unwrap();
         registry.refresh(&self.status())?;
@@ -383,6 +453,30 @@ impl RecordingManager {
         let session = session.clone();
         registry.persist(&session)?;
         Ok(session)
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    /// One unreadable session file (truncated by a crash, from an older version, edited by hand) made app setup fail,
+    /// so Bridge would not open at all.
+    #[test]
+    fn an_unreadable_session_file_is_skipped_not_fatal() {
+        let directory =
+            std::env::temp_dir().join(format!("bridge-sessions-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let corrupt = directory.join("broken.session.json");
+        std::fs::write(&corrupt, b"{ not json").unwrap();
+
+        let manager = RecordingManager::default();
+        manager
+            .configure_study_directory(directory.clone())
+            .expect("a bad session file must not stop Bridge from starting");
+        assert!(manager.list_studies().unwrap().is_empty());
+        assert!(corrupt.exists(), "the file is kept for inspection");
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }
 

@@ -17,7 +17,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Errors that can occur during storage operations.
 #[derive(Error, Debug)]
@@ -43,6 +43,9 @@ pub enum StorageError {
 
 pub type StorageResult<T> = Result<T, StorageError>;
 
+/// Log entries older than this are deleted when Bridge starts.
+pub const LOG_RETENTION_DAYS: i64 = 30;
+
 /// Database connection pool and session management.
 pub struct Storage {
     pool: SqlitePool,
@@ -53,6 +56,17 @@ impl Storage {
     /// Create a new storage instance and initialize the database.
     ///
     /// Creates the database file if it doesn't exist and runs migrations.
+    /// Opens the log database for the app and drops entries older than [`LOG_RETENTION_DAYS`], so it never grows
+    /// without bound. Runs once per launch.
+    pub async fn open(db_path: &Path) -> StorageResult<Self> {
+        let storage = Self::new(db_path).await?;
+        // Pruning is housekeeping: if it fails, keep the database and keep saving logs.
+        if let Err(error) = storage.cleanup_old_logs(LOG_RETENTION_DAYS).await {
+            warn!("Couldn't delete log entries older than {LOG_RETENTION_DAYS} days: {error}");
+        }
+        Ok(storage)
+    }
+
     pub async fn new(db_path: &Path) -> StorageResult<Self> {
         // Ensure parent directory exists (using async I/O to avoid blocking)
         if let Some(parent) = db_path.parent() {
@@ -308,7 +322,7 @@ static STORAGE: std::sync::OnceLock<Arc<Storage>> = std::sync::OnceLock::new();
 ///
 /// Should be called once during application startup.
 pub async fn init_storage(db_path: &Path) -> StorageResult<Arc<Storage>> {
-    let storage = Arc::new(Storage::new(db_path).await?);
+    let storage = Arc::new(Storage::open(db_path).await?);
 
     // Store globally for access from logging layer
     let _ = STORAGE.set(storage.clone());
@@ -326,6 +340,38 @@ pub fn get_storage() -> Option<Arc<Storage>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The log database was never pruned (9,390 entries after a few weeks of use). Opening it now drops entries
+    /// older than the retention period.
+    #[tokio::test]
+    async fn opening_the_log_database_drops_entries_past_retention() {
+        let path =
+            std::env::temp_dir().join(format!("bridge-retention-{}.db", uuid::Uuid::new_v4()));
+        let entry = |age_days: i64, message: &str| crate::logging::LogEntry {
+            timestamp: (chrono::Utc::now() - chrono::Duration::days(age_days)).to_rfc3339(),
+            level: "info".into(),
+            message: message.into(),
+            device: None,
+            source: "test".into(),
+        };
+        {
+            let storage = Storage::new(&path).await.unwrap();
+            logs::insert_logs_batch(
+                storage.pool(),
+                &[entry(LOG_RETENTION_DAYS + 1, "old"), entry(0, "today")],
+                None,
+            )
+            .await
+            .unwrap();
+            storage.pool().close().await;
+        }
+        let storage = Storage::open(&path).await.unwrap();
+        assert_eq!(storage.get_stats().await.unwrap().log_count, 1);
+        storage.pool().close().await;
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
 
     #[tokio::test]
     async fn test_storage_creation() {

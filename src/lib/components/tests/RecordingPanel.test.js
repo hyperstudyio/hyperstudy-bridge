@@ -173,7 +173,8 @@ describe('RecordingPanel', () => {
   });
   // Study and manual recordings share one recorder status. The panel offered "Stop and save" for a study, which
   // stopped the study's recording mid-session.
-  it('shows a running study as a study recording, with no stop', async () => {
+  // A study that hangs or is abandoned used to leave the operator no way to stop its recording short of quitting.
+  it('stops a running study recording only after confirming, by id', async () => {
     const running = study('s1', '2026-11-12T04:59:10Z', { state: 'recording' });
     backend({
       status: {
@@ -187,8 +188,16 @@ describe('RecordingPanel', () => {
     });
     render(RecordingPanel, { isOpen: true });
     expect(await screen.findByText('Study recording')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Stop and save' })).not.toBeInTheDocument();
     expect(screen.getByText(/A study is recording/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Stop recording' }));
+    expect(screen.getByText("Stop and save this study's recording?")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Keep recording' }));
+    expect(invoke).not.toHaveBeenCalledWith('stop_study_recording', expect.anything());
+
+    await userEvent.click(screen.getByRole('button', { name: 'Stop recording' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Stop and save' }));
+    expect(invoke).toHaveBeenCalledWith('stop_study_recording', { recordingId: 's1' });
   });
 
   it('never presents a finished study file as the last manual recording', async () => {
@@ -200,6 +209,31 @@ describe('RecordingPanel', () => {
     render(RecordingPanel, { isOpen: true });
     await screen.findByText('Uploaded');
     expect(screen.queryByText(/Last recording/)).not.toBeInTheDocument();
+  });
+
+  // The confirmation was not tied to a recording: if the study ended on its own while "Stop and save" was showing,
+  // the next study opened with it already armed, one click from being stopped.
+  it("a stop confirmation never carries over to the next study's recording", async () => {
+    let live = study('s1', '2026-11-12T04:59:10Z', { state: 'recording' });
+    invoke.mockImplementation(async command => {
+      if (command === 'list_study_recordings') return [live];
+      if (command === 'lsl_recording_status')
+        return { ...idle, state: 'recording', path: live.path };
+      return undefined;
+    });
+    render(RecordingPanel, { isOpen: true });
+    await userEvent.click(await screen.findByRole('button', { name: 'Stop recording' }));
+    expect(screen.getByRole('button', { name: 'Stop and save' })).toBeInTheDocument();
+
+    // That study ends by itself and the next one starts recording.
+    live = study('s2', '2026-11-12T05:30:00Z', { state: 'recording' });
+    await waitFor(
+      () => expect(screen.getByRole('button', { name: 'Stop recording' })).toBeInTheDocument(),
+      {
+        timeout: 2500,
+      }
+    );
+    expect(screen.queryByRole('button', { name: 'Stop and save' })).not.toBeInTheDocument();
   });
 
   it('clears a failed refresh once Bridge answers again', async () => {

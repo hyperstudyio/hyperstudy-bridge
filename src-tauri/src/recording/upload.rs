@@ -81,7 +81,7 @@ pub(super) fn validate_api_base(value: &str) -> Result<Url> {
     ensure!(
         (url.scheme() == "https" && trusted && url.port_or_known_default() == Some(443))
             || (local && matches!(url.scheme(), "http" | "https")),
-        "Untrusted HyperStudy API origin"
+        "Untrusted Hyperstudy API origin"
     );
     ensure!(
         url.username().is_empty()
@@ -93,7 +93,13 @@ pub(super) fn validate_api_base(value: &str) -> Result<Url> {
     );
     Ok(url)
 }
-pub(super) fn validate_upload_url(value: &str) -> Result<Url> {
+/// The Cloud Storage bucket Hyperstudy keeps device recordings in (development and production share it).
+pub(super) const RECORDINGS_BUCKET: &str = "hyperscanning.firebasestorage.app";
+
+/// The signed upload URL must write this recording's own object in the Hyperstudy bucket:
+/// `/<bucket>/device-recordings/<environment>/<experiment>/<room>/<participant>/<recording>.sqlite`. The URL comes from
+/// the WebSocket client, so checking the host alone would let a grant send the file to any bucket.
+pub(super) fn validate_upload_url(value: &str, room: &str, id: &str) -> Result<Url> {
     let url = Url::parse(value).context("Invalid cloud upload URL")?;
     ensure!(
         url.scheme() == "https"
@@ -103,6 +109,21 @@ pub(super) fn validate_upload_url(value: &str) -> Result<Url> {
             && url.password().is_none()
             && url.fragment().is_none(),
         "Untrusted cloud upload target"
+    );
+    let segments: Vec<&str> = url.path_segments().map(|s| s.collect()).unwrap_or_default();
+    let file_name = format!("{id}.sqlite");
+    ensure!(
+        matches!(
+            segments.as_slice(),
+            [bucket, "device-recordings", environment, experiment, object_room, participant, object]
+                if *bucket == RECORDINGS_BUCKET
+                    && !environment.is_empty()
+                    && !experiment.is_empty()
+                    && !participant.is_empty()
+                    && *object_room == room
+                    && *object == file_name
+        ),
+        "Cloud upload target is not this recording's object in the Hyperstudy bucket"
     );
     Ok(url)
 }
@@ -179,7 +200,7 @@ fn validate_grant(base: &str, grant: &UploadGrant, id: &str, room: &str, size: u
     );
     check_expiry(&grant.completion.expires_at)?;
     if let Some(upload) = &grant.upload {
-        validate_upload_url(&upload.url)?;
+        validate_upload_url(&upload.url, room, id)?;
         check_expiry(&upload.expires_at)?;
         ensure!(upload.method == "PUT", "Invalid cloud upload method");
         let headers: BTreeMap<_, _> = upload
@@ -308,7 +329,7 @@ mod tests {
     #[test]
     fn grants_bind_exact_path_headers_expiry_and_recording() {
         let expiration = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
-        let mut grant: UploadGrant = serde_json::from_value(json!({"recordingId":"id","upload":{"url":"https://storage.googleapis.com/bucket/object?X-Goog-Signature=secret","method":"PUT","expiresAt":expiration,"headers":{"Content-Type":"application/vnd.sqlite3","x-goog-if-generation-match":"0","x-goog-content-length-range":"12,12"}},"completion":{"url":"/api/v3/data/device-recordings/room/room/uploads/id/complete","token":"secret","expiresAt":expiration}})).unwrap();
+        let mut grant: UploadGrant = serde_json::from_value(json!({"recordingId":"id","upload":{"url":"https://storage.googleapis.com/hyperscanning.firebasestorage.app/device-recordings/development/exp/room/participant/id.sqlite?X-Goog-Signature=secret","method":"PUT","expiresAt":expiration,"headers":{"Content-Type":"application/vnd.sqlite3","x-goog-if-generation-match":"0","x-goog-content-length-range":"12,12"}},"completion":{"url":"/api/v3/data/device-recordings/room/room/uploads/id/complete","token":"secret","expiresAt":expiration}})).unwrap();
         assert!(validate_grant("https://dev.hyperstudy.io", &grant, "id", "room", 12).is_ok());
         assert!(validate_grant("https://dev.hyperstudy.io", &grant, "other", "room", 12).is_err());
         assert!(validate_grant("https://dev.hyperstudy.io", &grant, "id", "other", 12).is_err());
@@ -324,6 +345,43 @@ mod tests {
         assert!(validate_grant("https://dev.hyperstudy.io", &grant, "id", "room", 12).is_ok());
         grant.completion.expires_at = "2020-01-01T00:00:00Z".into();
         assert!(validate_grant("https://dev.hyperstudy.io", &grant, "id", "room", 12).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bucket_tests {
+    use super::*;
+
+    fn grant_to(url: &str) -> UploadGrant {
+        let expiration = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        serde_json::from_value(json!({"recordingId":"rec-1","upload":{"url":url,"method":"PUT","expiresAt":expiration,"headers":{"Content-Type":"application/vnd.sqlite3","x-goog-if-generation-match":"0","x-goog-content-length-range":"12,12"}},"completion":{"url":"/api/v3/data/device-recordings/room/room_1/uploads/rec-1/complete","token":"secret","expiresAt":expiration}})).unwrap()
+    }
+
+    /// The upload URL comes from the WebSocket client. Checking only the host let a grant point the PUT at any bucket
+    /// on storage.googleapis.com, so a finished study recording could be sent to someone else's storage.
+    #[test]
+    fn uploads_go_only_to_this_recordings_object_in_the_hyperstudy_bucket() {
+        let ours = "https://storage.googleapis.com/hyperscanning.firebasestorage.app/device-recordings/production/exp_1/room_1/participant_1/rec-1.sqlite?X-Goog-Signature=abc";
+        assert!(validate_grant(
+            "https://hyperstudy.io",
+            &grant_to(ours),
+            "rec-1",
+            "room_1",
+            12
+        )
+        .is_ok());
+        for elsewhere in [
+            "https://storage.googleapis.com/attacker-bucket/device-recordings/production/exp_1/room_1/participant_1/rec-1.sqlite",
+            "https://storage.googleapis.com/hyperscanning.firebasestorage.app/other/rec-1.sqlite",
+            "https://storage.googleapis.com/hyperscanning.firebasestorage.app/device-recordings/production/exp_1/room_2/participant_1/rec-1.sqlite",
+            "https://storage.googleapis.com/hyperscanning.firebasestorage.app/device-recordings/production/exp_1/room_1/participant_1/rec-2.sqlite",
+            "https://storage.googleapis.com/hyperscanning.firebasestorage.app/device-recordings/production/exp_1/room_1/participant_1/sub/rec-1.sqlite",
+        ] {
+            assert!(
+                validate_grant("https://hyperstudy.io", &grant_to(elsewhere), "rec-1", "room_1", 12).is_err(),
+                "{elsewhere}"
+            );
+        }
     }
 }
 

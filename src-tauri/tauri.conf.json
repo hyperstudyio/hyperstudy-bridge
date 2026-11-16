@@ -13,12 +13,12 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "HyperStudy Bridge",
-        "width": 800,
-        "height": 600,
+        "title": "Hyperstudy Device Bridge",
+        "width": 1100,
+        "height": 760,
         "resizable": true,
-        "minWidth": 600,
-        "minHeight": 400,
+        "minWidth": 820,
+        "minHeight": 560,
         "alwaysOnTop": false,
         "center": true
       }

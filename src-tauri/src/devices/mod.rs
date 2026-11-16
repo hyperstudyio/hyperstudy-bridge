@@ -5,6 +5,7 @@ pub mod neon_discovery;
 pub mod pupil;
 pub mod ttl;
 
+#[cfg(feature = "eyelink")]
 pub mod eyelink;
 
 use async_trait::async_trait;

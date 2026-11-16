@@ -524,11 +524,13 @@ fn upload_targets_are_exact_trusted_hosts() {
     assert!(validate_api_base("https://dev.hyperstudy.io.evil.test").is_err());
     assert!(validate_api_base("https://user:pass@dev.hyperstudy.io").is_err());
     assert!(validate_api_base("https://dev.hyperstudy.io/path").is_err());
-    assert!(
-        validate_upload_url("https://storage.googleapis.com/bucket/object?signature=value").is_ok()
-    );
-    assert!(validate_upload_url("https://storage.googleapis.com.evil.test/bucket").is_err());
-    assert!(validate_upload_url("http://storage.googleapis.com/bucket").is_err());
+    let object = "hyperscanning.firebasestorage.app/device-recordings/production/exp/room/participant/id.sqlite";
+    let at = |prefix: &str| {
+        validate_upload_url(&format!("{prefix}/{object}?signature=value"), "room", "id")
+    };
+    assert!(at("https://storage.googleapis.com").is_ok());
+    assert!(at("https://storage.googleapis.com.evil.test").is_err());
+    assert!(at("http://storage.googleapis.com").is_err());
 }
 
 #[test]
@@ -549,30 +551,37 @@ fn study_ready_attach_markers_scoped_stop_and_final_manifest() {
         label: None,
     };
     let started = manager
-        .start_study(super::study::StudyStartRequest {
-            stream_uids: vec![uid.clone()],
-            context: context.clone(),
-        })
+        .start_study(
+            super::study::StudyStartRequest {
+                stream_uids: vec![uid.clone()],
+                context: context.clone(),
+            },
+            live_owner(),
+        )
         .unwrap();
     assert_eq!(started.recording.state, "recording");
     assert_eq!(started.recording.streams, 2);
-    assert!(manager
-        .stop_unmanaged(RecordingStopRequest::default())
-        .is_err());
     let attached = manager
-        .start_study(super::study::StudyStartRequest {
-            stream_uids: vec![uid.clone()],
-            context: context.clone(),
-        })
+        .start_study(
+            super::study::StudyStartRequest {
+                stream_uids: vec![uid.clone()],
+                context: context.clone(),
+            },
+            live_owner(),
+        )
         .unwrap();
     assert_eq!(attached.recording_id, started.recording_id);
     let mut wrong = context.clone();
     wrong.room_id = Some("another-room".into());
+    // The running study's connection is still open, so another study may not replace its recording.
     assert!(manager
-        .start_study(super::study::StudyStartRequest {
-            stream_uids: vec![uid],
-            context: wrong.clone()
-        })
+        .start_study(
+            super::study::StudyStartRequest {
+                stream_uids: vec![uid.clone()],
+                context: wrong.clone()
+            },
+            live_owner()
+        )
         .is_err());
     assert!(manager
         .stop_study(super::study::StudyScope {
@@ -625,4 +634,275 @@ fn study_ready_attach_markers_scoped_stop_and_final_manifest() {
         manifest["streams"][1]["source_id"],
         "hyperstudy-bridge-study"
     );
+}
+
+/// Markers and samples must be comparable on one timeline. A marker is stamped with Bridge's LSL clock when
+/// HyperStudy writes it; source samples keep the time their source put on them. For a source on this machine the
+/// two clocks are the same, so a marker must fall after every sample stamped before it and before every sample
+/// stamped after it, and nothing may be re-stamped on the way into the file.
+#[test]
+fn markers_and_samples_share_one_timeline() {
+    use lsl::ExPushable;
+    use std::time::{Duration, Instant};
+    let name = format!("HyperStudy-marker-timing-{}", uuid::Uuid::new_v4());
+    let info =
+        lsl::StreamInfo::new(&name, "Test", 1, 0., lsl::ChannelFormat::Double64, &name).unwrap();
+    let outlet = lsl::StreamOutlet::new(&info, 0, 60).unwrap();
+    let uid = outlet.info().unwrap().uid();
+    let manager = RecordingManager::default();
+    manager
+        .configure_study_directory(std::env::temp_dir().join(&name))
+        .unwrap();
+    let context = RecordingContext {
+        experiment_id: Some("e".into()),
+        room_id: Some("r".into()),
+        participant_id: Some("p".into()),
+        session_id: Some("s".into()),
+        label: None,
+    };
+    let started = manager
+        .start_study(
+            super::study::StudyStartRequest {
+                stream_uids: vec![uid],
+                context: context.clone(),
+            },
+            live_owner(),
+        )
+        .unwrap();
+    assert!(outlet.wait_for_consumers(5.));
+
+    let mut before = Vec::new();
+    for i in 0..20 {
+        let t = lsl::local_clock();
+        outlet.push_sample_ex(&vec![i as f64], t, true).unwrap();
+        before.push(t);
+    }
+    let ack = manager
+        .study_marker(
+            &started.recording_id,
+            &context,
+            serde_json::json!({"eventType":"stimulus.on"}),
+        )
+        .unwrap();
+    let marker = ack["marker_lsl_timestamp"].as_f64().unwrap();
+    let mut after = Vec::new();
+    for i in 20..40 {
+        let t = lsl::local_clock();
+        outlet.push_sample_ex(&vec![i as f64], t, true).unwrap();
+        after.push(t);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while manager.status().committed_samples < 41 && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    let stopped = manager
+        .stop_study(super::study::StudyScope {
+            recording_id: started.recording_id.clone(),
+            context,
+            end_marker: None,
+        })
+        .unwrap();
+    assert_eq!(
+        stopped.recording.state, "completed",
+        "{:?}",
+        stopped.recording
+    );
+
+    let db =
+        rusqlite::Connection::open(manager.study_path(&started.recording_id).unwrap()).unwrap();
+    let floats = |bytes: Vec<u8>| -> Vec<f64> {
+        bytes
+            .chunks_exact(8)
+            .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+            .collect()
+    };
+    let column = |stream: i64, name: &str| -> Vec<f64> {
+        let sql = format!("SELECT {name} FROM blocks WHERE stream_id=? ORDER BY first_sequence");
+        let mut query = db.prepare(&sql).unwrap();
+        let rows = query
+            .query_map([stream], |r| r.get::<_, Vec<u8>>(0))
+            .unwrap();
+        rows.flat_map(|r| floats(r.unwrap())).collect()
+    };
+    // Stream 0 is the source, stream 1 the study marker stream.
+    let samples = column(0, "timestamps");
+    let mut pushed = before.clone();
+    pushed.extend(&after);
+    assert_eq!(
+        samples, pushed,
+        "source times are stored exactly as stamped"
+    );
+    assert!(before.iter().all(|&t| t < marker) && after.iter().all(|&t| t > marker));
+    assert_eq!(column(1, "timestamps"), vec![marker]);
+    assert_eq!(
+        column(1, "received"),
+        vec![marker],
+        "a marker is stamped once, when written"
+    );
+    let received = column(0, "received");
+    assert!(
+        received.iter().zip(&samples).all(|(r, t)| r >= t),
+        "receipt never precedes the stamp"
+    );
+}
+
+fn study_context(room: &str) -> RecordingContext {
+    RecordingContext {
+        experiment_id: Some("e".into()),
+        room_id: Some(room.into()),
+        participant_id: Some("p".into()),
+        session_id: Some(format!("s-{room}")),
+        label: None,
+    }
+}
+
+/// A study that died without stopping its recording (a failed boot, a closed tab, a crash) left that recording running,
+/// and every later study on the station was refused with "Another recording is active" until Bridge was quit. Once the
+/// connection that started it has closed, a start for a different study saves it and records the new study; while
+/// that connection is open, the running study is never cut.
+#[test]
+fn a_new_study_replaces_a_study_recording_only_once_its_connection_closed() {
+    let name = format!("HyperStudy-replace-{}", uuid::Uuid::new_v4());
+    let info =
+        lsl::StreamInfo::new(&name, "Test", 1, 0., lsl::ChannelFormat::String, &name).unwrap();
+    let outlet = lsl::StreamOutlet::new(&info, 0, 60).unwrap();
+    let uid = outlet.info().unwrap().uid();
+    let manager = RecordingManager::default();
+    manager
+        .configure_study_directory(std::env::temp_dir().join(&name))
+        .unwrap();
+    let start = |room: &str, uids: Vec<String>, owner: super::study::StudyOwner| {
+        manager.start_study(
+            super::study::StudyStartRequest {
+                stream_uids: uids,
+                context: study_context(room),
+            },
+            owner,
+        )
+    };
+
+    let first_tab = live_owner();
+    let running = start("room-a", vec![uid.clone()], first_tab.clone()).unwrap();
+
+    // Still connected: a different study is refused and the running one keeps recording.
+    let refused = start("room-b", vec![uid.clone()], live_owner()).unwrap_err();
+    assert!(refused.to_string().contains("still connected"), "{refused}");
+    assert!(active_state(&manager.status().state));
+
+    // A reload of the same study attaches and takes ownership; the old connection then closing does not free it.
+    let reload = live_owner();
+    assert_eq!(
+        start("room-a", vec![uid.clone()], reload.clone())
+            .unwrap()
+            .recording_id,
+        running.recording_id
+    );
+    first_tab.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(start("room-b", vec![uid.clone()], live_owner()).is_err());
+
+    // The owner is gone. A bad request is refused before anything is stopped...
+    reload.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(start("room-b", vec![], live_owner()).is_err());
+    assert!(
+        active_state(&manager.status().state),
+        "a bad request must not cut the recording"
+    );
+
+    // ...and a valid one saves the abandoned recording and records the new study.
+    let replacement = start("room-b", vec![uid.clone()], live_owner())
+        .expect("an abandoned recording must not block");
+    assert_ne!(replacement.recording_id, running.recording_id);
+    assert_eq!(replacement.recording.state, "recording");
+    let old = manager
+        .list_studies()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.recording_id == running.recording_id)
+        .unwrap();
+    assert_eq!(
+        old.recording.state, "completed",
+        "the abandoned recording is saved, not discarded"
+    );
+    assert!(old.recording.path.as_ref().unwrap().exists());
+    manager
+        .stop_study(super::study::StudyScope {
+            recording_id: replacement.recording_id,
+            context: study_context("room-b"),
+            end_marker: None,
+        })
+        .unwrap();
+}
+
+/// A recording the operator started in Bridge's own window is deliberate; a study must not cut it off.
+#[test]
+fn a_study_never_replaces_a_manual_recording() {
+    let name = format!("HyperStudy-manual-{}", uuid::Uuid::new_v4());
+    let info =
+        lsl::StreamInfo::new(&name, "Test", 1, 0., lsl::ChannelFormat::String, &name).unwrap();
+    let outlet = lsl::StreamOutlet::new(&info, 0, 60).unwrap();
+    let uid = outlet.info().unwrap().uid();
+    let manager = RecordingManager::default();
+    let dir = std::env::temp_dir().join(&name);
+    manager
+        .configure_study_directory(dir.join("study"))
+        .unwrap();
+    manager
+        .start(RecordingRequest {
+            stream_uids: vec![uid.clone()],
+            directory: dir.join("manual"),
+            context: RecordingContext::default(),
+        })
+        .unwrap();
+    let refused = manager
+        .start_study(
+            super::study::StudyStartRequest {
+                stream_uids: vec![uid],
+                context: study_context("room"),
+            },
+            live_owner(),
+        )
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("Stop it in Bridge"),
+        "{refused}"
+    );
+    assert!(active_state(&manager.status().state));
+    manager.stop().unwrap();
+}
+
+fn active_state(state: &str) -> bool {
+    matches!(state, "starting" | "recording" | "stopping")
+}
+
+/// The operator can stop a running study recording from Bridge's window (a participant walked away, a study hung).
+/// Before, the panel had no stop for study recordings even though Bridge's own error said to "stop locally".
+#[test]
+fn the_operator_can_stop_a_study_recording_by_id() {
+    let name = format!("HyperStudy-local-stop-{}", uuid::Uuid::new_v4());
+    let info =
+        lsl::StreamInfo::new(&name, "Test", 1, 0., lsl::ChannelFormat::String, &name).unwrap();
+    let outlet = lsl::StreamOutlet::new(&info, 0, 60).unwrap();
+    let uid = outlet.info().unwrap().uid();
+    let manager = RecordingManager::default();
+    manager
+        .configure_study_directory(std::env::temp_dir().join(&name))
+        .unwrap();
+    let started = manager
+        .start_study(
+            super::study::StudyStartRequest {
+                stream_uids: vec![uid],
+                context: study_context("room"),
+            },
+            live_owner(),
+        )
+        .unwrap();
+    let stopped = manager.stop_study_locally(&started.recording_id).unwrap();
+    assert_eq!(stopped.recording.state, "completed");
+    assert!(!active_state(&manager.status().state));
+    assert!(manager.stop_study_locally("not-a-recording").is_err());
+}
+
+/// A connection that is still open (the starting WebSocket, as the server tracks it).
+fn live_owner() -> super::study::StudyOwner {
+    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
 }

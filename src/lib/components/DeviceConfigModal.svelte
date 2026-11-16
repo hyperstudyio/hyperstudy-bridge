@@ -97,41 +97,6 @@
         errorMessage: 'Hardware ID is hexadecimal',
       },
     },
-    eyelink: {
-      ip: {
-        label: 'IP Address',
-        type: 'text',
-        placeholder: '100.1.1.1',
-        required: true,
-        pattern: '^((25[0-5]|(2[0-4]|1\\d|[1-9]|)\\d)\\.?\\b){4}$',
-        errorMessage: 'Invalid IP address format',
-      },
-      sample_rate: {
-        label: 'Sample Rate (Hz)',
-        type: 'select',
-        options: [250, 500, 1000, 2000],
-        default: 1000,
-        required: true,
-      },
-      display_width: {
-        label: 'Display Width (px)',
-        type: 'number',
-        min: 1,
-        max: 7680,
-        default: 1920,
-        required: false,
-        errorMessage: 'Display width must be between 1-7680',
-      },
-      display_height: {
-        label: 'Display Height (px)',
-        type: 'number',
-        min: 1,
-        max: 4320,
-        default: 1080,
-        required: false,
-        errorMessage: 'Display height must be between 1-4320',
-      },
-    },
     frenz: {
       // Credentials (stored in encrypted vault, not in regular config)
       frenzDeviceId: {
@@ -412,7 +377,7 @@
         newErrors.frenzDeviceId = 'Scan for FRENZ bands and select your band.';
         hasErrors = true;
       }
-      if (!secureFields.frenzProductKey) {
+      if (!secureFields.frenzProductKey?.trim()) {
         newErrors.frenzProductKey = 'Enter your Earable product key.';
         hasErrors = true;
       }
@@ -478,7 +443,8 @@
       const config = deviceConfigs[device.id];
       const secrets = {};
       for (const [key, fieldConfig] of Object.entries(config)) {
-        if (fieldConfig.secure) secrets[fieldConfig.secretKey] = secureFields[key] || null;
+        // Pasted keys often carry a stray space or line break, which the vendor SDK rejects at connect time.
+        if (fieldConfig.secure) secrets[fieldConfig.secretKey] = secureFields[key]?.trim() || null;
       }
       if (Object.keys(secrets).length) await setSecrets(secrets);
 

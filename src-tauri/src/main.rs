@@ -8,9 +8,9 @@ mod commands;
 mod devices;
 mod logging;
 mod open_files;
-mod performance;
 mod recording;
 mod storage;
+mod updates;
 mod usb_monitor;
 
 use std::sync::{
@@ -40,6 +40,12 @@ fn stop_frenz_sidecar(state: &Arc<AppState>) {
     }
 }
 
+/// Saves the log entries still buffered (up to 5 s / 100 of them), including the exit-time recording and helper
+/// lines. Runs on a fresh thread for the same reason as stop_frenz_sidecar.
+fn flush_logs_for_exit() {
+    let _ = std::thread::spawn(|| tauri::async_runtime::block_on(logging::flush_logs())).join();
+}
+
 #[tokio::main]
 async fn main() {
     // Create filters to prevent log explosion from dependencies.
@@ -61,7 +67,7 @@ async fn main() {
         .with(TauriLogLayer::new().with_filter(tauri_filter))
         .init();
 
-    info!("Starting HyperStudy Bridge");
+    info!("Starting Hyperstudy Device Bridge");
     // Before any LSL inlet or outlet exists: every FRENZ stream's inlet needs sockets (see open_files.rs).
     match open_files::raise_open_file_limit() {
         Ok(Some(limit)) => info!("Raised open-file soft limit to {limit}"),
@@ -141,15 +147,30 @@ async fn main() {
                         // App continues without persistence
                     }
                 }
+
+                // Check for an update on every launch. Runs after the database step (whatever its outcome) so
+                // the result is persisted with the rest of the log.
+                updates::check(&app_handle_for_db).await;
             });
 
             // Start WebSocket server
             let app_handle_for_ws = app_handle.clone();
             let state_for_ws = state.clone();
             tokio::spawn(async move {
-                let mut server = BridgeServer::new(state_for_ws, app_handle_for_ws);
+                let mut server = BridgeServer::new(state_for_ws, app_handle_for_ws.clone());
                 if let Err(e) = server.start().await {
+                    // Without its server this Bridge cannot work, and running on would leave its page talking to
+                    // whichever app holds the port. Say so and quit. (This can fire before log persistence starts,
+                    // so the dialog is the record.)
                     error!("Failed to start WebSocket server: {}", e);
+                    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                    let exit_handle = app_handle_for_ws.clone();
+                    app_handle_for_ws
+                        .dialog()
+                        .message(e.to_string())
+                        .title("Hyperstudy Device Bridge can't start")
+                        .kind(MessageDialogKind::Error)
+                        .show(move |_| exit_handle.exit(1));
                 }
             });
 
@@ -188,19 +209,25 @@ async fn main() {
                 }
             });
 
-            // Build native menu bar with "Check for Updates..." item
+            // Native menu: About, Check for Updates and Show Data Folder (macOS app menu; Help elsewhere).
             let check_updates_item =
                 MenuItemBuilder::with_id("check_for_updates", "Check for Updates...")
+                    .build(app)?;
+            let data_folder_item =
+                MenuItemBuilder::with_id("show_data_folder", "Show Data Folder").build(app)?;
+            let docs_item =
+                MenuItemBuilder::with_id("open_documentation", "Hyperstudy Device Bridge Documentation")
                     .build(app)?;
 
             #[cfg(target_os = "macos")]
             {
-                let quit_item = MenuItemBuilder::with_id("quit_after_recording", "Quit HyperStudy Bridge")
+                let quit_item = MenuItemBuilder::with_id("quit_after_recording", "Quit Hyperstudy Device Bridge")
                     .accelerator("CmdOrCtrl+Q")
                     .build(app)?;
-                let app_submenu = SubmenuBuilder::new(app, "HyperStudy Bridge")
+                let app_submenu = SubmenuBuilder::new(app, "Hyperstudy Device Bridge")
                     .about(None)
                     .item(&check_updates_item)
+                    .item(&data_folder_item)
                     .separator()
                     .services()
                     .separator()
@@ -226,8 +253,10 @@ async fn main() {
                     .close_window()
                     .build()?;
 
+                let help_submenu = SubmenuBuilder::new(app, "Help").item(&docs_item).build()?;
+
                 let menu = MenuBuilder::new(app)
-                    .items(&[&app_submenu, &edit_submenu, &window_submenu])
+                    .items(&[&app_submenu, &edit_submenu, &window_submenu, &help_submenu])
                     .build()?;
 
                 app.set_menu(menu)?;
@@ -236,7 +265,12 @@ async fn main() {
             #[cfg(not(target_os = "macos"))]
             {
                 let help_submenu = SubmenuBuilder::new(app, "Help")
+                    .item(&docs_item)
+                    .separator()
                     .item(&check_updates_item)
+                    .item(&data_folder_item)
+                    .separator()
+                    .about(None)
                     .build()?;
 
                 let menu = MenuBuilder::new(app).items(&[&help_submenu]).build()?;
@@ -249,14 +283,35 @@ async fn main() {
                 if event.id().as_ref() == "quit_after_recording" {
                     app_handle.exit(0);
                 }
+                if event.id().as_ref() == "open_documentation" {
+                    tauri::async_runtime::spawn_blocking(|| {
+                        if let Err(e) = commands::open_documentation() {
+                            warn!("Open documentation failed: {e}");
+                        }
+                    });
+                }
+                if event.id().as_ref() == "show_data_folder" {
+                    let app_handle = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = commands::reveal_data_folder(app_handle).await {
+                            warn!("Show Data Folder failed: {e}");
+                        }
+                    });
+                }
                 if event.id().as_ref() == "check_for_updates" {
+                    // The page shows the result; announce that this check was asked for.
                     let _ = app_handle.emit("menu-check-for-updates", ());
+                    let app_handle = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        updates::check(&app_handle).await;
+                    });
                 }
             });
 
             Ok(())
         })
         .manage(app_state)
+        .manage(updates::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             start_bridge_server,
             stop_bridge_server,
@@ -270,15 +325,7 @@ async fn main() {
             list_ttl_devices,
             find_ttl_port_by_serial,
             discover_devices,
-            get_device_metrics,
             get_system_diagnostics,
-            load_configuration,
-            save_configuration,
-            get_performance_metrics,
-            get_device_performance_metrics,
-            get_performance_summary,
-            check_ttl_latency_compliance,
-            reset_performance_metrics,
             get_logs,
             query_logs,
             get_log_stats,
@@ -289,17 +336,20 @@ async fn main() {
             cleanup_old_logs,
             clear_all_logs,
             export_logs,
-            set_log_level,
             test_ttl_device,
             reset_device,
             get_app_info,
             discover_recording_streams,
             start_lsl_recording,
             stop_lsl_recording,
+            stop_study_recording,
             lsl_recording_status,
             list_study_recordings,
             reveal_recording,
             lsl_bridge_streams,
+            update_status,
+            check_for_updates,
+            install_update,
             recover_lsl_recording,
             scan_frenz_devices,
             start_frenz_bridge,
@@ -319,6 +369,7 @@ async fn main() {
                     _ => {}
                 }
                 stop_frenz_sidecar(&exit_state);
+                flush_logs_for_exit();
             }
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
                 // Tauri exits the process without guaranteeing manager destructors.
@@ -336,6 +387,7 @@ async fn main() {
                             _ => {}
                         }
                         stop_frenz_sidecar(&state);
+                        flush_logs_for_exit();
                         finished.store(2, Ordering::Release);
                         handle.exit(code.unwrap_or(0));
                     });
