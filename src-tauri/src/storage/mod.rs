@@ -65,7 +65,8 @@ impl Storage {
         Ok(Self::with_database(db))
     }
 
-    /// Create an in-memory database (primarily for testing).
+    /// Create an in-memory database (for tests).
+    #[cfg(test)]
     pub async fn new_in_memory() -> StorageResult<Self> {
         Ok(Self::with_database(Database::open(Location::Memory).await?))
     }

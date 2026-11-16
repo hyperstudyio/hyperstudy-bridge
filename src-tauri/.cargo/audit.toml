@@ -1,13 +1,6 @@
 # cargo-audit configuration (used by `cargo audit` locally and in CI, which
 # runs it from src-tauri/).
 [advisories]
-ignore = [
-    # rsa 0.9 Marvin timing side-channel (RUSTSEC-2023-0071). No patched
-    # release exists upstream. As of 2026-09 the crate is present in Cargo.lock
-    # only via sqlx-mysql and is NOT in the active build graph
-    # (`cargo tree -i rsa` prints nothing), so nothing here executes RSA.
-    # Re-check when the rsa crate publishes a fix, or immediately if a MySQL
-    # feature is ever enabled — at that point this ignore would be masking a
-    # compiled dependency and must be re-justified or removed.
-    "RUSTSEC-2023-0071",
-]
+# RUSTSEC-2023-0071 (rsa) used to be ignored here: rsa was in Cargo.lock only
+# through sqlx-mysql. sqlx has been removed, so rsa is gone and so is the ignore.
+ignore = []

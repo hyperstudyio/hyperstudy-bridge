@@ -22,6 +22,7 @@ type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 /// Where the database lives.
 pub(super) enum Location {
     File(PathBuf),
+    #[cfg(test)]
     Memory,
 }
 
@@ -82,6 +83,7 @@ fn open_connection(location: &Location) -> StorageResult<Connection> {
             }
             Connection::open(path)?
         }
+        #[cfg(test)]
         Location::Memory => Connection::open_in_memory()?,
     };
     conn.busy_timeout(Duration::from_secs(30))?;

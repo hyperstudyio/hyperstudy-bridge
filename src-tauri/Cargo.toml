@@ -56,7 +56,9 @@ dashmap = "6"
 uuid = { version = "1", features = ["v4"] }
 
 # Database
-rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+# One SQLite library for the whole app: study recordings (recording/) and the log database (storage/).
+# fallible_uint keeps u64 column reads (recording/upload.rs), which rusqlite 0.36+ puts behind this feature.
+rusqlite = { version = "0.43", features = ["bundled", "backup", "fallible_uint"] }
 libc = "0.2"
 base64 = "0.22"
 
