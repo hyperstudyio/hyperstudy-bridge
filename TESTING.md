@@ -17,10 +17,6 @@ The test suite is organized into several categories:
 - **websocket.test.js**: Tests WebSocket connection management, message handling, and device operations
 - **logs.test.js**: Tests log management, filtering, export functionality, and circular buffer behavior
 
-### 3. Integration Tests (`src/test/`)
-
-- **integration.test.js**: End-to-end tests covering full application workflow, multi-device scenarios, and user interactions
-
 ## Test Technologies
 
 - **Vitest**: Primary testing framework
@@ -89,9 +85,6 @@ npm run test:coverage
 
 # Run specific test file
 npx vitest run src/lib/components/tests/DeviceCard.test.js
-
-# Run integration tests only
-npx vitest run src/test/
 
 # Run component tests only
 npx vitest run src/lib/components/tests/

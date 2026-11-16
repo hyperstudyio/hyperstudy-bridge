@@ -30,7 +30,6 @@
     "test:bench": "cd src-tauri && cargo bench --bench performance",
     "test:stress": "cd src-tauri && cargo bench --bench stress_test",
     "test:all": "npm run test && npm run test:e2e && npm run test:load:light",
-    "perf:dashboard": "python -m http.server 8080 --directory src/test",
     "lint": "eslint src --ext .js,.ts,.svelte --fix",
     "lint:check": "eslint src --ext .js,.ts,.svelte",
     "format": "prettier --write \"src/**/*.{js,ts,svelte,html,css,md}\"",
