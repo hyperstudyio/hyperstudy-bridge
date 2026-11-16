@@ -524,11 +524,13 @@ fn upload_targets_are_exact_trusted_hosts() {
     assert!(validate_api_base("https://dev.hyperstudy.io.evil.test").is_err());
     assert!(validate_api_base("https://user:pass@dev.hyperstudy.io").is_err());
     assert!(validate_api_base("https://dev.hyperstudy.io/path").is_err());
-    assert!(
-        validate_upload_url("https://storage.googleapis.com/bucket/object?signature=value").is_ok()
-    );
-    assert!(validate_upload_url("https://storage.googleapis.com.evil.test/bucket").is_err());
-    assert!(validate_upload_url("http://storage.googleapis.com/bucket").is_err());
+    let object = "hyperscanning.firebasestorage.app/device-recordings/production/exp/room/participant/id.sqlite";
+    let at = |prefix: &str| {
+        validate_upload_url(&format!("{prefix}/{object}?signature=value"), "room", "id")
+    };
+    assert!(at("https://storage.googleapis.com").is_ok());
+    assert!(at("https://storage.googleapis.com.evil.test").is_err());
+    assert!(at("http://storage.googleapis.com").is_err());
 }
 
 #[test]
@@ -568,12 +570,6 @@ fn study_ready_attach_markers_scoped_stop_and_final_manifest() {
     assert_eq!(attached.recording_id, started.recording_id);
     let mut wrong = context.clone();
     wrong.room_id = Some("another-room".into());
-    assert!(manager
-        .start_study(super::study::StudyStartRequest {
-            stream_uids: vec![uid],
-            context: wrong.clone()
-        })
-        .is_err());
     assert!(manager
         .stop_study(super::study::StudyScope {
             recording_id: started.recording_id.clone(),
@@ -732,4 +728,130 @@ fn markers_and_samples_share_one_timeline() {
         received.iter().zip(&samples).all(|(r, t)| r >= t),
         "receipt never precedes the stamp"
     );
+}
+
+fn study_context(room: &str) -> RecordingContext {
+    RecordingContext {
+        experiment_id: Some("e".into()),
+        room_id: Some(room.into()),
+        participant_id: Some("p".into()),
+        session_id: Some(format!("s-{room}")),
+        label: None,
+    }
+}
+
+/// A study that died without stopping its recording (a failed boot, a closed tab, a crash) left that recording running,
+/// and every later study on the station was refused with "Another recording is active" until Bridge was quit. A start
+/// for a different study now saves the abandoned recording and starts the new one.
+#[test]
+fn a_new_study_replaces_an_abandoned_study_recording() {
+    let name = format!("HyperStudy-replace-{}", uuid::Uuid::new_v4());
+    let info =
+        lsl::StreamInfo::new(&name, "Test", 1, 0., lsl::ChannelFormat::String, &name).unwrap();
+    let outlet = lsl::StreamOutlet::new(&info, 0, 60).unwrap();
+    let uid = outlet.info().unwrap().uid();
+    let manager = RecordingManager::default();
+    manager
+        .configure_study_directory(std::env::temp_dir().join(&name))
+        .unwrap();
+    let start = |room: &str| {
+        manager.start_study(super::study::StudyStartRequest {
+            stream_uids: vec![uid.clone()],
+            context: study_context(room),
+        })
+    };
+
+    let abandoned = start("dead-room").unwrap();
+    assert_eq!(abandoned.recording.state, "recording");
+    let replacement =
+        start("new-room").expect("a new study must not be blocked by an abandoned one");
+    assert_ne!(replacement.recording_id, abandoned.recording_id);
+    assert_eq!(replacement.recording.state, "recording");
+
+    let sessions = manager.list_studies().unwrap();
+    let old = sessions
+        .iter()
+        .find(|s| s.recording_id == abandoned.recording_id)
+        .unwrap();
+    assert_eq!(
+        old.recording.state, "completed",
+        "the abandoned recording is saved, not discarded"
+    );
+    assert!(old.recording.path.as_ref().unwrap().exists());
+
+    // Reconnecting the running study still attaches to its recording instead of replacing it.
+    assert_eq!(
+        start("new-room").unwrap().recording_id,
+        replacement.recording_id
+    );
+    manager
+        .stop_study(super::study::StudyScope {
+            recording_id: replacement.recording_id,
+            context: study_context("new-room"),
+            end_marker: None,
+        })
+        .unwrap();
+}
+
+/// A recording the operator started in Bridge's own window is deliberate; a study must not cut it off.
+#[test]
+fn a_study_never_replaces_a_manual_recording() {
+    let name = format!("HyperStudy-manual-{}", uuid::Uuid::new_v4());
+    let info =
+        lsl::StreamInfo::new(&name, "Test", 1, 0., lsl::ChannelFormat::String, &name).unwrap();
+    let outlet = lsl::StreamOutlet::new(&info, 0, 60).unwrap();
+    let uid = outlet.info().unwrap().uid();
+    let manager = RecordingManager::default();
+    let dir = std::env::temp_dir().join(&name);
+    manager
+        .configure_study_directory(dir.join("study"))
+        .unwrap();
+    manager
+        .start(RecordingRequest {
+            stream_uids: vec![uid.clone()],
+            directory: dir.join("manual"),
+            context: RecordingContext::default(),
+        })
+        .unwrap();
+    let refused = manager
+        .start_study(super::study::StudyStartRequest {
+            stream_uids: vec![uid],
+            context: study_context("room"),
+        })
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("Stop it in Bridge"),
+        "{refused}"
+    );
+    assert!(active_state(&manager.status().state));
+    manager.stop().unwrap();
+}
+
+fn active_state(state: &str) -> bool {
+    matches!(state, "starting" | "recording" | "stopping")
+}
+
+/// The operator can stop a running study recording from Bridge's window (a participant walked away, a study hung).
+/// Before, the panel had no stop for study recordings even though Bridge's own error said to "stop locally".
+#[test]
+fn the_operator_can_stop_a_study_recording_by_id() {
+    let name = format!("HyperStudy-local-stop-{}", uuid::Uuid::new_v4());
+    let info =
+        lsl::StreamInfo::new(&name, "Test", 1, 0., lsl::ChannelFormat::String, &name).unwrap();
+    let outlet = lsl::StreamOutlet::new(&info, 0, 60).unwrap();
+    let uid = outlet.info().unwrap().uid();
+    let manager = RecordingManager::default();
+    manager
+        .configure_study_directory(std::env::temp_dir().join(&name))
+        .unwrap();
+    let started = manager
+        .start_study(super::study::StudyStartRequest {
+            stream_uids: vec![uid],
+            context: study_context("room"),
+        })
+        .unwrap();
+    let stopped = manager.stop_study_locally(&started.recording_id).unwrap();
+    assert_eq!(stopped.recording.state, "completed");
+    assert!(!active_state(&manager.status().state));
+    assert!(manager.stop_study_locally("not-a-recording").is_err());
 }

@@ -40,11 +40,12 @@ HyperStudy Bridge provides a reliable, low-latency communication layer between t
 |--------|------|------------|--------|
 | [hyperstudy-ttl](https://github.com/hyperstudyio/hyperstudy-ttl) | TTL Pulse Generator | USB Serial | Supported |
 | Kernel Flow2 | fNIRS | TCP Socket | Supported |
-| Pupil Labs Neon | Eye Tracker | WebSocket | Supported |
-| EyeLink 1000 Plus | Eye Tracker | Ethernet (TCP) | Supported* |
+| Pupil Labs Neon | Eye Tracker | REST API + LSL | Supported |
+| Earable FRENZ Brainband | EEG / biosignals | Bluetooth + LSL | Supported |
 | Lab Streaming Layer | Various | LSL Protocol | Supported |
+| EyeLink 1000 Plus | Eye Tracker | Ethernet (TCP) | Under development* |
 
-_*Requires the SR Research EyeLink Developers Kit installed on the host machine._
+_*EyeLink support is unfinished and turned off in released builds: Bridge answers EyeLink commands with "not supported". See [EyeLink (in development)](#eyelink-in-development)._
 
 ## Quick Start
 
@@ -71,13 +72,11 @@ _*Requires the SR Research EyeLink Developers Kit installed on the host machine.
    ./HyperStudy-Bridge-*.AppImage
    ```
 
-### EyeLink Setup
+### EyeLink (in development)
 
-The EyeLink 1000 Plus integration requires the SR Research EyeLink Developers Kit:
-
-1. Download and install the [EyeLink Developers Kit](https://www.sr-research.com/support) for your platform
-2. The bridge auto-detects the SDK at runtime — no special build flags needed
-3. If the SDK is not installed, the app runs normally; EyeLink operations return a clear error message
+EyeLink 1000 Plus support is not finished and is compiled out of released builds. To work on it, build with the
+`eyelink` Cargo feature (`cargo build --features eyelink`) on a machine with the SR Research
+[EyeLink Developers Kit](https://www.sr-research.com/support) installed; the SDK is loaded at runtime.
 
 ### Usage
 

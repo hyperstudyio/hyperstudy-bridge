@@ -5,7 +5,6 @@
 mod common;
 use common::prelude::*;
 
-use hyperstudy_bridge::performance::measure_latency;
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -195,7 +194,9 @@ mod performance_tests {
         for _ in 0..100 {
             let device_lock = harness.app_state.get_device(&device_id).await.unwrap();
             let mut device = device_lock.write().await;
-            let (result, latency) = measure_latency(device.send(pulse_command)).await;
+            let started = std::time::Instant::now();
+            let result = device.send(pulse_command).await;
+            let latency = started.elapsed();
             result?;
             latencies.push(latency);
         }
@@ -304,46 +305,6 @@ mod performance_tests {
         // Verify reasonable performance under load
         Assertions::assert_latency(stats.avg, 100.0, "average under concurrent load")?;
         Assertions::assert_latency(stats.p95, 200.0, "P95 under concurrent load")?;
-
-        harness.cleanup().await
-    }
-
-    #[tokio::test]
-    async fn test_performance_monitoring_integration() -> TestResult<()> {
-        let mut harness = TestHarness::new().await;
-        let device_id = harness.add_connected_device(DeviceType::TTL).await?;
-
-        // Add device to performance monitoring
-        harness
-            .performance_monitor
-            .add_device(device_id.clone())
-            .await;
-
-        // Record operations with performance monitor
-        for _ in 0..10 {
-            let start = Instant::now();
-            {
-                let device_lock = harness.app_state.get_device(&device_id).await.unwrap();
-                let mut device = device_lock.write().await;
-                device.send(b"test").await?;
-            }
-            let latency = start.elapsed();
-
-            harness
-                .performance_monitor
-                .record_device_operation(&device_id, latency, 4, 0)
-                .await;
-        }
-
-        // Verify metrics collection
-        let metrics = harness
-            .performance_monitor
-            .get_device_metrics(&device_id)
-            .await
-            .ok_or_else(|| TestError::Assertion("No metrics found".to_string()))?;
-
-        assert_eq!(metrics.messages_sent, 10);
-        assert!(metrics.last_latency_ns > 0);
 
         harness.cleanup().await
     }
@@ -465,56 +426,6 @@ mod error_recovery_tests {
         assert!(
             heartbeat_results.iter().all(|&success| success),
             "Some heartbeats failed"
-        );
-
-        harness.cleanup().await
-    }
-
-    #[tokio::test]
-    async fn test_error_monitoring_and_metrics() -> TestResult<()> {
-        let mut harness = TestHarness::new().await;
-        let device_id = harness.add_unreliable_device(DeviceType::TTL, 0.8).await; // 80% error rate
-
-        // Add to performance monitoring
-        harness
-            .performance_monitor
-            .add_device(device_id.clone())
-            .await;
-
-        // Attempt operations to generate errors
-        let total_operations = 20;
-        for _ in 0..total_operations {
-            let device_lock = harness.app_state.get_device(&device_id).await.unwrap();
-            let mut device = device_lock.write().await;
-            if let Err(e) = device.connect().await {
-                harness
-                    .performance_monitor
-                    .record_device_error(&device_id, &e.to_string())
-                    .await;
-            } else {
-                device.disconnect().await.ok();
-            }
-        }
-
-        // Check error metrics
-        let metrics = harness
-            .performance_monitor
-            .get_device_metrics(&device_id)
-            .await
-            .ok_or_else(|| TestError::Assertion("No metrics found".to_string()))?;
-
-        assert!(
-            metrics.errors > 0,
-            "No errors recorded despite high error rate"
-        );
-
-        // With 80% error rate, we should see significant errors
-        let error_rate = metrics.errors as f64 / total_operations as f64;
-        assert!(error_rate > 0.5, "Error rate too low: {}", error_rate);
-
-        println!(
-            "Recorded errors: {} out of {} operations",
-            metrics.errors, total_operations
         );
 
         harness.cleanup().await
@@ -840,55 +751,6 @@ mod resource_cleanup_tests {
         }
 
         harness2.cleanup().await
-    }
-
-    #[tokio::test]
-    async fn test_performance_monitor_cleanup() -> TestResult<()> {
-        let mut harness = TestHarness::new().await;
-
-        // Add devices to performance monitoring
-        let mut device_ids = Vec::new();
-        for _ in 0..3 {
-            let device_id = harness.add_device(DeviceType::TTL).await;
-            harness
-                .performance_monitor
-                .add_device(device_id.clone())
-                .await;
-            device_ids.push(device_id);
-        }
-
-        // Verify metrics exist for all devices
-        for device_id in &device_ids {
-            let metrics = harness
-                .performance_monitor
-                .get_device_metrics(device_id)
-                .await;
-            assert!(
-                metrics.is_some(),
-                "Metrics not found for device {}",
-                device_id
-            );
-        }
-
-        // Remove devices from performance monitoring
-        for device_id in &device_ids {
-            harness.performance_monitor.remove_device(device_id).await;
-        }
-
-        // Verify metrics are cleaned up
-        for device_id in &device_ids {
-            let metrics = harness
-                .performance_monitor
-                .get_device_metrics(device_id)
-                .await;
-            assert!(
-                metrics.is_none(),
-                "Metrics still exist for device {} after cleanup",
-                device_id
-            );
-        }
-
-        harness.cleanup().await
     }
 
     #[tokio::test]

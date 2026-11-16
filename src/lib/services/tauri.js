@@ -147,15 +147,6 @@ export async function discoverDevices() {
 }
 
 // Metrics and diagnostics
-export async function getDeviceMetrics(deviceId) {
-  try {
-    return await invoke('get_device_metrics', { deviceId });
-  } catch (error) {
-    console.error(`Failed to get metrics for ${deviceId}:`, error);
-    return null;
-  }
-}
-
 export async function getSystemDiagnostics() {
   try {
     return await invoke('get_system_diagnostics');
@@ -237,29 +228,7 @@ export async function setupEventListeners() {
     });
   });
 
-  // Performance metrics
-  const unlistenMetrics = await listen('performance_metrics', event => {
-    console.log('Performance metrics:', event.payload);
-    backendEvents.update(events => {
-      const newEvents = [
-        ...events,
-        {
-          type: 'metrics',
-          ...event.payload,
-          timestamp: Date.now(),
-        },
-      ];
-      return newEvents.slice(-MAX_BACKEND_EVENTS);
-    });
-  });
-
-  eventUnlisteners = [
-    unlistenStatus,
-    unlistenData,
-    unlistenError,
-    unlistenConnection,
-    unlistenMetrics,
-  ];
+  eventUnlisteners = [unlistenStatus, unlistenData, unlistenError, unlistenConnection];
 
   console.log('Backend event listeners setup complete');
 }
@@ -272,25 +241,6 @@ export function cleanupEventListeners() {
   });
   eventUnlisteners = [];
   console.log('Event listeners cleaned up');
-}
-
-// Configuration management
-export async function loadConfiguration() {
-  try {
-    return await invoke('load_configuration');
-  } catch (error) {
-    console.error('Failed to load configuration:', error);
-    return {};
-  }
-}
-
-export async function saveConfiguration(config) {
-  try {
-    return await invoke('save_configuration', { config });
-  } catch (error) {
-    console.error('Failed to save configuration:', error);
-    throw error;
-  }
 }
 
 // Logging commands
@@ -432,34 +382,6 @@ export async function exportLogs(logsData, filePath = null) {
     return await invoke('export_logs', { logsData, filePath });
   } catch (error) {
     console.error('Failed to export logs:', error);
-    throw error;
-  }
-}
-
-export async function setLogLevel(level) {
-  try {
-    return await invoke('set_log_level', { level });
-  } catch (error) {
-    console.error('Failed to set log level:', error);
-    throw error;
-  }
-}
-
-// Performance monitoring commands
-export async function getPerformanceMetrics() {
-  try {
-    return await invoke('get_performance_metrics');
-  } catch (error) {
-    console.error('Failed to get performance metrics:', error);
-    throw error;
-  }
-}
-
-export async function resetPerformanceMetrics(deviceId = null) {
-  try {
-    return await invoke('reset_performance_metrics', { deviceId });
-  } catch (error) {
-    console.error('Failed to reset performance metrics:', error);
     throw error;
   }
 }
@@ -645,12 +567,9 @@ export const tauriService = {
   testTtlDevice,
   resetDevice,
   discoverDevices,
-  getDeviceMetrics,
   getSystemDiagnostics,
   setupEventListeners,
   cleanupEventListeners,
-  loadConfiguration,
-  saveConfiguration,
   // Logging and storage
   getLogs,
   queryLogs,
@@ -662,9 +581,6 @@ export const tauriService = {
   cleanupOldLogs,
   clearAllLogs,
   exportLogs,
-  setLogLevel,
-  getPerformanceMetrics,
-  resetPerformanceMetrics,
   // FRENZ bridge
   startFrenzBridge,
   stopFrenzBridge,

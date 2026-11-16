@@ -3,7 +3,6 @@ use crate::devices::lsl::{
     StreamResolver, TimeSync,
 };
 use crate::devices::{BoxedDevice, DeviceInfo, DeviceStatus, DeviceType};
-use crate::performance::PerformanceMonitor;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -29,8 +28,6 @@ pub struct AppState {
     pub recording: Arc<crate::recording::RecordingManager>,
     pub devices: Arc<RwLock<HashMap<String, Arc<RwLock<BoxedDevice>>>>>,
     pub connections: Arc<DashMap<String, ConnectionInfo>>,
-    pub metrics: Arc<RwLock<Metrics>>,
-    pub performance_monitor: Arc<PerformanceMonitor>,
     pub start_time: Instant,
     pub message_count: Arc<AtomicU64>,
     pub last_error: Arc<RwLock<Option<String>>>,
@@ -45,6 +42,7 @@ pub struct AppState {
     pub lsl_inlets: Arc<InletManager>,
     pub lsl_outlets: Arc<OutletManager>,
     /// EyeLink manager for SR Research EyeLink 1000 Plus eye tracking
+    #[cfg(feature = "eyelink")]
     pub eyelink_manager: Arc<crate::devices::eyelink::EyeLinkManager>,
     /// Broadcast channel for device status change events
     /// WebSocket connections can subscribe to receive status updates
@@ -133,24 +131,6 @@ pub struct ConnectionInfo {
     pub connected_at: u64,
     pub last_activity: u64,
     pub message_count: u64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Metrics {
-    pub total_messages: u64,
-    pub total_errors: u64,
-    pub total_connections: u64,
-    pub uptime_seconds: u64,
-    pub device_metrics: Vec<DeviceMetrics>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceMetrics {
-    pub device_id: String,
-    pub messages_sent: u64,
-    pub messages_received: u64,
-    pub errors: u64,
-    pub last_latency_ms: f64,
 }
 
 /// Event broadcast when a device's status changes
@@ -247,14 +227,12 @@ impl std::fmt::Debug for AppState {
         let mut s = f.debug_struct("AppState");
         s.field("devices", &self.devices)
             .field("connections", &self.connections)
-            .field("metrics", &self.metrics)
             .field("start_time", &self.start_time)
             .field("message_count", &self.message_count)
             .field("last_error", &self.last_error)
             .field("neon_manager", &self.neon_manager)
             .field("frenz_manager", &self.frenz_manager)
-            .field("frenz_process", &self.frenz_process)
-            .field("eyelink_manager", &"EyeLinkManager");
+            .field("frenz_process", &self.frenz_process);
         s.field(
             "device_status_subscribers",
             &self.device_status_tx.receiver_count(),
@@ -287,6 +265,7 @@ impl AppState {
         ));
         let frenz_process = Arc::new(FrenzProcessManager::new());
 
+        #[cfg(feature = "eyelink")]
         let eyelink_manager = Arc::new(crate::devices::eyelink::EyeLinkManager::new());
 
         // Create broadcast channel for device status events
@@ -301,8 +280,6 @@ impl AppState {
             registered_tickets: Arc::new(DashMap::new()),
             ticket_issued_at: Arc::new(DashMap::new()),
             finished_tickets: Arc::new(DashMap::new()),
-            metrics: Arc::new(RwLock::new(Metrics::default())),
-            performance_monitor: Arc::new(PerformanceMonitor::new()),
             start_time: Instant::now(),
             message_count: Arc::new(AtomicU64::new(0)),
             last_error: Arc::new(RwLock::new(None)),
@@ -312,6 +289,7 @@ impl AppState {
             lsl_inlets: inlet_manager,
             lsl_outlets: outlet_manager,
             recording: Arc::new(crate::recording::RecordingManager::default()),
+            #[cfg(feature = "eyelink")]
             eyelink_manager,
             device_status_tx,
         }
@@ -359,9 +337,6 @@ impl AppState {
         devices.insert(id.clone(), Arc::new(RwLock::new(device)));
         self.registered_tickets.insert(id.clone(), ticket);
         drop(devices);
-
-        // Add device to performance monitoring
-        self.performance_monitor.add_device(id).await;
     }
 
     /// Opportunistic registration (Kernel auto-reconnect on send). Registers
@@ -386,7 +361,6 @@ impl AppState {
         devices.insert(id.clone(), Arc::new(RwLock::new(device)));
         self.registered_tickets.insert(id.clone(), latest);
         drop(devices);
-        self.performance_monitor.add_device(id).await;
         Ok(())
     }
 
@@ -516,7 +490,6 @@ impl AppState {
         let replaced = devices.insert(id.clone(), Arc::new(RwLock::new(device)));
         self.registered_tickets.insert(id.clone(), ticket);
         drop(devices);
-        self.performance_monitor.add_device(id).await;
         Ok(replaced)
     }
 
@@ -533,7 +506,6 @@ impl AppState {
             Some(current) if Arc::ptr_eq(current, expected) => {
                 devices.remove(id);
                 drop(devices);
-                self.performance_monitor.remove_device(id).await;
                 true
             }
             _ => false,
@@ -543,9 +515,6 @@ impl AppState {
     pub async fn remove_device(&self, id: &str) -> Option<Arc<RwLock<BoxedDevice>>> {
         let mut devices = self.devices.write().await;
         let result = devices.remove(id);
-
-        // Remove device from performance monitoring
-        self.performance_monitor.remove_device(id).await;
 
         result
     }
@@ -591,16 +560,10 @@ impl AppState {
         };
 
         self.connections.insert(id, info);
-
-        // Record WebSocket connection in performance monitoring
-        self.performance_monitor.record_websocket_connection(true);
     }
 
     pub fn remove_connection(&self, id: &str) {
         self.connections.remove(id);
-
-        // Record WebSocket disconnection in performance monitoring
-        self.performance_monitor.record_websocket_connection(false);
     }
 
     pub fn update_connection_activity(&self, id: &str) {
@@ -614,19 +577,6 @@ impl AppState {
             entry.message_count += 1;
         }
     }
-
-    pub async fn update_metrics<F>(&self, updater: F)
-    where
-        F: FnOnce(&mut Metrics),
-    {
-        let mut metrics = self.metrics.write().await;
-        updater(&mut metrics);
-    }
-
-    pub async fn get_metrics(&self) -> Metrics {
-        self.metrics.read().await.clone()
-    }
-
     pub async fn cleanup_stale_connections(&self, max_idle_seconds: u64) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -656,9 +606,6 @@ impl AppState {
 
     pub fn increment_message_count(&self) {
         self.message_count.fetch_add(1, Ordering::Relaxed);
-
-        // Record bridge message in performance monitoring
-        self.performance_monitor.record_bridge_message();
     }
 
     pub async fn set_last_error(&self, error: Option<String>) {
@@ -670,37 +617,12 @@ impl AppState {
         self.last_error.read().await.clone()
     }
 
-    pub async fn get_device_metrics(&self, device_id: &str) -> Option<DeviceMetrics> {
-        let metrics = self.metrics.read().await;
-        metrics
-            .device_metrics
-            .iter()
-            .find(|m| m.device_id == device_id)
-            .cloned()
-    }
-
-    /// Record device operation with performance tracking
-    pub async fn record_device_operation(
-        &self,
-        device_id: &str,
-        latency: Duration,
-        bytes_sent: u64,
-        bytes_received: u64,
-    ) {
-        self.performance_monitor
-            .record_device_operation(device_id, latency, bytes_sent, bytes_received)
-            .await;
-    }
-
-    /// Record device error with performance tracking
+    /// Record a device error as the bridge's last error.
     pub async fn record_device_error(&self, device_id: &str, error_msg: &str) {
-        self.performance_monitor
-            .record_device_error(device_id, error_msg)
+        self.set_last_error(Some(format!("{device_id}: {error_msg}")))
             .await;
-        self.set_last_error(Some(error_msg.to_string())).await;
     }
 
-    /// Record device connection attempt with performance tracking
     /// Remember the payload that last connected `device_id` successfully.
     pub fn remember_connect_config(&self, device_id: &str, config: serde_json::Value) {
         self.last_connect_configs
@@ -713,38 +635,6 @@ impl AppState {
             .get(device_id)
             .map(|v| v.value().clone())
     }
-
-    pub async fn record_connection_attempt(&self, device_id: &str, success: bool) {
-        self.performance_monitor
-            .record_connection_attempt(device_id, success)
-            .await;
-    }
-
-    /// Get comprehensive performance metrics
-    pub async fn get_performance_metrics(&self) -> crate::performance::PerformanceMetrics {
-        self.performance_monitor.get_metrics().await
-    }
-
-    /// Get device-specific performance metrics
-    pub async fn get_device_performance_metrics(
-        &self,
-        device_id: &str,
-    ) -> Option<crate::performance::DevicePerformanceMetrics> {
-        self.performance_monitor.get_device_metrics(device_id).await
-    }
-
-    /// Get performance summary for monitoring dashboard
-    pub async fn get_performance_summary(&self) -> serde_json::Value {
-        self.performance_monitor.get_performance_summary().await
-    }
-
-    /// Check TTL latency compliance (<1ms)
-    pub async fn check_ttl_latency_compliance(&self, device_id: &str) -> Option<bool> {
-        self.performance_monitor
-            .check_ttl_latency_compliance(device_id)
-            .await
-    }
-
     /// Handle USB disconnect event for TTL device.
     ///
     /// This is called by the USB monitor when it detects that a TTL device

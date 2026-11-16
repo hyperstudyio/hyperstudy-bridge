@@ -8,7 +8,6 @@
 
 use hyperstudy_bridge::bridge::AppState;
 use hyperstudy_bridge::devices::{DeviceError, DeviceStatus, DeviceType};
-use hyperstudy_bridge::performance::PerformanceMonitor;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -67,7 +66,6 @@ pub struct TestHarness {
     pub app_state: Arc<AppState>,
 
     /// Performance monitor for metrics
-    pub performance_monitor: Arc<PerformanceMonitor>,
 
     /// IDs of devices added by this harness (for cleanup)
     pub devices: Vec<String>,
@@ -80,11 +78,9 @@ impl TestHarness {
     /// Create a new test harness
     pub async fn new() -> Self {
         let app_state = Arc::new(AppState::new());
-        let performance_monitor = app_state.performance_monitor.clone();
 
         Self {
             app_state,
-            performance_monitor,
             devices: Vec::new(),
             temp_files: Vec::new(),
         }

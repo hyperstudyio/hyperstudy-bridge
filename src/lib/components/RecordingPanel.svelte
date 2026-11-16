@@ -26,6 +26,7 @@
   let searching = $state(false);
   let manualOpen = $state(false);
   let recoveredPath = $state('');
+  let confirmingStudyStop = $state(false);
 
   // Study and manual recordings share one recorder, so its status alone cannot say whose recording it is. The
   // study registry can: a recorder file that belongs to a listed study is that study's.
@@ -168,6 +169,14 @@
     });
   }
 
+  // Stops a study's recording from Bridge (the study hung or the participant left). Bridge looks the study up by id.
+  async function stopStudy(recordingId) {
+    await action(async () => {
+      await invoke('stop_study_recording', { recordingId });
+      confirmingStudyStop = false;
+    });
+  }
+
   async function reveal(recordingId = null) {
     await action(() => invoke('reveal_recording', { recordingId }));
   }
@@ -268,10 +277,27 @@
           <div class="rec-live-text">
             <strong>Study recording</strong>
             <span
-              >{plural(liveStudy.committed_samples, 'sample')} saved. HyperStudy stops it when the study
+              >{plural(liveStudy.committed_samples, 'sample')} saved. Hyperstudy stops it when the study
               ends.</span
             >
           </div>
+          {#if confirmingStudyStop}
+            <div class="rec-confirm">
+              <span>Stop and save this study's recording?</span>
+              <button
+                class="rec-stop"
+                onclick={() => stopStudy(liveStudy.recording_id)}
+                disabled={busy}>Stop and save</button
+              >
+              <button class="rec-keep" onclick={() => (confirmingStudyStop = false)}
+                >Keep recording</button
+              >
+            </div>
+          {:else}
+            <button class="rec-stop" onclick={() => (confirmingStudyStop = true)}
+              >Stop recording</button
+            >
+          {/if}
         </div>
       {/if}
 
@@ -283,7 +309,7 @@
         <section aria-labelledby="study-title">
           <h3 id="study-title">Study recordings</h3>
           <p class="rec-lede">
-            HyperStudy records connected devices during a study and uploads the file when the study
+            Hyperstudy records connected devices during a study and uploads the file when the study
             ends. The file stays on this Mac too.
           </p>
 
@@ -334,7 +360,7 @@
           {/if}
           {#if newestFirst.some(s => s.upload_status === 'pending')}
             <p class="rec-hint">
-              To upload a waiting recording, open its study in HyperStudy again with Bridge running.
+              To upload a waiting recording, open its study in Hyperstudy again with Bridge running.
             </p>
           {/if}
         </section>
@@ -541,6 +567,21 @@
   .rec-live-text strong {
     font-size: 0.9375rem;
     color: var(--color-text-primary);
+  }
+  .rec-confirm {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8125rem;
+    color: var(--color-text-primary);
+  }
+  .rec-keep {
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    background: transparent;
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-border);
   }
   .rec-stop {
     padding: 0.5rem 1rem;

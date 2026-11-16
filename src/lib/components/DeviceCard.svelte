@@ -197,16 +197,6 @@
       return;
     }
 
-    // Route EyeLink to dedicated handlers (uses custom WebSocket actions)
-    if (deviceId === 'eyelink') {
-      if (currentStatus !== 'connected' && currentStatus !== 'connecting') {
-        return handleEyeLinkConnect();
-      } else if (currentStatus === 'connected') {
-        return handleEyeLinkDisconnect();
-      }
-      return;
-    }
-
     // Allow connection from disconnected, error, or unknown status
     if (currentStatus !== 'connected' && currentStatus !== 'connecting') {
       console.log(`Connecting ${deviceName}...`);
@@ -255,34 +245,6 @@
         console.error(`Failed to disconnect ${deviceName}:`, error);
         alert(`Failed to disconnect: ${error.message || error}`);
       }
-    }
-  }
-
-  // EyeLink connect: uses custom WebSocket action
-  async function handleEyeLinkConnect() {
-    isConnecting = true;
-    connectPhaseText = 'Connecting to EyeLink tracker...';
-
-    try {
-      const result = await bridgeStore.connectEyeLink(device.config);
-      console.log('Successfully connected EyeLink', result);
-    } catch (error) {
-      console.error('Failed to connect EyeLink:', error);
-      alert(`Failed to connect: ${error.message || error}`);
-    } finally {
-      isConnecting = false;
-      connectPhaseText = '';
-    }
-  }
-
-  // EyeLink disconnect: uses custom WebSocket action
-  async function handleEyeLinkDisconnect() {
-    try {
-      await bridgeStore.disconnectEyeLink();
-      console.log('Successfully disconnected EyeLink');
-    } catch (error) {
-      console.error('Failed to disconnect EyeLink:', error);
-      alert(`Failed to disconnect: ${error.message || error}`);
     }
   }
 
@@ -431,13 +393,8 @@
       // If the device was connected, reconnect with new config
       // disconnectDevice properly awaits completion, so no arbitrary delay needed
       if (wasConnected && deviceId !== 'frenz') {
-        if (deviceId === 'eyelink') {
-          await bridgeStore.disconnectEyeLink();
-          await bridgeStore.connectEyeLink(newConfig);
-        } else {
-          await bridgeStore.disconnectDevice(deviceId);
-          await bridgeStore.connectDevice(deviceId, newConfig);
-        }
+        await bridgeStore.disconnectDevice(deviceId);
+        await bridgeStore.connectDevice(deviceId, newConfig);
       }
 
       console.log(`Configuration saved successfully for ${deviceName}`);
@@ -568,15 +525,6 @@
           </div>
         {/if}
       {/if}
-    {:else if device.id === 'eyelink'}
-      <div class="config-row">
-        <span class="label">IP:</span>
-        <span class="value">{device.config.ip || 'Not configured'}</span>
-      </div>
-      <div class="config-row">
-        <span class="label">Sample Rate:</span>
-        <span class="value">{device.config.sample_rate || 1000} Hz</span>
-      </div>
     {:else if device.id === 'frenz'}
       <div class="config-row">
         <span class="label">Device ID:</span>

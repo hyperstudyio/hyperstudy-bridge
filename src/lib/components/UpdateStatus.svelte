@@ -104,4 +104,4 @@
   }
 </script>
 
-<p>Version: {appVersion}</p>
+<p>Hyperstudy Device Bridge {appVersion}</p>

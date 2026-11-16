@@ -65,7 +65,6 @@ pub mod prelude {
     pub use hyperstudy_bridge::devices::{
         Device, DeviceConfig, DeviceError, DeviceInfo, DeviceStatus, DeviceType,
     };
-    pub use hyperstudy_bridge::performance::PerformanceMonitor;
 
     // Common standard library types
     pub use std::sync::Arc;
@@ -78,12 +77,10 @@ pub mod prelude {
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use hyperstudy_bridge::bridge::state::Metrics;
 use hyperstudy_bridge::bridge::{AppState, BridgeCommand, BridgeResponse, BridgeServer};
 use hyperstudy_bridge::devices::{
     Device, DeviceConfig, DeviceError, DeviceInfo, DeviceStatus, DeviceType,
 };
-use hyperstudy_bridge::performance::PerformanceMonitor;
 use rand::Rng;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -270,7 +267,6 @@ impl MemoryTracker {
 #[deprecated(note = "Use TestHarness instead - it has explicit async cleanup")]
 pub struct TestFixture {
     pub app_state: Arc<AppState>,
-    pub performance_monitor: Arc<PerformanceMonitor>,
     pub temp_devices: Vec<String>,
     pub temp_files: Vec<String>,
 }
@@ -279,11 +275,9 @@ pub struct TestFixture {
 impl TestFixture {
     pub async fn new() -> Self {
         let app_state = Arc::new(AppState::new());
-        let performance_monitor = app_state.performance_monitor.clone();
 
         Self {
             app_state,
-            performance_monitor,
             temp_devices: Vec::new(),
             temp_files: Vec::new(),
         }

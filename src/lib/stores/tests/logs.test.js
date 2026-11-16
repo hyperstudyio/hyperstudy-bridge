@@ -4,7 +4,6 @@ import {
   LogEntry,
   getLogs,
   getMaxLogs,
-  getAutoScroll,
   getIsListening,
   getLastError,
   getLevelFilter,
@@ -23,7 +22,6 @@ import {
   setLevelFilter,
   setDeviceFilter,
   setSearchQuery,
-  setAutoScroll,
   setMaxLogs,
 } from '../logs.svelte.js';
 
@@ -51,7 +49,6 @@ describe('Logs Store', () => {
     setLevelFilter('all');
     setDeviceFilter('all');
     setSearchQuery('');
-    setAutoScroll(true);
     setMaxLogs(1000);
 
     // Stop any active event listeners
@@ -117,7 +114,6 @@ describe('Logs Store', () => {
     it('has correct initial state', () => {
       expect(getLogs()).toEqual([]);
       expect(getMaxLogs()).toBe(1000);
-      expect(getAutoScroll()).toBe(true);
       expect(getIsListening()).toBe(false);
       expect(getLastError()).toBeNull();
       expect(getLevelFilter()).toBe('all');
@@ -288,6 +284,75 @@ describe('Logs Store', () => {
       const filtered = getFilteredLogs();
 
       expect(filtered).toHaveLength(5);
+    });
+  });
+
+  // The viewer holds one page of a log database that can have thousands of entries. Filtering only that page hid
+  // most matches, and live entries briefly showed through an active filter.
+  describe('Filters apply to the whole log', () => {
+    const page = logs => ({
+      success: true,
+      data: { logs, total_count: logs.length, has_more: false },
+    });
+    // Answers by filter, like the database: only the query for `level` returns `rows`.
+    const answer = async (level, rows) => {
+      const { queryLogs } = await import('../../services/tauri.js');
+      queryLogs.mockImplementation(async options => page(options.level === level ? rows : []));
+      return queryLogs;
+    };
+    afterEach(async () => {
+      const { queryLogs } = await import('../../services/tauri.js');
+      queryLogs.mockReset();
+    });
+
+    it('a level filter fetches matching entries from the whole log database', async () => {
+      const queryLogs = await answer('error', [
+        {
+          level: 'error',
+          message: 'error from an hour ago',
+          timestamp: '2026-11-16T14:00:00Z',
+          device: null,
+          source: 'bridge',
+        },
+      ]);
+      setLevelFilter('error');
+      await vi.waitFor(() =>
+        expect(queryLogs).toHaveBeenCalledWith(
+          expect.objectContaining({ level: 'error', offset: 0 })
+        )
+      );
+      await vi.waitFor(() =>
+        expect(getFilteredLogs().map(entry => entry.message)).toEqual(['error from an hour ago'])
+      );
+    });
+
+    it('changing a filter keeps live entries the database has not saved yet', async () => {
+      await answer('warn', [
+        {
+          level: 'warn',
+          message: 'saved a minute ago',
+          timestamp: new Date(Date.now() - 60000).toISOString(),
+          device: null,
+          source: 'bridge',
+        },
+      ]);
+      log('warn', 'just now, not saved yet');
+      setLevelFilter('warn');
+      await vi.waitFor(() =>
+        expect(getFilteredLogs().map(entry => entry.message)).toEqual([
+          'just now, not saved yet',
+          'saved a minute ago',
+        ])
+      );
+    });
+
+    it('a new live entry that does not match the active filter never shows', async () => {
+      await answer('error', []);
+      setLevelFilter('error');
+      log('info', 'routine message');
+      expect(getFilteredLogs().map(entry => entry.message)).not.toContain('routine message');
+      log('error', 'new failure');
+      expect(getFilteredLogs().map(entry => entry.message)).toContain('new failure');
     });
   });
 
@@ -673,14 +738,6 @@ describe('Logs Store', () => {
 
       setSearchQuery('');
       expect(getSearchQuery()).toBe('');
-    });
-
-    it('updates auto-scroll setting', () => {
-      setAutoScroll(false);
-      expect(getAutoScroll()).toBe(false);
-
-      setAutoScroll(true);
-      expect(getAutoScroll()).toBe(true);
     });
 
     it('updates max logs limit', () => {

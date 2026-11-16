@@ -23,52 +23,33 @@ use common::prelude::*;
 mod websocket_server_tests {
     use super::*;
 
+    /// Starts a Bridge server on a free port (never 9000, where a running Bridge may listen) and returns its URL.
+    async fn start_test_server(harness: &TestHarness) -> (String, tokio::task::JoinHandle<()>) {
+        let app = tauri::test::mock_app();
+        let mut bridge_server = BridgeServer::new(harness.app_state.clone(), app.handle().clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            let _app = app; // keep the mock app alive for the server's lifetime
+            let _ = bridge_server.serve(listener).await;
+        });
+        (url, handle)
+    }
+
     #[tokio::test]
-    #[ignore = "Requires exclusive port access - run with --ignored for serial execution"]
     async fn test_websocket_server_startup() -> TestResult<()> {
         let harness = TestHarness::new().await;
+        let (ws_url, server_handle) = start_test_server(&harness).await;
 
-        // Create a mock Tauri app handle
-        let app = tauri::test::mock_app();
-        let app_handle = app.handle().clone();
+        let client = timeout(
+            Duration::from_secs(5),
+            TestWebSocketClient::connect(&ws_url),
+        )
+        .await
+        .expect("connecting to the test server timed out")?;
+        assert!(client.is_connected());
+        client.close().await?;
 
-        // Create bridge server
-        let mut bridge_server = BridgeServer::new(harness.app_state.clone(), app_handle);
-
-        // Start server in background
-        let server_handle = tokio::spawn(async move {
-            // Use a different port for testing to avoid conflicts
-            bridge_server.start().await
-        });
-
-        // Give server time to start
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Test connection to server
-        let ws_url = "ws://127.0.0.1:9000";
-        let connection_result = timeout(Duration::from_secs(5), async {
-            TestWebSocketClient::connect(ws_url).await
-        })
-        .await;
-
-        match connection_result {
-            Ok(Ok(client)) => {
-                assert!(client.is_connected());
-                client.close().await?;
-            }
-            Ok(Err(e)) => {
-                // Connection might fail if port is already in use or server isn't ready
-                println!(
-                    "WebSocket connection failed (expected in some test environments): {}",
-                    e
-                );
-            }
-            Err(_) => {
-                println!("WebSocket connection timed out (expected in some test environments)");
-            }
-        }
-
-        // Clean up
         server_handle.abort();
         harness.cleanup().await
     }
@@ -89,34 +70,18 @@ mod websocket_server_tests {
     }
 
     #[tokio::test]
-    #[ignore = "Requires exclusive port access - run with --ignored for serial execution"]
     async fn test_server_graceful_shutdown() -> TestResult<()> {
         let harness = TestHarness::new().await;
-        let app = tauri::test::mock_app();
-        let app_handle = app.handle().clone();
+        let (ws_url, server_handle) = start_test_server(&harness).await;
 
-        let mut bridge_server = BridgeServer::new(harness.app_state.clone(), app_handle);
-
-        // Start server
-        let server_handle = tokio::spawn(async move { bridge_server.start().await });
-
-        // Give server time to start
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Shutdown server
         server_handle.abort();
+        let _ = server_handle.await; // the listener is dropped once the task has ended
 
-        // Wait for shutdown
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Verify server is no longer accepting connections
-        let ws_url = "ws://127.0.0.1:9000";
-        let connection_result = timeout(Duration::from_millis(500), async {
-            TestWebSocketClient::connect(ws_url).await
-        })
+        let connection_result = timeout(
+            Duration::from_millis(500),
+            TestWebSocketClient::connect(&ws_url),
+        )
         .await;
-
-        // Connection should fail or timeout since server is shut down
         assert!(
             connection_result.is_err() || connection_result.unwrap().is_err(),
             "Server should not accept connections after shutdown"
@@ -394,47 +359,6 @@ mod client_connection_tests {
 
         harness.cleanup().await
     }
-
-    #[tokio::test]
-    async fn test_connection_metrics_tracking() -> TestResult<()> {
-        let harness = TestHarness::new().await;
-
-        // Test performance monitor connection tracking
-        let initial_connections = harness
-            .performance_monitor
-            .system_counters
-            .active_connections
-            .load(std::sync::atomic::Ordering::Relaxed);
-
-        // Simulate connection events
-        harness
-            .performance_monitor
-            .record_websocket_connection(true); // Connect
-        harness
-            .performance_monitor
-            .record_websocket_connection(true); // Another connect
-
-        let after_connects = harness
-            .performance_monitor
-            .system_counters
-            .active_connections
-            .load(std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(after_connects, initial_connections + 2);
-
-        // Simulate disconnection
-        harness
-            .performance_monitor
-            .record_websocket_connection(false); // Disconnect
-
-        let after_disconnect = harness
-            .performance_monitor
-            .system_counters
-            .active_connections
-            .load(std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(after_disconnect, initial_connections + 1);
-
-        harness.cleanup().await
-    }
 }
 
 /// Test suite for message throughput testing
@@ -456,7 +380,6 @@ mod throughput_tests {
 
         while start_time.elapsed() < test_duration {
             // Simulate message processing
-            harness.performance_monitor.record_bridge_message();
             message_count += 1;
 
             // Small delay to prevent spinning
@@ -653,48 +576,6 @@ mod bridge_error_handling_tests {
     }
 
     #[tokio::test]
-    async fn test_device_error_propagation() -> TestResult<()> {
-        let mut harness = TestHarness::new().await;
-
-        // Add an unreliable device
-        let device_id = harness.add_unreliable_device(DeviceType::TTL, 1.0).await; // 100% error rate
-
-        // Test that device errors are properly recorded
-        harness
-            .performance_monitor
-            .add_device(device_id.clone())
-            .await;
-
-        // Attempt operations that will fail
-        for _ in 0..5 {
-            if let Some(device_lock) = harness.app_state.get_device(&device_id).await {
-                let mut device = device_lock.write().await;
-                if let Err(e) = device.connect().await {
-                    harness
-                        .performance_monitor
-                        .record_device_error(&device_id, &e.to_string())
-                        .await;
-                }
-            }
-        }
-
-        // Verify errors were recorded
-        let metrics = harness
-            .performance_monitor
-            .get_device_metrics(&device_id)
-            .await;
-        assert!(metrics.is_some());
-
-        let device_metrics = metrics.unwrap();
-        assert!(
-            device_metrics.errors > 0,
-            "No errors recorded despite high error rate"
-        );
-
-        harness.cleanup().await
-    }
-
-    #[tokio::test]
     async fn test_bridge_state_consistency_under_errors() -> TestResult<()> {
         let mut harness = TestHarness::new().await;
 
@@ -766,61 +647,6 @@ mod bridge_error_handling_tests {
 
         harness.cleanup().await
     }
-
-    #[tokio::test]
-    async fn test_performance_monitoring_under_errors() -> TestResult<()> {
-        let mut harness = TestHarness::new().await;
-
-        // Add device to performance monitoring
-        let device_id = harness.add_unreliable_device(DeviceType::TTL, 0.5).await;
-        harness
-            .performance_monitor
-            .add_device(device_id.clone())
-            .await;
-
-        // Perform operations with mixed success/failure
-        for _ in 0..50 {
-            let start = Instant::now();
-            if let Some(device_lock) = harness.app_state.get_device(&device_id).await {
-                let mut device = device_lock.write().await;
-                match device.send(b"test").await {
-                    Ok(_) => {
-                        let latency = start.elapsed();
-                        harness
-                            .performance_monitor
-                            .record_device_operation(&device_id, latency, 4, 0)
-                            .await;
-                    }
-                    Err(e) => {
-                        harness
-                            .performance_monitor
-                            .record_device_error(&device_id, &e.to_string())
-                            .await;
-                    }
-                }
-            }
-        }
-
-        // Verify performance monitoring handles mixed success/failure correctly
-        let metrics = harness
-            .performance_monitor
-            .get_device_metrics(&device_id)
-            .await;
-        assert!(metrics.is_some());
-
-        let device_metrics = metrics.unwrap();
-        assert!(
-            device_metrics.messages_sent > 0 || device_metrics.errors > 0,
-            "Should have recorded either successful operations or errors"
-        );
-
-        println!(
-            "Mixed operations: {} successful, {} errors",
-            device_metrics.messages_sent, device_metrics.errors
-        );
-
-        harness.cleanup().await
-    }
 }
 
 /// Test suite for bridge query operations
@@ -867,40 +693,6 @@ mod bridge_query_tests {
             assert_eq!(device_info.device_type, DeviceType::TTL);
             assert_eq!(device_info.status, DeviceStatus::Disconnected);
         }
-
-        harness.cleanup().await
-    }
-
-    #[tokio::test]
-    async fn test_metrics_query() -> TestResult<()> {
-        let mut harness = TestHarness::new().await;
-
-        // Add device and perform some operations
-        let device_id = harness.add_connected_device(DeviceType::TTL).await?;
-        harness
-            .performance_monitor
-            .add_device(device_id.clone())
-            .await;
-
-        // Perform operations
-        if let Some(device_lock) = harness.app_state.get_device(&device_id).await {
-            let mut device = device_lock.write().await;
-
-            for _ in 0..5 {
-                device.send(b"test").await?;
-                harness
-                    .performance_monitor
-                    .record_device_operation(&device_id, Duration::from_millis(1), 4, 0)
-                    .await;
-            }
-        }
-
-        // Query metrics
-        let metrics = harness.app_state.get_performance_metrics().await;
-        assert!(metrics.devices.contains_key(&device_id));
-
-        let device_metrics = &metrics.devices[&device_id];
-        assert_eq!(device_metrics.messages_sent, 5);
 
         harness.cleanup().await
     }

@@ -183,7 +183,7 @@ pub fn recover(path: &Path) -> Result<PathBuf> {
     let version: i32 = source.pragma_query_value(None, "user_version", |r| r.get(0))?;
     ensure!(
         app == APPLICATION_ID && version == 1,
-        "Not a supported HyperStudy recording"
+        "Not a supported Hyperstudy recording"
     );
     let integrity: String = source.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
     ensure!(integrity == "ok", "Recording integrity check failed");

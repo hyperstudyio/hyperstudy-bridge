@@ -85,6 +85,17 @@ impl StudyRegistry {
         Ok(())
     }
 }
+/// Reads one `*.session.json` and checks it describes a recording in `directory`.
+fn load_session(path: &std::path::Path, directory: &std::path::Path) -> Result<StudySession> {
+    let session: StudySession = serde_json::from_slice(&std::fs::read(path)?)?;
+    uuid::Uuid::parse_str(&session.recording_id)?;
+    ensure!(
+        session.recording.path == Some(directory.join(format!("{}.sqlite", session.recording_id))),
+        "Invalid managed recording path"
+    );
+    Ok(session)
+}
+
 impl RecordingManager {
     /// Called once during app setup; capabilities are deliberately absent from disk.
     pub fn configure_study_directory(&self, directory: PathBuf) -> Result<()> {
@@ -103,13 +114,17 @@ impl RecordingManager {
             {
                 continue;
             }
-            let mut session: StudySession = serde_json::from_slice(&std::fs::read(&path)?)?;
-            uuid::Uuid::parse_str(&session.recording_id)?;
-            ensure!(
-                session.recording.path
-                    == Some(directory.join(format!("{}.sqlite", session.recording_id))),
-                "Invalid managed recording path"
-            );
+            // One bad file must not stop Bridge from starting: skip it, say so, and leave it on disk for inspection.
+            let mut session = match load_session(&path, &directory) {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::warn!(
+                        "Skipped an unreadable study recording file {}: {error:#}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
             if active(&session.recording.state) {
                 // A process restart cannot resume native acquisition. Retain WAL and
                 // original file; local recovery is explicit and creates a new file.
@@ -124,7 +139,12 @@ impl RecordingManager {
                 session.upload_error =
                     Some("Bridge restarted; fresh upload authorization is required".into());
             }
-            registry.persist(&session)?;
+            if let Err(error) = registry.persist(&session) {
+                tracing::warn!(
+                    "Couldn't update study recording file {}: {error:#}",
+                    path.display()
+                );
+            }
             registry
                 .sessions
                 .insert(session.recording_id.clone(), session);
@@ -142,10 +162,34 @@ impl RecordingManager {
         {
             return Ok(session.clone());
         }
-        ensure!(
-            !active(&self.status().state),
-            "Another recording is active; reconnect with its study identity or stop locally"
-        );
+        // One study records at a time on a station (one band, one participant). A study that is still recording here
+        // but is not the one asking was abandoned: its boot failed, its tab closed, or it crashed without stopping.
+        // Save it and record the new study, rather than blocking every later study until Bridge is quit. A recording
+        // started in Bridge's own window is the operator's and is never cut off.
+        let current = self.status();
+        if active(&current.state) {
+            let abandoned = registry
+                .sessions
+                .values()
+                .find(|s| active(&s.recording.state) && s.recording.path == current.path)
+                .cloned();
+            let Some(abandoned) = abandoned else {
+                anyhow::bail!(
+                    "A recording started in Bridge is running. Stop it in Bridge's Recordings panel, then try again."
+                );
+            };
+            tracing::info!(
+                "Saving study recording {} (room {:?}): a different study on this station started recording",
+                abandoned.recording_id,
+                abandoned.context.room_id
+            );
+            let signal = StopSignal::new(RecordingStopRequest {
+                boundaries: vec![],
+                timeout_ms: 0,
+            });
+            let stopped = self.stop_signal_scoped(signal, abandoned.recording.path.as_deref())?;
+            registry.refresh(&stopped)?;
+        }
         let directory = registry
             .directory
             .clone()
@@ -235,6 +279,22 @@ impl RecordingManager {
             })
             .cloned())
     }
+    /// Stops a study recording from Bridge's own window. The operator names it by id; its study identity comes from
+    /// Bridge's records, so nothing the page supplies decides what is stopped.
+    pub fn stop_study_locally(&self, recording_id: &str) -> Result<StudySession> {
+        let context = self
+            .list_studies()?
+            .into_iter()
+            .find(|s| s.recording_id == recording_id)
+            .map(|s| s.context)
+            .context("That study recording is no longer listed")?;
+        self.stop_study(StudyScope {
+            recording_id: recording_id.to_string(),
+            context,
+            end_marker: None,
+        })
+    }
+
     pub fn stop_study(&self, request: StudyScope) -> Result<StudySession> {
         validate_context(&request.context)?;
         let mut registry = self.study.lock().unwrap();
@@ -383,6 +443,30 @@ impl RecordingManager {
         let session = session.clone();
         registry.persist(&session)?;
         Ok(session)
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    /// One unreadable session file (truncated by a crash, from an older version, edited by hand) made app setup fail,
+    /// so Bridge would not open at all.
+    #[test]
+    fn an_unreadable_session_file_is_skipped_not_fatal() {
+        let directory =
+            std::env::temp_dir().join(format!("bridge-sessions-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let corrupt = directory.join("broken.session.json");
+        std::fs::write(&corrupt, b"{ not json").unwrap();
+
+        let manager = RecordingManager::default();
+        manager
+            .configure_study_directory(directory.clone())
+            .expect("a bad session file must not stop Bridge from starting");
+        assert!(manager.list_studies().unwrap().is_empty());
+        assert!(corrupt.exists(), "the file is kept for inspection");
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }
 

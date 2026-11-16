@@ -9,18 +9,14 @@
 
   // Reactive state from store - use $derived.by for computed values
   const logs = $derived.by(() => logsStore.getFilteredLogs());
-  const logCounts = $derived.by(() => logsStore.getLogCounts());
   const deviceList = $derived.by(() => logsStore.getDeviceList());
-  const autoScroll = $derived.by(() => logsStore.getAutoScroll());
   const isQuerying = $derived.by(() => logsStore.getIsQuerying());
   const dbTotalCount = $derived.by(() => logsStore.getDbTotalCount());
   const dbHasMore = $derived.by(() => logsStore.getDbHasMore());
-  const totalCount = $derived.by(() => logsStore.getTotalCount());
 
   // Local state
   let isExporting = $state(false);
   let isClearing = $state(false);
-  let showFilters = $state(false);
   let searchQuery = $state(logsStore.getSearchQuery());
   let levelFilter = $state(logsStore.getLevelFilter());
   let deviceFilter = $state(logsStore.getDeviceFilter());
@@ -87,9 +83,21 @@
     });
   }
 
-  // Toggle auto-scroll
-  function toggleAutoScroll() {
-    logsStore.setAutoScroll(!autoScroll);
+  // Most important first; "All" shows every level.
+  const LEVELS = [
+    { value: 'all', label: 'All' },
+    { value: 'error', label: 'Errors' },
+    { value: 'warn', label: 'Warnings' },
+    { value: 'info', label: 'Info' },
+    { value: 'debug', label: 'Debug' },
+  ];
+  const filtered = $derived(
+    levelFilter !== 'all' || deviceFilter !== 'all' || searchQuery.trim() !== ''
+  );
+
+  function chooseLevel(level) {
+    levelFilter = level;
+    logsStore.setLevelFilter(level);
   }
 
   // Clear ALL logs from database
@@ -169,58 +177,14 @@
     >
       <div class="log-header">
         <div class="log-title">
-          <h2>Log Viewer</h2>
-          <div class="log-stats">
-            <span class="stat">Total: {dbTotalCount}</span>
-            <span class="stat">Showing: {logs.length}</span>
-            {#if logCounts.error > 0}
-              <span class="stat error">Errors: {logCounts.error}</span>
-            {/if}
-            {#if logCounts.warn > 0}
-              <span class="stat warn">Warnings: {logCounts.warn}</span>
-            {/if}
-          </div>
+          <h2>Logs</h2>
+          <p class="log-stats">
+            {dbTotalCount.toLocaleString()}
+            {filtered ? 'matching entries' : 'entries'}
+          </p>
         </div>
 
         <div class="log-controls">
-          <button
-            class="control-btn"
-            class:active={showFilters}
-            onclick={() => (showFilters = !showFilters)}
-            aria-label="Toggle filters"
-            title="Toggle filters"
-          >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <polygon points="22,3 2,3 10,12.46 10,19 14,21 14,12.46 22,3"></polygon>
-            </svg>
-          </button>
-
-          <button
-            class="control-btn"
-            class:active={autoScroll}
-            onclick={toggleAutoScroll}
-            aria-label="Auto-scroll to bottom"
-            title="Auto-scroll to bottom"
-          >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path d="M12 5v14M5 12l7 7 7-7"></path>
-            </svg>
-          </button>
-
           <button
             class="control-btn danger-btn"
             onclick={handleClearDatabase}
@@ -310,60 +274,52 @@
         </div>
       </div>
 
-      <!-- Filters Panel -->
-      {#if showFilters}
-        <div class="filters-panel">
-          <div class="filter-group">
-            <label for="log-search">Search:</label>
-            <input
-              id="log-search"
-              type="text"
-              bind:value={searchQuery}
-              oninput={e => logsStore.setSearchQuery(e.target.value)}
-              placeholder="Search logs..."
-              class="search-input"
-            />
-          </div>
-
-          <div class="filter-group">
-            <label for="log-level">Level:</label>
-            <select
-              id="log-level"
-              bind:value={levelFilter}
-              onchange={e => logsStore.setLevelFilter(e.target.value)}
-              class="filter-select"
+      <div class="log-toolbar">
+        <input
+          type="search"
+          bind:value={searchQuery}
+          oninput={e => logsStore.setSearchQuery(e.target.value)}
+          placeholder="Search messages"
+          aria-label="Search logs"
+          class="search-input"
+        />
+        <div class="level-chips" role="group" aria-label="Level">
+          {#each LEVELS as level (level.value)}
+            <button
+              type="button"
+              class="level-chip"
+              aria-pressed={levelFilter === level.value}
+              onclick={() => chooseLevel(level.value)}
             >
-              <option value="all">All Levels</option>
-              <option value="debug">Debug</option>
-              <option value="info">Info</option>
-              <option value="warn">Warning</option>
-              <option value="error">Error</option>
-            </select>
-          </div>
-
-          <div class="filter-group">
-            <label for="log-device">Device:</label>
-            <select
-              id="log-device"
-              bind:value={deviceFilter}
-              onchange={e => logsStore.setDeviceFilter(e.target.value)}
-              class="filter-select"
-            >
-              <option value="all">All Devices</option>
-              {#each deviceList as device}
-                <option value={device}>{device}</option>
-              {/each}
-            </select>
-          </div>
+              {level.label}
+            </button>
+          {/each}
         </div>
-      {/if}
+        {#if deviceList.length > 0}
+          <select
+            bind:value={deviceFilter}
+            onchange={e => logsStore.setDeviceFilter(e.target.value)}
+            aria-label="Device"
+            class="filter-select"
+          >
+            <option value="all">All devices</option>
+            {#each deviceList as device (device)}
+              <option value={device}>{device}</option>
+            {/each}
+          </select>
+        {/if}
+      </div>
 
       <!-- Log Content - Now using VirtualLogList for performance -->
       <div class="log-content">
         {#if logs.length === 0}
           <div class="empty-logs">
-            <p>No logs to display</p>
-            <p class="hint">Logs will appear here as they are generated</p>
+            {#if filtered}
+              <p>No entries match these filters</p>
+            {:else}
+              <p>No logs yet</p>
+              <p class="hint">Entries appear here as Bridge runs</p>
+            {/if}
           </div>
         {:else}
           <VirtualLogList
@@ -394,7 +350,7 @@
                 </div>
               {:else if dbHasMore}
                 <button class="load-more-btn" onclick={loadMore}>
-                  Load more ({dbTotalCount - logs.length} remaining)
+                  Load more ({(dbTotalCount - logs.length).toLocaleString()} more)
                 </button>
               {/if}
             </div>
@@ -453,24 +409,9 @@
   }
 
   .log-stats {
-    display: flex;
-    gap: 1rem;
-    margin-top: 0.5rem;
+    margin: 0.25rem 0 0;
     font-size: 0.875rem;
-  }
-
-  .stat {
     color: var(--color-text-secondary);
-  }
-
-  .stat.error {
-    color: var(--color-error);
-    font-weight: 500;
-  }
-
-  .stat.warn {
-    color: var(--color-warning);
-    font-weight: 500;
   }
 
   .log-controls {
@@ -496,12 +437,6 @@
     background: var(--color-surface-elevated);
     border-color: var(--color-border-hover);
     color: var(--color-text-primary);
-  }
-
-  .control-btn.active {
-    background: var(--color-primary);
-    border-color: var(--color-primary);
-    color: white;
   }
 
   .control-btn:disabled {
@@ -540,24 +475,53 @@
     color: white;
   }
 
-  .filters-panel {
+  .log-toolbar {
     display: flex;
-    gap: 1.5rem;
-    padding: 1rem 2rem;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 2rem;
     background: var(--color-background);
     border-bottom: 1px solid var(--color-border);
   }
 
-  .filter-group {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
+  .log-toolbar .search-input {
+    flex: 1 1 14rem;
   }
 
-  .filter-group label {
-    font-size: 0.875rem;
-    font-weight: 500;
+  .level-chips {
+    display: flex;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .level-chip {
+    padding: 0.45rem 0.8rem;
+    border: none;
+    border-left: 1px solid var(--color-border);
+    background: var(--color-surface);
     color: var(--color-text-secondary);
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+
+  .level-chip:first-child {
+    border-left: none;
+  }
+
+  .level-chip:hover {
+    color: var(--color-text-primary);
+  }
+
+  .level-chip[aria-pressed='true'] {
+    background: var(--color-primary);
+    color: white;
+  }
+
+  .level-chip:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -2px;
   }
 
   .search-input,

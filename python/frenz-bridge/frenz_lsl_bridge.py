@@ -201,10 +201,7 @@ def main():
         publisher.poll(streamer, publish, pylsl.local_clock())
     except BaseException as error:
         failed = True
-        # Allowlist a known SDK error; never expose arbitrary exception text.
-        reason = ('The Earable SDK rejected the product key.'
-                  if 'invalid product key' in str(error).lower()
-                  else f'FRENZ failed during {phase} ({type(error).__name__}).')
+        reason = failure_reason(error, phase)
         if packet_tap is not None and packet_tap.failure is not None:
             reason = packet_tap.failure  # Fixed allowlisted capture error, no vendor text.
         if isinstance(error, (StreamResourceError, BluetoothPermissionError)):
@@ -227,6 +224,17 @@ def main():
             emit({'status':'stopped'})
     if failed:
         raise SystemExit(1)
+
+
+KEY_REJECTED = ('The Earable SDK rejected the product key. Re-enter it under Configure '
+                '(the installed and development Bridge apps keep separate keys).')
+
+
+def failure_reason(error, phase):
+    """The message shown for a failure: a known SDK error, or the phase. Never arbitrary exception text."""
+    if 'invalid product key' in str(error).lower():
+        return KEY_REJECTED
+    return f'FRENZ failed during {phase} ({type(error).__name__}).'
 
 
 if __name__ == '__main__':

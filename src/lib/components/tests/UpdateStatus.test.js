@@ -37,7 +37,7 @@ describe('UpdateStatus', () => {
   it('shows only the version in the footer; an up-to-date launch says nothing else', async () => {
     backend({ state: 'up_to_date', version: '0.8.28' });
     render(UpdateStatus, { appVersion: '0.8.28' });
-    expect(screen.getByText('Version: 0.8.28')).toBeInTheDocument();
+    expect(screen.getByText('Hyperstudy Device Bridge 0.8.28')).toBeInTheDocument();
     await ready();
     expect(titles()).toEqual([]);
     expect(screen.queryByRole('button')).not.toBeInTheDocument();

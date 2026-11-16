@@ -41,9 +41,6 @@ pub enum CommandAction {
     ListStudyRecordings,
     DiscoverRecordingStreams,
     DescribeRecordingStream,
-    StartLslRecording,
-    StopLslRecording,
-    LslRecordingStatus,
     Connect,
     Disconnect,
     Send,
@@ -86,7 +83,6 @@ pub enum CommandAction {
 pub enum QueryTarget {
     Devices,
     Device(String),
-    Metrics,
     Connections,
     Status,
 }
@@ -260,5 +256,29 @@ impl MessageHandler {
             "mock" => Some(DeviceType::Mock),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod removed_action_tests {
+    use super::*;
+
+    /// Manual recording over the WebSocket let any connected client create a recording file in a folder it named.
+    /// Bridge's own Recordings panel uses the Tauri commands; study recordings stay on the WebSocket.
+    #[test]
+    fn manual_recording_is_not_a_websocket_command() {
+        for action in [
+            "start_lsl_recording",
+            "stop_lsl_recording",
+            "lsl_recording_status",
+        ] {
+            let message = format!(
+                r#"{{"type":"command","device":"recording","action":"{action}","payload":{{"stream_uids":[],"directory":"/tmp/anywhere"}}}}"#
+            );
+            assert!(MessageHandler::parse_command(&message).is_err(), "{action}");
+        }
+        let study =
+            r#"{"type":"command","device":"recording","action":"discover_recording_streams"}"#;
+        assert!(MessageHandler::parse_command(study).is_ok());
     }
 }

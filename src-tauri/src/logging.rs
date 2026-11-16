@@ -134,6 +134,10 @@ pub struct LogPersister {
     flush_interval: Duration,
     /// Track dropped entries for diagnostics.
     dropped_count: std::sync::atomic::AtomicU64,
+    /// Wakes the flush task when a batch fills. `add` runs on whatever thread logged (including plain OS threads such
+    /// as LSL inlets, outlets and the recorder), so it must never touch the Tokio runtime itself: release builds abort
+    /// on panic, and `tokio::spawn` panics outside the runtime.
+    flush_wanted: tokio::sync::Notify,
 }
 
 impl LogPersister {
@@ -145,6 +149,7 @@ impl LogPersister {
             batch_size: DEFAULT_PERSIST_BATCH_SIZE,
             flush_interval: DEFAULT_PERSIST_FLUSH_INTERVAL,
             dropped_count: std::sync::atomic::AtomicU64::new(0),
+            flush_wanted: tokio::sync::Notify::new(),
         }
     }
 
@@ -156,6 +161,7 @@ impl LogPersister {
             batch_size,
             flush_interval,
             dropped_count: std::sync::atomic::AtomicU64::new(0),
+            flush_wanted: tokio::sync::Notify::new(),
         }
     }
 
@@ -190,31 +196,7 @@ impl LogPersister {
         };
 
         if should_flush {
-            // Trigger async flush
-            self.trigger_flush();
-        }
-    }
-
-    /// Trigger an async flush without blocking.
-    fn trigger_flush(&self) {
-        // Take entries from buffer
-        let entries = match self.buffer.lock() {
-            Ok(mut buffer) => {
-                if buffer.len() >= self.batch_size {
-                    std::mem::take(&mut *buffer)
-                } else {
-                    return; // Nothing to flush
-                }
-            }
-            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
-        };
-
-        if !entries.is_empty() {
-            tokio::spawn(async move {
-                if let Err(e) = Self::flush_entries(entries).await {
-                    eprintln!("Failed to persist logs: {}", e);
-                }
-            });
+            self.flush_wanted.notify_one();
         }
     }
 
@@ -265,13 +247,17 @@ impl LogPersister {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Start a background task that periodically flushes logs.
+    /// Start the background task that flushes logs: every flush_interval, and as soon as a batch fills.
     pub fn start_periodic_flush(self: Arc<Self>) {
         let persister = self;
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(persister.flush_interval);
+            let start = tokio::time::Instant::now() + persister.flush_interval;
+            let mut interval = tokio::time::interval_at(start, persister.flush_interval);
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = persister.flush_wanted.notified() => {}
+                }
                 persister.flush().await;
             }
         });
@@ -758,12 +744,11 @@ mod tests {
     #[tokio::test]
     async fn test_log_persister_bounded_buffer() {
         // Create persister with small max buffer (batch_size * 10 = 20)
-        // Note: batch_size of 2 means flushes trigger frequently, requiring tokio runtime
         let persister = LogPersister::with_config(2, Duration::from_secs(60));
         // max_buffer_size = 2 * 10 = 20
 
         // Add more entries than max buffer size
-        // This will trigger flushes (which spawn async tasks) and bound the buffer
+        // No flush task is running, so the buffer must bound itself by dropping the oldest entries
         for i in 0..25 {
             persister.add(LogEntry::new(
                 "info",
@@ -789,6 +774,30 @@ mod tests {
             dropped > 0 || persister.buffered_count() <= 20,
             "Expected bounded behavior"
         );
+    }
+
+    /// Release builds abort on any panic. A plain OS thread (an LSL inlet or outlet, the recorder) whose log line
+    /// filled the buffer called tokio::spawn there and ended the whole app (installed 0.8.28, 2026-11-16).
+    #[tokio::test]
+    async fn a_full_buffer_reached_from_a_plain_thread_is_flushed_without_panicking() {
+        let persister = Arc::new(LogPersister::with_config(3, Duration::from_secs(3600)));
+        persister.clone().start_periodic_flush();
+        let writer = persister.clone();
+        let joined = std::thread::spawn(move || {
+            for i in 0..3 {
+                writer.add(LogEntry::new("info", format!("m{i}"), None, "test".into()));
+            }
+        })
+        .join();
+        assert!(joined.is_ok(), "logging from a plain thread panicked");
+        // A full batch is flushed now, not at the next periodic flush an hour away.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while persister.buffered_count() > 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the full batch was not flushed");
     }
 
     #[test]

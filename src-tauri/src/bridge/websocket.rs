@@ -16,11 +16,26 @@ use std::time::Duration;
 use tauri::{AppHandle, Runtime};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, RwLock};
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 const WS_PORT: u16 = 9000;
+
+/// Opens the server port. A port that is already taken almost always means another Bridge (the installed app or a
+/// development build) is running; HyperStudy and this Bridge's own page would talk to that one instead.
+pub async fn bind_listener(addr: SocketAddr) -> Result<TcpListener, String> {
+    TcpListener::bind(addr).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            format!(
+                "Another Hyperstudy Device Bridge is already running on port {}. Quit it, then open this one again.",
+                addr.port()
+            )
+        } else {
+            format!("Bridge could not open port {}: {e}", addr.port())
+        }
+    })
+}
 #[allow(dead_code)]
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
@@ -113,10 +128,17 @@ impl<R: Runtime> BridgeServer<R> {
 
     pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let addr: SocketAddr = ([127, 0, 0, 1], WS_PORT).into();
-        let listener = TcpListener::bind(&addr).await?;
-
+        let listener = bind_listener(addr).await?;
         info!("WebSocket server listening on ws://{}", addr);
+        self.serve(listener).await
+    }
 
+    /// Accepts connections on an already-bound listener. Tests pass a listener on a free port, so they never touch
+    /// port 9000 (where a running Bridge may be listening).
+    pub async fn serve(
+        &mut self,
+        listener: TcpListener,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         while let Ok((stream, peer_addr)) = listener.accept().await {
             info!("New connection from: {}", peer_addr);
 
@@ -134,13 +156,73 @@ impl<R: Runtime> BridgeServer<R> {
     }
 }
 
+/// Web pages allowed to connect. Browsers let any page open a WebSocket to localhost and always say which page it is
+/// (the Origin header), so only Hyperstudy and Bridge's own window get through.
+const ALLOWED_WEB_ORIGINS: &[&str] = &[
+    "https://hyperstudy.io",
+    "https://www.hyperstudy.io",
+    "https://dev.hyperstudy.io",
+    // Bridge's own window: macOS, then Windows.
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+];
+
+/// Whether a connection with this Origin header may use Bridge. No header means a script or native tool, not a web
+/// page. Local development servers (Hyperstudy's or Bridge's) on localhost / 127.0.0.1 are allowed on any port.
+pub fn origin_allowed(origin: Option<&str>) -> bool {
+    let Some(origin) = origin else {
+        return true;
+    };
+    if ALLOWED_WEB_ORIGINS.contains(&origin) {
+        return true;
+    }
+    match reqwest::Url::parse(origin) {
+        Ok(url) => {
+            matches!(url.scheme(), "http" | "https")
+                && matches!(url.host_str(), Some("localhost") | Some("127.0.0.1"))
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == "/"
+                && url.query().is_none()
+        }
+        Err(_) => false,
+    }
+}
+
+/// Completes the WebSocket handshake for one incoming connection, refusing web pages that are not on the allowlist
+/// with 403 before any command can be sent.
+pub async fn accept_websocket(
+    stream: TcpStream,
+) -> Result<tokio_tungstenite::WebSocketStream<TcpStream>, tokio_tungstenite::tungstenite::Error> {
+    use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+    use tokio_tungstenite::tungstenite::http::StatusCode;
+    let check_origin = |request: &Request, response: Response| {
+        let origin = request
+            .headers()
+            .get("origin")
+            .map(|value| value.to_str().unwrap_or("<not text>"));
+        if origin_allowed(origin) {
+            return Ok(response);
+        }
+        warn!(
+            "Refused a WebSocket connection from a web page at {}",
+            origin.unwrap_or_default()
+        );
+        let mut refusal = ErrorResponse::new(Some("This page may not use Bridge".into()));
+        *refusal.status_mut() = StatusCode::FORBIDDEN;
+        Err(refusal)
+    };
+    tokio_tungstenite::accept_hdr_async(stream, check_origin).await
+}
+
 async fn handle_connection<R: Runtime>(
     stream: TcpStream,
     peer_addr: SocketAddr,
     state: Arc<AppState>,
     app_handle: AppHandle<R>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let ws_stream = accept_async(stream).await?;
+    let ws_stream = accept_websocket(stream).await?;
     let connection_id = Uuid::new_v4().to_string();
 
     state.add_connection(connection_id.clone(), peer_addr.to_string());
@@ -489,7 +571,6 @@ async fn try_auto_connect(state: &Arc<AppState>, device_id: &str) -> bool {
     let mut device: Box<dyn Device> = Box::new(KernelDevice::new(ip.to_string()));
     match device.connect().await {
         Ok(_) => {
-            state.record_connection_attempt(device_id, true).await;
             let info = device.get_info();
             // An explicit connect may have won the race (registered already, or
             // still in flight — started before or after us); never replace or
@@ -514,7 +595,6 @@ async fn try_auto_connect(state: &Arc<AppState>, device_id: &str) -> bool {
             true
         }
         Err(e) => {
-            state.record_connection_attempt(device_id, false).await;
             warn!("Auto-connect of {} failed: {}", device_id, e);
             false
         }
@@ -1025,7 +1105,6 @@ async fn handle_device_command(
                     };
                     attempt.registered();
                     disconnect_replaced(&device_id, replaced);
-                    state.record_connection_attempt(&device_id, true).await;
                     state.remember_connect_config(&device_id, config.clone());
 
                     // Tell every client, not just the requester. HyperStudy tracks
@@ -1051,7 +1130,6 @@ async fn handle_device_command(
                 }
                 Err(e) => {
                     // Record failed connection attempt
-                    state.record_connection_attempt(&device_id, false).await;
                     state.record_device_error(&device_id, &e.to_string()).await;
 
                     // Keep the machine-readable code (wrong_device, device_not_found…)
@@ -1889,7 +1967,6 @@ async fn handle_device_command(
                     };
                     attempt.registered();
                     disconnect_replaced("pupil", replaced);
-                    state.record_connection_attempt("pupil", true).await;
 
                     state.broadcast_device_status(DeviceStatusEvent::connected_with_info(
                         "pupil".to_string(),
@@ -1909,7 +1986,6 @@ async fn handle_device_command(
                     .await;
                 }
                 Err(e) => {
-                    state.record_connection_attempt("pupil", false).await;
                     state.record_device_error("pupil", &e.to_string()).await;
 
                     send_response(
@@ -2067,41 +2143,20 @@ async fn handle_device_command(
             };
             send_response(tx, response).await;
         }
-        CommandAction::DiscoverRecordingStreams
-        | CommandAction::DescribeRecordingStream
-        | CommandAction::StartLslRecording
-        | CommandAction::StopLslRecording
-        | CommandAction::LslRecordingStatus => {
-            let manager = state.recording.clone();
+        // Manual recording (start/stop/status) is a Bridge-window feature with Tauri commands; over the WebSocket it
+        // let any client write a recording into a folder it named. Study recordings below are the WebSocket path.
+        CommandAction::DiscoverRecordingStreams | CommandAction::DescribeRecordingStream => {
             let result =
                 tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
-                    match action {
-                        CommandAction::DiscoverRecordingStreams => {
-                            Ok(serde_json::to_value(crate::recording::discover()?)?)
-                        }
-                        CommandAction::DescribeRecordingStream => {
-                            let uid = payload
-                                .as_ref()
-                                .and_then(|value| value.get("uid"))
-                                .and_then(|value| value.as_str())
-                                .ok_or_else(|| anyhow::anyhow!("Missing stream UID"))?;
-                            Ok(serde_json::to_value(crate::recording::describe(uid)?)?)
-                        }
-                        CommandAction::StartLslRecording => {
-                            let request =
-                                serde_json::from_value(payload.ok_or_else(|| {
-                                    anyhow::anyhow!("Missing recording request")
-                                })?)?;
-                            Ok(serde_json::to_value(manager.start(request)?)?)
-                        }
-                        CommandAction::StopLslRecording => {
-                            let request = match payload {
-                                Some(value) if !value.is_null() => serde_json::from_value(value)?,
-                                _ => crate::recording::RecordingStopRequest::default(),
-                            };
-                            Ok(serde_json::to_value(manager.stop_unmanaged(request)?)?)
-                        }
-                        _ => Ok(serde_json::to_value(manager.status())?),
+                    if matches!(action, CommandAction::DescribeRecordingStream) {
+                        let uid = payload
+                            .as_ref()
+                            .and_then(|value| value.get("uid"))
+                            .and_then(|value| value.as_str())
+                            .ok_or_else(|| anyhow::anyhow!("Missing stream UID"))?;
+                        Ok(serde_json::to_value(crate::recording::describe(uid)?)?)
+                    } else {
+                        Ok(serde_json::to_value(crate::recording::discover()?)?)
                     }
                 })
                 .await;
@@ -2392,8 +2447,32 @@ async fn handle_device_command(
             }
         }
         // ====================================================================
-        // EyeLink commands (SDK loaded at runtime via libloading)
+        // EyeLink commands (SDK loaded at runtime via libloading). Unfinished: off unless built with the `eyelink`
+        // feature, and every command answers with a clear refusal instead.
         // ====================================================================
+        #[cfg(not(feature = "eyelink"))]
+        CommandAction::ConnectEyeLink
+        | CommandAction::DisconnectEyeLink
+        | CommandAction::StartEyeLinkRecording
+        | CommandAction::StopEyeLinkRecording
+        | CommandAction::SendEyeLinkMessage
+        | CommandAction::CalibrateEyeLink
+        | CommandAction::CalibrateEyeLinkKey
+        | CommandAction::EyeLinkStatus
+        | CommandAction::ConnectEyeLinkGaze
+        | CommandAction::DisconnectEyeLinkGaze => {
+            send_response(
+                tx,
+                BridgeResponse::device_error(
+                    "eyelink".to_string(),
+                    "EyeLink isn't supported in this version of Hyperstudy Device Bridge."
+                        .to_string(),
+                    id,
+                ),
+            )
+            .await;
+        }
+        #[cfg(feature = "eyelink")]
         CommandAction::ConnectEyeLink => {
             let ip = payload
                 .as_ref()
@@ -2443,6 +2522,7 @@ async fn handle_device_command(
                 }
             }
         }
+        #[cfg(feature = "eyelink")]
         CommandAction::DisconnectEyeLink => match state.eyelink_manager.disconnect().await {
             Ok(()) => {
                 send_response(
@@ -2463,6 +2543,7 @@ async fn handle_device_command(
                 .await;
             }
         },
+        #[cfg(feature = "eyelink")]
         CommandAction::StartEyeLinkRecording => {
             match state.eyelink_manager.start_recording().await {
                 Ok(()) => {
@@ -2485,6 +2566,7 @@ async fn handle_device_command(
                 }
             }
         }
+        #[cfg(feature = "eyelink")]
         CommandAction::StopEyeLinkRecording => match state.eyelink_manager.stop_recording().await {
             Ok(()) => {
                 send_response(
@@ -2501,6 +2583,7 @@ async fn handle_device_command(
                 .await;
             }
         },
+        #[cfg(feature = "eyelink")]
         CommandAction::SendEyeLinkMessage => {
             let message = payload
                 .as_ref()
@@ -2543,6 +2626,7 @@ async fn handle_device_command(
                 }
             }
         }
+        #[cfg(feature = "eyelink")]
         CommandAction::CalibrateEyeLink => {
             info!("Starting EyeLink calibration");
 
@@ -2629,6 +2713,7 @@ async fn handle_device_command(
                 }
             }
         }
+        #[cfg(feature = "eyelink")]
         CommandAction::CalibrateEyeLinkKey => {
             let key = payload
                 .as_ref()
@@ -2674,6 +2759,7 @@ async fn handle_device_command(
                 }
             }
         }
+        #[cfg(feature = "eyelink")]
         CommandAction::EyeLinkStatus => {
             let status = state.eyelink_manager.get_status().await;
             send_response(
@@ -2686,6 +2772,7 @@ async fn handle_device_command(
             )
             .await;
         }
+        #[cfg(feature = "eyelink")]
         CommandAction::ConnectEyeLinkGaze => {
             match state.eyelink_manager.start_gaze_stream().await {
                 Ok(mut gaze_rx) => {
@@ -2761,6 +2848,7 @@ async fn handle_device_command(
                 }
             }
         }
+        #[cfg(feature = "eyelink")]
         CommandAction::DisconnectEyeLinkGaze => {
             match state.eyelink_manager.stop_gaze_stream().await {
                 Ok(()) => {
@@ -2839,10 +2927,6 @@ async fn handle_query(
                 json!({ "error": "Device not found" })
             }
         }
-        QueryTarget::Metrics => {
-            let metrics = state.get_metrics().await;
-            json!(metrics)
-        }
         QueryTarget::Connections => {
             let connections: Vec<_> = state
                 .connections
@@ -2863,4 +2947,135 @@ async fn handle_query(
     };
 
     send_response(tx, BridgeResponse::query_result(id, data)).await;
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::*;
+
+    /// A second Bridge used to run on without a server, and its page silently talked to the first Bridge's.
+    #[tokio::test]
+    async fn a_port_held_by_another_bridge_is_reported_as_such() {
+        let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = first.local_addr().unwrap();
+        let error = bind_listener(addr).await.unwrap_err();
+        assert!(
+            error.contains("Another Hyperstudy Device Bridge"),
+            "{error}"
+        );
+        assert!(error.contains(&addr.port().to_string()), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_free_port_binds() {
+        let free = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        assert_eq!(
+            bind_listener(free).await.unwrap().local_addr().unwrap(),
+            free
+        );
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    /// Runs one handshake on a throwaway port and reports whether Bridge accepted it.
+    async fn handshake(origin: Option<&str>) -> bool {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            accept_websocket(stream).await.is_ok()
+        });
+        let mut request = format!("ws://{addr}").into_client_request().unwrap();
+        if let Some(origin) = origin {
+            request
+                .headers_mut()
+                .insert("Origin", origin.parse().unwrap());
+        }
+        let client = tokio_tungstenite::connect_async(request).await;
+        let accepted = server.await.unwrap();
+        assert_eq!(accepted, client.is_ok(), "server and client disagree");
+        accepted
+    }
+
+    /// Browsers let any web page open a WebSocket to localhost. Without an Origin check, any site a researcher or
+    /// participant had open could drive Bridge: send TTL pulses, start and stop recordings, upload them.
+    #[tokio::test]
+    async fn a_page_from_another_site_is_refused() {
+        assert!(!handshake(Some("https://evil.example")).await);
+        assert!(!handshake(Some("null")).await);
+    }
+
+    #[test]
+    fn lookalike_origins_are_refused() {
+        for origin in [
+            "https://hyperstudy.io.evil.example",
+            "https://evilhyperstudy.io",
+            "http://hyperstudy.io",
+            "https://localhost.evil.example",
+            "http://localhost@evil.example",
+            "http://user@localhost:5173",
+            "file://",
+            "<not text>",
+        ] {
+            assert!(!origin_allowed(Some(origin)), "{origin}");
+        }
+    }
+
+    #[tokio::test]
+    async fn hyperstudy_bridge_itself_and_native_clients_are_accepted() {
+        for origin in [
+            "https://hyperstudy.io",
+            "https://www.hyperstudy.io",
+            "https://dev.hyperstudy.io",
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "http://localhost:5173",
+            "http://127.0.0.1:3000",
+        ] {
+            assert!(handshake(Some(origin)).await, "{origin}");
+        }
+        // No Origin header: a script or native tool, not a web page.
+        assert!(handshake(None).await);
+    }
+}
+
+#[cfg(test)]
+mod eyelink_tests {
+    use super::*;
+
+    /// EyeLink is not ready: a connect left the card disconnected, a failed setup stayed "connected", recordings opened
+    /// no EDF file, and the vendor library can crash the app when the host is unreachable. Until it is finished, every
+    /// EyeLink command gets a clear refusal instead of reaching that code.
+    #[cfg(not(feature = "eyelink"))]
+    #[tokio::test]
+    async fn eyelink_commands_are_refused_with_a_clear_message() {
+        let state = Arc::new(AppState::new());
+        let conn = Arc::new(ConnectionCtx::new(Arc::new(AtomicBool::new(false))));
+        for action in [CommandAction::ConnectEyeLink, CommandAction::EyeLinkStatus] {
+            let (tx, mut rx) = mpsc::channel(4);
+            handle_device_command(
+                &state,
+                "eyelink".into(),
+                action.clone(),
+                Some(json!({ "ip": "127.0.0.1" })),
+                Some("request-1".into()),
+                &tx,
+                &conn,
+            )
+            .await;
+            let reply = serde_json::to_string(&rx.recv().await.unwrap()).unwrap();
+            assert!(
+                reply.contains("EyeLink isn't supported"),
+                "{action:?}: {reply}"
+            );
+        }
+    }
 }

@@ -190,7 +190,6 @@ pub async fn connect_device(
             let info = device.get_info();
 
             // Record successful connection attempt
-            state.record_connection_attempt(&device_id, true).await;
 
             let never_closed = std::sync::atomic::AtomicBool::new(false);
             match state
@@ -218,34 +217,7 @@ pub async fn connect_device(
             // Set up performance callback for TTL devices AFTER registration
             // This prevents race conditions where the callback fires before
             // the device is in state
-            if is_ttl_device {
-                if let Some(device_lock) = state.get_device(&device_id).await {
-                    let mut device = device_lock.write().await;
-                    // Downcast to TtlDevice to set callback
-                    if let Some(any_ref) = device.as_any_mut() {
-                        if let Some(ttl_device) = any_ref.downcast_mut::<TtlDevice>() {
-                            let state_clone = state.inner().clone();
-                            let device_id_clone = device_id.clone();
-                            ttl_device.set_performance_callback(
-                                move |_device_id, latency, bytes_sent, bytes_received| {
-                                    let state_clone = state_clone.clone();
-                                    let device_id = device_id_clone.clone();
-                                    tokio::spawn(async move {
-                                        state_clone
-                                            .record_device_operation(
-                                                &device_id,
-                                                latency,
-                                                bytes_sent,
-                                                bytes_received,
-                                            )
-                                            .await;
-                                    });
-                                },
-                            );
-                        }
-                    }
-                }
-            }
+            if is_ttl_device {}
 
             // Emit status update
             app_handle
@@ -264,7 +236,6 @@ pub async fn connect_device(
             error!("Failed to connect device: {}", e);
 
             // Record failed connection attempt
-            state.record_connection_attempt(&device_id, false).await;
             state.record_device_error(&device_id, &e.to_string()).await;
 
             Ok(CommandResult::error(e.to_string()))
@@ -368,7 +339,6 @@ pub async fn send_ttl_pulse(
     port: Option<String>,
     pulse_duration_ms: Option<u64>,
     state: State<'_, Arc<AppState>>,
-    app_handle: AppHandle,
 ) -> Result<CommandResult<u64>, ()> {
     let start_time = std::time::Instant::now();
 
@@ -390,18 +360,6 @@ pub async fn send_ttl_pulse(
         match device.send(b"PULSE\n").await {
             Ok(_) => {
                 let latency_us = start_time.elapsed().as_micros() as u64;
-
-                // Emit performance metric
-                app_handle
-                    .emit(
-                        "performance_metrics",
-                        json!({
-                            "device": "ttl",
-                            "operation": "pulse",
-                            "latency_us": latency_us
-                        }),
-                    )
-                    .unwrap_or_else(|e| error!("Failed to emit event: {}", e));
 
                 Ok(CommandResult::success(latency_us))
             }
@@ -541,21 +499,6 @@ pub async fn discover_devices() -> Result<Vec<DeviceInfo>, ()> {
 }
 
 #[tauri::command]
-pub async fn get_device_metrics(
-    device_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<CommandResult<serde_json::Value>, ()> {
-    if let Some(metrics) = state.get_device_metrics(&device_id).await {
-        Ok(CommandResult::success(json!(metrics)))
-    } else {
-        Ok(CommandResult::error(format!(
-            "No metrics available for device {}",
-            device_id
-        )))
-    }
-}
-
-#[tauri::command]
 pub async fn get_system_diagnostics(
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, ()> {
@@ -577,69 +520,7 @@ pub async fn get_system_diagnostics(
     }))
 }
 
-#[tauri::command]
-pub async fn load_configuration() -> Result<serde_json::Value, ()> {
-    // TODO: Load from config file
-    Ok(json!({
-        "auto_connect": false,
-        "default_ttl_port": "/dev/cu.usbmodem101",
-        "websocket_port": 9000,
-        "log_level": "info"
-    }))
-}
-
-#[tauri::command]
-pub async fn save_configuration(config: serde_json::Value) -> Result<CommandResult<String>, ()> {
-    // TODO: Save to config file
-    info!("Saving configuration: {:?}", config);
-    Ok(CommandResult::success("Configuration saved".to_string()))
-}
-
 // Performance monitoring commands
-
-#[tauri::command]
-pub async fn get_performance_metrics(
-    state: State<'_, Arc<AppState>>,
-) -> Result<crate::performance::PerformanceMetrics, ()> {
-    Ok(state.get_performance_metrics().await)
-}
-
-#[tauri::command]
-pub async fn get_device_performance_metrics(
-    device_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<CommandResult<crate::performance::DevicePerformanceMetrics>, ()> {
-    if let Some(metrics) = state.get_device_performance_metrics(&device_id).await {
-        Ok(CommandResult::success(metrics))
-    } else {
-        Ok(CommandResult::error(format!(
-            "No performance metrics available for device {}",
-            device_id
-        )))
-    }
-}
-
-#[tauri::command]
-pub async fn get_performance_summary(
-    state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, ()> {
-    Ok(state.get_performance_summary().await)
-}
-
-#[tauri::command]
-pub async fn check_ttl_latency_compliance(
-    device_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<CommandResult<bool>, ()> {
-    if let Some(is_compliant) = state.check_ttl_latency_compliance(&device_id).await {
-        Ok(CommandResult::success(is_compliant))
-    } else {
-        Ok(CommandResult::error(format!(
-            "No TTL latency data available for device {}",
-            device_id
-        )))
-    }
-}
 
 #[tauri::command]
 pub async fn list_all_serial_ports_debug() -> Result<CommandResult<Vec<serde_json::Value>>, ()> {
@@ -686,32 +567,6 @@ pub async fn find_ttl_port_by_serial(
             e
         ))),
         Err(e) => Ok(CommandResult::error(format!("Task error: {}", e))),
-    }
-}
-
-#[tauri::command]
-pub async fn reset_performance_metrics(
-    device_id: Option<String>,
-    state: State<'_, Arc<AppState>>,
-) -> Result<CommandResult<String>, ()> {
-    match device_id {
-        Some(id) => {
-            // Reset specific device metrics by removing and re-adding
-            state.performance_monitor.remove_device(&id).await;
-            state.performance_monitor.add_device(id.clone()).await;
-            Ok(CommandResult::success(format!(
-                "Performance metrics reset for device {}",
-                id
-            )))
-        }
-        None => {
-            // Create new performance monitor to reset all metrics
-            *state.performance_monitor.device_counters.write().await =
-                std::collections::HashMap::new();
-            Ok(CommandResult::success(
-                "All performance metrics reset".to_string(),
-            ))
-        }
     }
 }
 
@@ -1006,16 +861,6 @@ pub async fn export_logs(
     }
 }
 
-#[tauri::command]
-pub async fn set_log_level(level: String) -> Result<CommandResult<String>, ()> {
-    // TODO: Implement dynamic log level changes
-    info!("Log level change requested: {}", level);
-    Ok(CommandResult::success(format!(
-        "Log level set to {}",
-        level
-    )))
-}
-
 /// Test a TTL device connection without keeping it open
 /// Sends TEST command and returns device response (e.g., firmware version)
 #[tauri::command]
@@ -1253,6 +1098,19 @@ pub async fn start_lsl_recording(
         .map_err(|e| e.to_string())
 }
 #[tauri::command]
+pub async fn stop_study_recording(
+    recording_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    let manager = state.recording.clone();
+    let session = tokio::task::spawn_blocking(move || manager.stop_study_locally(&recording_id))
+        .await
+        .map_err(|_| "Recording worker failed".to_string())?
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(session).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn stop_lsl_recording(
     request: Option<crate::recording::RecordingStopRequest>,
     state: State<'_, Arc<AppState>>,
@@ -1326,6 +1184,56 @@ pub async fn reveal_recording(
     })
     .await
     .map_err(|_| "Reveal worker failed".to_string())?
+}
+
+/// Opens the folder where Bridge keeps study recordings, its log database and the band key (Show Data Folder in the
+/// menu). It takes no path: the folder is always the app's own data directory.
+pub async fn reveal_data_folder(app: AppHandle) -> Result<(), String> {
+    let folder = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Couldn't find the data folder: {e}"))?;
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&folder)
+            .map_err(|e| format!("Couldn't create the data folder: {e}"))?;
+        let status = open_with_system(folder.as_os_str())
+            .status()
+            .map_err(|e| format!("Couldn't open the folder: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("Couldn't open the folder ({status})"))
+        }
+    })
+    .await
+    .map_err(|_| "Folder worker failed".to_string())?
+}
+
+/// The Bridge page on the Hyperstudy docs site (Help > Documentation).
+pub const DOCS_URL: &str = "https://docs.hyperstudy.io/devices/hyperstudy-bridge";
+
+/// Opens the documentation in the default browser. The URL is fixed; nothing from the page reaches it.
+pub fn open_documentation() -> Result<(), String> {
+    let status = open_with_system(std::ffi::OsStr::new(DOCS_URL))
+        .status()
+        .map_err(|e| format!("Couldn't open the documentation: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Couldn't open the documentation ({status})"))
+    }
+}
+
+/// Opens a folder or URL with the system's default handler.
+fn open_with_system(target: &std::ffi::OsStr) -> std::process::Command {
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(target);
+    command
 }
 
 fn reveal_command(path: &std::path::Path) -> std::process::Command {

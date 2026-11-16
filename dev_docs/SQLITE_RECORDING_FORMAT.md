@@ -96,9 +96,11 @@ column indices; unspecified units/electrode identities are not invented.
 Native commands: `discover_recording_streams`, `start_lsl_recording`,
 `stop_lsl_recording`, `lsl_recording_status`, `recover_lsl_recording`.
 Start takes `{request: {stream_uids, directory, context}}`; recover takes `{path}`.
-WebSocket actions: `discover_recording_streams`, `start_lsl_recording`,
-`stop_lsl_recording`, `lsl_recording_status`. Start's `payload` contains the
-RecordingRequest directly (command `device` is `recording`). Responses use the `recording` data target.
+Manual recording is a Bridge-window feature only: these commands are not
+WebSocket actions (a WebSocket client could otherwise create a recording in any
+folder it named). Over the WebSocket, `discover_recording_streams` and
+`describe_recording_stream` remain, and study recordings use their own actions
+(command `device` is `recording`). Responses use the `recording` data target.
 
 FRENZ browser preview messages add `data: {format, encoding, values}`.
 Numeric values use `encoding: "base64-le"` with original sample bytes; strings

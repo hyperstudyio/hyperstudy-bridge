@@ -277,7 +277,6 @@ function getDeviceName(deviceId) {
     kernel: 'Kernel Flow2',
     pupil: 'Pupil Labs Neon',
     lsl: 'Lab Streaming Layer',
-    eyelink: 'EyeLink 1000 Plus',
     mock: 'Mock Device',
   };
   return names[deviceId] || deviceId;
@@ -364,43 +363,6 @@ export async function connectDevice(deviceId, config = {}) {
   });
 }
 
-export async function connectEyeLink(config = {}) {
-  return new Promise((resolve, reject) => {
-    const id = generateId();
-    let timeoutId = null;
-
-    requestCallbacks.set(id, (success, message) => {
-      if (timeoutId) clearTimeout(timeoutId);
-      if (success) {
-        resolve(message);
-      } else {
-        reject(new Error(message || 'Failed to connect EyeLink'));
-      }
-    });
-
-    const sent = send({
-      type: 'command',
-      device: 'eyelink',
-      action: 'connect_eye_link',
-      payload: config,
-      id,
-    });
-
-    if (!sent) {
-      requestCallbacks.delete(id);
-      reject(new Error('Failed to send command'));
-      return;
-    }
-
-    timeoutId = setTimeout(() => {
-      if (requestCallbacks.has(id)) {
-        requestCallbacks.delete(id);
-        reject(new Error('Request timeout for EyeLink'));
-      }
-    }, CONNECT_TIMEOUT_MS);
-  });
-}
-
 /**
  * Discover Neon Companion phones on the local network via mDNS.
  * Resolves to `{ phones: [{ device_name, device_id, ip, port, reachable,
@@ -440,42 +402,6 @@ export async function discoverNeonPhones(timeoutMs = 3000) {
         reject(new Error('Timed out waiting for Neon phone discovery'));
       }
     }, timeoutMs + 10000);
-  });
-}
-
-export async function disconnectEyeLink() {
-  return new Promise((resolve, reject) => {
-    const id = generateId();
-    let timeoutId = null;
-
-    requestCallbacks.set(id, (success, message) => {
-      if (timeoutId) clearTimeout(timeoutId);
-      if (success) {
-        resolve(message);
-      } else {
-        reject(new Error(message || 'Failed to disconnect EyeLink'));
-      }
-    });
-
-    const sent = send({
-      type: 'command',
-      device: 'eyelink',
-      action: 'disconnect_eye_link',
-      id,
-    });
-
-    if (!sent) {
-      requestCallbacks.delete(id);
-      reject(new Error('Failed to send command'));
-      return;
-    }
-
-    timeoutId = setTimeout(() => {
-      if (requestCallbacks.has(id)) {
-        requestCallbacks.delete(id);
-        reject(new Error('Disconnect timeout for EyeLink'));
-      }
-    }, DISCONNECT_TIMEOUT_MS);
   });
 }
 

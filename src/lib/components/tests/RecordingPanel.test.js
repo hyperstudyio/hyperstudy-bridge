@@ -173,7 +173,8 @@ describe('RecordingPanel', () => {
   });
   // Study and manual recordings share one recorder status. The panel offered "Stop and save" for a study, which
   // stopped the study's recording mid-session.
-  it('shows a running study as a study recording, with no stop', async () => {
+  // A study that hangs or is abandoned used to leave the operator no way to stop its recording short of quitting.
+  it('stops a running study recording only after confirming, by id', async () => {
     const running = study('s1', '2026-11-12T04:59:10Z', { state: 'recording' });
     backend({
       status: {
@@ -187,8 +188,16 @@ describe('RecordingPanel', () => {
     });
     render(RecordingPanel, { isOpen: true });
     expect(await screen.findByText('Study recording')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Stop and save' })).not.toBeInTheDocument();
     expect(screen.getByText(/A study is recording/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Stop recording' }));
+    expect(screen.getByText("Stop and save this study's recording?")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Keep recording' }));
+    expect(invoke).not.toHaveBeenCalledWith('stop_study_recording', expect.anything());
+
+    await userEvent.click(screen.getByRole('button', { name: 'Stop recording' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Stop and save' }));
+    expect(invoke).toHaveBeenCalledWith('stop_study_recording', { recordingId: 's1' });
   });
 
   it('never presents a finished study file as the last manual recording', async () => {

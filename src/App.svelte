@@ -6,9 +6,7 @@
   import StatusIndicator from './lib/components/StatusIndicator.svelte';
   import AddDeviceModal from './lib/components/AddDeviceModal.svelte';
   import LogViewer from './lib/components/LogViewer.svelte';
-  import SettingsPanel from './lib/components/SettingsPanel.svelte';
   import LslConfigPanel from './lib/components/LslConfigPanel.svelte';
-  import PerformancePanel from './lib/components/PerformancePanel.svelte';
   import Toast from './lib/components/Toast.svelte';
   import UpdateStatus from './lib/components/UpdateStatus.svelte';
   import * as bridgeStore from './lib/stores/websocket.svelte.js';
@@ -22,10 +20,8 @@
   // Modal state
   let showAddDeviceModal = $state(false);
   let showLogViewer = $state(false);
-  let showSettingsPanel = $state(false);
   let showLslPanel = $state(false);
   let showRecordingPanel = $state(false);
-  let showPerformancePanel = $state(false);
 
   // Selected devices - user has explicitly added these
   let selectedDevices = $state([]);
@@ -104,7 +100,7 @@
   onMount(async () => {
     // Initialize the WebSocket connection
     initialize();
-    console.log('HyperStudy Bridge initialized');
+    console.log('Hyperstudy Device Bridge initialized');
 
     // Fetch app version from Tauri (via get_app_info command for reliability)
     try {
@@ -128,34 +124,11 @@
 <div class="app">
   <header>
     <div class="logo-container">
-      <img src={logo} alt="HyperStudy" class="logo" />
-      <h1>HyperStudy Device Bridge</h1>
+      <img src={logo} alt="" class="logo" />
+      <h1>Device Bridge</h1>
     </div>
 
     <div class="header-actions">
-      <button
-        class="header-btn"
-        onclick={e => {
-          e.preventDefault();
-          e.stopPropagation();
-          showPerformancePanel = true;
-        }}
-        title="Performance Monitor"
-        type="button"
-      >
-        <svg
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-        >
-          <path d="M22 12h-4l-3 9L9 3l-3 9H2"></path>
-        </svg>
-        Perf
-      </button>
-
       <button
         class="header-btn"
         onclick={e => {
@@ -215,32 +188,6 @@
         Logs
       </button>
 
-      <button
-        class="header-btn"
-        onclick={e => {
-          e.preventDefault();
-          e.stopPropagation();
-          showSettingsPanel = true;
-        }}
-        title="Settings"
-        type="button"
-      >
-        <svg
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-        >
-          <circle cx="12" cy="12" r="3"></circle>
-          <path
-            d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"
-          ></path>
-        </svg>
-        Settings
-      </button>
-
       <StatusIndicator status={bridgeStatus} />
     </div>
   </header>
@@ -284,15 +231,11 @@
 
   <LogViewer bind:isOpen={showLogViewer} />
 
-  <SettingsPanel bind:isOpen={showSettingsPanel} />
-
-  <PerformancePanel bind:isOpen={showPerformancePanel} />
-
   <Toast />
 
   <footer>
-    <p>WebSocket: ws://localhost:9000</p>
     <UpdateStatus {appVersion} />
+    <p>WebSocket: ws://localhost:9000</p>
   </footer>
 </div>
 
@@ -334,8 +277,9 @@
 
   h1 {
     margin: 0;
-    font-size: 1.5rem;
+    font-size: 1.25rem;
     font-weight: 600;
+    white-space: nowrap;
     color: var(--color-primary);
   }
 
@@ -395,6 +339,7 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    white-space: nowrap;
     padding: 0.5rem 0.75rem;
     border: 1px solid var(--color-border);
     border-radius: 6px;

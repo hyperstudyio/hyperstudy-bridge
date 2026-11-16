@@ -51,12 +51,6 @@ futures-util = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 
-# Performance Monitoring
-metrics = "0.24"
-metrics-exporter-prometheus = "0.17"
-sysinfo = "0.37"
-histogram = "0.11"
-
 # State Management
 parking_lot = "0.12"
 dashmap = "6"
@@ -68,8 +62,8 @@ libc = "0.2"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
 base64 = "0.22"
 
-# Runtime dynamic loading (for optional SDK integration, e.g. EyeLink)
-libloading = "0.8"
+# Runtime dynamic loading of the SR Research SDK (only with the `eyelink` feature)
+libloading = { version = "0.8", optional = true }
 
 # Testing utilities
 rand = "0.9"
@@ -86,6 +80,7 @@ rust-argon2 = "2"
 [dev-dependencies]
 criterion = { version = "0.7", features = ["html_reports"] }
 tokio-test = "0.4"
+sysinfo = "0.37"
 tauri = { version = "2", features = ["test"] }
 
 [[bench]]
@@ -96,6 +91,8 @@ harness = false
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# EyeLink 1000 Plus support is unfinished and off in released builds; its commands answer "not supported".
+eyelink = ["dep:libloading"]
 
 [profile.release]
 panic = "abort"

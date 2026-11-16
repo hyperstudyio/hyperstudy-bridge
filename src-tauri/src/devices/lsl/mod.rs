@@ -8,7 +8,6 @@ pub mod sync;
 pub mod types;
 
 use crate::devices::{Device, DeviceConfig, DeviceError, DeviceInfo, DeviceStatus, DeviceType};
-use crate::performance::PerformanceMonitor;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -161,37 +160,6 @@ impl LslDevice {
         F: Fn(&str, Duration, u64, u64) + Send + Sync + 'static,
     {
         self.performance_callback = Some(Box::new(callback));
-    }
-
-    /// Create LSL device with performance monitoring integration
-    pub fn with_performance_monitoring(
-        device_id: String,
-        lsl_config: Option<LslConfig>,
-        performance_monitor: Arc<PerformanceMonitor>,
-    ) -> Self {
-        let mut device = Self::new(device_id.clone(), lsl_config);
-
-        // Set up performance callback to integrate with the monitor
-        let monitor = performance_monitor.clone();
-        device.set_performance_callback(move |device_id, latency, bytes_sent, bytes_received| {
-            let monitor = monitor.clone();
-            let device_id = device_id.to_string();
-
-            tokio::spawn(async move {
-                monitor
-                    .record_device_operation(&device_id, latency, bytes_sent, bytes_received)
-                    .await;
-            });
-        });
-
-        // Add device to performance monitoring
-        let monitor = performance_monitor.clone();
-        let device_id = device_id.clone();
-        tokio::spawn(async move {
-            monitor.add_device(device_id).await;
-        });
-
-        device
     }
 
     /// Create outlets for bridge devices automatically

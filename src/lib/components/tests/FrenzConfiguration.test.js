@@ -92,3 +92,28 @@ it('hides the key again when configuration is reopened', async () => {
     'password'
   );
 });
+
+// A key pasted with a stray space or line break was saved as typed, and the SDK rejected it at connect.
+it('saves the product key without surrounding whitespace', async () => {
+  const onClose = vi.fn();
+  render(DeviceConfigModal, { device, isOpen: true, onSave: vi.fn(), onClose });
+  await screen.findByText('Selected band: FRENZI85');
+  const input = screen.getByLabelText(/Product Key/, { selector: 'input' });
+  await fireEvent.input(input, { target: { value: '  pasted-test-key \t' } });
+  await fireEvent.click(screen.getByText('Save Configuration'));
+  await waitFor(() => expect(onClose).toHaveBeenCalled());
+  expect(setSecrets).toHaveBeenCalledExactlyOnceWith({
+    frenz_device_id: 'FRENZI85',
+    frenz_product_key: 'pasted-test-key',
+  });
+});
+
+it('treats a whitespace-only product key as missing', async () => {
+  render(DeviceConfigModal, { device, isOpen: true, onSave: vi.fn() });
+  await screen.findByText('Selected band: FRENZI85');
+  const input = screen.getByLabelText(/Product Key/, { selector: 'input' });
+  await fireEvent.input(input, { target: { value: '   ' } });
+  await fireEvent.click(screen.getByText('Save Configuration'));
+  expect(await screen.findByText('Enter your Earable product key.')).toBeInTheDocument();
+  expect(setSecrets).not.toHaveBeenCalled();
+});

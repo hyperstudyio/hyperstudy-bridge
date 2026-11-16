@@ -45,16 +45,6 @@ describe('DeviceConfigModal', () => {
     },
   };
 
-  const mockEyeLinkDevice = {
-    id: 'eyelink',
-    name: 'EyeLink 1000 Plus',
-    type: 'Eye Tracker',
-    config: {
-      ip: '100.1.1.1',
-      sample_rate: 1000,
-    },
-  };
-
   const mockProps = {
     isOpen: true,
     device: mockTtlDevice,
@@ -185,42 +175,6 @@ describe('DeviceConfigModal', () => {
 
       await waitFor(() => {
         expect(screen.getByText(/Invalid URL format/)).toBeInTheDocument();
-      });
-    });
-  });
-
-  describe('EyeLink Device Configuration', () => {
-    it('displays IP Address field for eyelink', () => {
-      render(DeviceConfigModal, { ...mockProps, device: mockEyeLinkDevice });
-
-      expect(screen.getByText('IP Address')).toBeInTheDocument();
-    });
-
-    it('displays Sample Rate field for eyelink', () => {
-      render(DeviceConfigModal, { ...mockProps, device: mockEyeLinkDevice });
-
-      expect(screen.getByText('Sample Rate (Hz)')).toBeInTheDocument();
-    });
-
-    it('displays Display Width and Height fields for eyelink', () => {
-      render(DeviceConfigModal, { ...mockProps, device: mockEyeLinkDevice });
-
-      expect(screen.getByText('Display Width (px)')).toBeInTheDocument();
-      expect(screen.getByText('Display Height (px)')).toBeInTheDocument();
-    });
-
-    it('validates EyeLink IP address format (invalid IP rejected)', async () => {
-      render(DeviceConfigModal, { ...mockProps, device: mockEyeLinkDevice });
-
-      const ipInput = screen.getByDisplayValue('100.1.1.1');
-      await user.clear(ipInput);
-      await user.type(ipInput, '999.999.999.999');
-
-      const saveButton = screen.getByText('Save Configuration');
-      await user.click(saveButton);
-
-      await waitFor(() => {
-        expect(screen.getByText(/Invalid IP address format/)).toBeInTheDocument();
       });
     });
   });
