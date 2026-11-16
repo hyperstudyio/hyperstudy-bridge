@@ -235,7 +235,12 @@ interface DeviceStatus {
 ## Security Considerations
 
 1. **Local Only**: Bridge only accepts connections from localhost
-2. **No Credentials**: No passwords or keys stored in code
+2. **No Credentials**: No passwords or keys stored in code. Device secrets (the FRENZ band name and product key) live
+   in the OS credential store via the `keyring` crate (`src-tauri/src/secrets/`, frontend `src/lib/services/secrets.js`):
+   service `io.hyperstudy.bridge`, account = the key name, an allowlist of keys, and values never logged. The service
+   name is fixed, so installed and dev builds share the saved key. The old Stronghold `vault.hold` is migrated once
+   and deleted (`secrets/stronghold_migration.rs`, removal due 2027-03-01). Tests use keyring's mock store, never the
+   real Keychain.
 3. **Input Validation**: Sanitize all external inputs
 4. **Error Messages**: Don't expose system details in errors
 5. **Secure Communication**: Use TLS for production deployments

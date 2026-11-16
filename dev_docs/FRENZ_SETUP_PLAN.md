@@ -8,6 +8,8 @@ configuration saving; diagnose generic startup ValueError without exposing keys.
    name). No automatic retry or connection. Scan must not start the SDK.
 2. Batch only changed vault fields. Preserve encryption/work factor; optimize
    scrypt/Salsa20 in debug builds. Show save errors and prevent edits during save.
+   (Since 0.9 the Stronghold vault is replaced by the system credential store;
+   unchanged values are still skipped, in src-tauri/src/secrets.)
 3. Report safe startup phase and allowlisted error reason; distinguish SDK import
    from package installation. Test and rebuild an explicitly titled dev app.
 

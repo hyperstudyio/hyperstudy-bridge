@@ -223,6 +223,23 @@ Example configuration:
 }
 ```
 
+### Saved device credentials
+
+The FRENZ band name and product key (entered under **Configure** on the FRENZ card) are kept in the operating
+system's credential store, not in a settings file:
+
+- **macOS**: the login Keychain
+- **Windows**: Credential Manager
+- **Linux**: the Secret Service (GNOME Keyring or KWallet); without one running, the key cannot be saved
+
+Each entry has the service name `io.hyperstudy.bridge` and the key name (`frenz_device_id`, `frenz_product_key`) as
+its account. The name does not depend on the app identifier, so the installed app and a development build share the
+same saved key. On macOS, the first time one build reads an entry the other saved, macOS may ask to allow access.
+
+Bridge 0.8 and earlier kept these values in an encrypted Stronghold file, `vault.hold`, in the app data folder.
+On first launch, a newer Bridge moves them into the credential store and deletes that file. If the file cannot be
+read, it is left in place, a warning is logged, and the product key can be entered again under **Configure**.
+
 ## Troubleshooting
 
 ### Common Issues

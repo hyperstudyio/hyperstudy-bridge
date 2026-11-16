@@ -46,6 +46,7 @@ credential leakage; empty streams falsely reported as streaming.
 - [x] Add a recording panel: explicit stream selection, folder, start/stop,
   durable sample counts, failure status and saved path. Existing credential vault
   remains the key store; device ID becomes editable for initial BLE connection.
+  (Since 0.9 the key store is the system credential store; see src-tauri/src/secrets.)
 - [x] Test UI commands and configuration. Run Python, Rust, frontend suites,
   frontend build/type checks. Report baseline failures separately.
 - [x] Independent final review, fix findings, document schema and commands.
