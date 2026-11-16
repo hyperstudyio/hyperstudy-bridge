@@ -36,7 +36,10 @@ fn stop_frenz_sidecar(state: &Arc<AppState>) {
 /// Saves the log entries still buffered (up to 5 s / 100 of them), including the exit-time recording and helper
 /// lines. Runs on a fresh thread for the same reason as stop_frenz_sidecar.
 fn flush_logs_for_exit() {
-    let _ = std::thread::spawn(|| tauri::async_runtime::block_on(logging::flush_logs())).join();
+    let _ = std::thread::spawn(|| {
+        tauri::async_runtime::block_on(hyperstudy_bridge::logging::flush_logs())
+    })
+    .join();
 }
 
 #[tokio::main]
