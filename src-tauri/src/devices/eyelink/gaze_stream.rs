@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// A single gaze sample from the EyeLink, ready for the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]

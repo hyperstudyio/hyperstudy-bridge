@@ -3,16 +3,6 @@
     windows_subsystem = "windows"
 )]
 
-mod bridge;
-mod commands;
-mod devices;
-mod logging;
-mod open_files;
-mod recording;
-mod storage;
-mod updates;
-mod usb_monitor;
-
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc,
@@ -23,9 +13,12 @@ use tracing::{error, info, warn};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
-use crate::bridge::{AppState, BridgeServer};
-use crate::commands::*;
-use crate::logging::{init_log_emitter, init_log_persister, set_app_handle, TauriLogLayer};
+use hyperstudy_bridge::bridge::{AppState, BridgeServer};
+use hyperstudy_bridge::commands::{self, *};
+use hyperstudy_bridge::logging::{
+    init_log_emitter, init_log_persister, set_app_handle, TauriLogLayer,
+};
+use hyperstudy_bridge::{open_files, storage, updates, usb_monitor};
 
 /// Stops the FRENZ sidecar when Bridge exits, after the recording is finalized. Left running, it stayed connected
 /// to the band over Bluetooth, so no later Bridge could connect to it. Runs on a fresh thread: the sidecar belongs to
