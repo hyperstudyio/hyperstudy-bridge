@@ -333,7 +333,6 @@ async fn handle_connection<R: Runtime>(
             match msg {
                 Ok(Message::Text(text)) => {
                     state_clone.update_connection_activity(&connection_id_clone);
-                    state_clone.increment_message_count();
                     // Payloads can contain short-lived upload capabilities and device secrets.
                     info!(bytes = text.len(), "Received WebSocket message");
 
@@ -1004,9 +1003,6 @@ async fn handle_device_command(
                                         "Neon {} is not advertising on this network — is the Companion app open and the phone on the same Wi-Fi?",
                                         pin
                                     ));
-                                    state
-                                        .record_device_error(&device_id, &err.to_string())
-                                        .await;
                                     send_response(
                                         tx,
                                         BridgeResponse::device_error_from(
@@ -1129,9 +1125,6 @@ async fn handle_device_command(
                     .await;
                 }
                 Err(e) => {
-                    // Record failed connection attempt
-                    state.record_device_error(&device_id, &e.to_string()).await;
-
                     // Keep the machine-readable code (wrong_device, device_not_found…)
                     // so the client can tell an identity refusal from a plain failure.
                     send_response(
@@ -1986,8 +1979,6 @@ async fn handle_device_command(
                     .await;
                 }
                 Err(e) => {
-                    state.record_device_error("pupil", &e.to_string()).await;
-
                     send_response(
                         tx,
                         BridgeResponse::device_error_from("pupil".to_string(), &e, id),

@@ -5,8 +5,6 @@ import * as websocketStore from '../websocket.svelte.js';
 vi.mock('../../services/tauri.js', () => ({
   tauriService: {
     sendTtlPulse: vi.fn(),
-    setupEventListeners: vi.fn(),
-    cleanupEventListeners: vi.fn(),
   },
 }));
 
@@ -528,15 +526,6 @@ describe('WebSocket Store', () => {
 
       // Should not have created any new WebSocket instances
       expect(global.MockWebSocket.instances.length).toBe(instanceCountBeforeDisconnect);
-    });
-
-    it('cleans up Tauri event listeners on disconnect', async () => {
-      const { tauriService } = await import('../../services/tauri.js');
-      websocketStore.initialize();
-
-      websocketStore.disconnect();
-
-      expect(tauriService.cleanupEventListeners).toHaveBeenCalled();
     });
   });
 

@@ -507,11 +507,9 @@ export function disconnect() {
   // Clear all callbacks and handlers
   requestCallbacks.clear();
   messageHandlers.clear();
-
-  tauriService.cleanupEventListeners();
 }
 
-// Initialize the WebSocket connection and Tauri listeners
+// Initialize the WebSocket connection
 // Call this once from App.svelte on mount
 export function initialize() {
   if (initialized) {
@@ -520,7 +518,6 @@ export function initialize() {
   }
   initialized = true;
   connect();
-  tauriService.setupEventListeners();
 }
 
 // Reset all state for testing - allows proper test isolation
@@ -547,8 +544,6 @@ export function _resetForTesting() {
   // Clear callbacks and handlers
   requestCallbacks.clear();
   messageHandlers.clear();
-
-  tauriService.cleanupEventListeners();
 }
 
 // Generic message sending function

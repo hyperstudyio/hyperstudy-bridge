@@ -176,7 +176,6 @@ async fn main() {
 
             // Start USB device monitoring for TTL disconnect detection
             let state_for_usb = state.clone();
-            let app_handle_for_usb = app_handle.clone();
             tokio::spawn(async move {
                 let mut usb_rx = usb_monitor::start_usb_monitor();
                 info!("USB device monitoring started");
@@ -190,21 +189,8 @@ async fn main() {
                             port, serial
                         );
 
-                        // Handle the disconnect
-                        let updated = state_for_usb.handle_ttl_usb_disconnect().await;
-
-                        if updated {
-                            // Emit Tauri event to notify frontend
-                            if let Err(e) = app_handle_for_usb.emit("device_status_changed", serde_json::json!({
-                                "device": "ttl",
-                                "status": "Disconnected",
-                                "reason": "USB device unplugged",
-                                "port": port,
-                                "serial_number": serial
-                            })) {
-                                warn!("Failed to emit device_status_changed event: {}", e);
-                            }
-                        }
+                        // Unregisters the device and tells WebSocket clients (the page among them).
+                        state_for_usb.handle_ttl_usb_disconnect().await;
                     }
                 }
             });
@@ -313,31 +299,14 @@ async fn main() {
         .manage(app_state)
         .manage(updates::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
-            start_bridge_server,
-            stop_bridge_server,
-            get_bridge_status,
-            connect_device,
-            disconnect_device,
-            send_device_command,
             send_ttl_pulse,
-            list_serial_ports,
-            list_all_serial_ports_debug,
             list_ttl_devices,
-            find_ttl_port_by_serial,
-            discover_devices,
-            get_system_diagnostics,
             get_logs,
             query_logs,
             get_log_stats,
             get_storage_stats,
-            start_session,
-            end_session,
-            list_sessions,
-            cleanup_old_logs,
             clear_all_logs,
             export_logs,
-            test_ttl_device,
-            reset_device,
             get_app_info,
             discover_recording_streams,
             start_lsl_recording,
@@ -348,12 +317,10 @@ async fn main() {
             reveal_recording,
             lsl_bridge_streams,
             update_status,
-            check_for_updates,
             install_update,
             recover_lsl_recording,
             scan_frenz_devices,
             start_frenz_bridge,
-            stop_frenz_bridge,
             get_frenz_bridge_status,
             check_frenz_bridge_available
         ])
