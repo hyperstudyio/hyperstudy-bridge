@@ -312,12 +312,6 @@ impl NeonLslManager {
         devices.get(device_name).cloned()
     }
 
-    /// Get all discovered Neon devices
-    pub async fn get_all_devices(&self) -> Vec<DiscoveredNeonDevice> {
-        let devices = self.discovered_devices.read().await;
-        devices.values().cloned().collect()
-    }
-
     /// Connect to a Neon gaze stream
     ///
     /// Returns a channel receiver that will emit gaze data samples, plus the
@@ -847,18 +841,6 @@ impl NeonLslManager {
         Ok(())
     }
 
-    /// Check if gaze stream is connected for a device
-    pub async fn is_gaze_connected(&self, device_name: &str) -> bool {
-        let tasks = self.gaze_tasks.read().await;
-        tasks.contains_key(device_name)
-    }
-
-    /// Check if events stream is connected for a device
-    pub async fn is_events_connected(&self, device_name: &str) -> bool {
-        let tasks = self.event_tasks.read().await;
-        tasks.contains_key(device_name)
-    }
-
     /// Get statistics for Neon streams
     pub async fn get_stats(&self) -> serde_json::Value {
         let devices = self.discovered_devices.read().await;
@@ -964,12 +946,6 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_filter_neon_gaze() {
-        let filter = StreamFilter::neon_gaze();
-        assert_eq!(filter.name_pattern, Some("_Neon Gaze".to_string()));
-    }
-
-    #[test]
     fn test_stream_filter_is_neon_stream() {
         assert!(StreamFilter::is_neon_gaze_stream("MyNeon_Neon Gaze"));
         assert!(!StreamFilter::is_neon_gaze_stream("MyNeon_Neon Events"));
@@ -1018,7 +994,6 @@ mod grouping_tests_no_host {
             uid: uid.to_string(),
             session_id: "default".to_string(),
             data_loss: 0.0,
-            time_stamps: (),
         }
     }
 
@@ -1070,7 +1045,6 @@ mod grouping_tests {
             uid: uid.to_string(),
             session_id: "default".to_string(),
             data_loss: 0.0,
-            time_stamps: (),
         }
     }
 

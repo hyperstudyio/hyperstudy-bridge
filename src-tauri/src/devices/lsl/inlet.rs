@@ -571,46 +571,6 @@ impl StreamInlet {
         }
     }
 
-    /// Pull multiple samples as a chunk
-    pub async fn pull_chunk(
-        &self,
-        max_samples: usize,
-        timeout: Duration,
-    ) -> Result<Vec<Sample>, LslError> {
-        let mut samples = Vec::with_capacity(max_samples);
-        let start_time = Instant::now();
-
-        while samples.len() < max_samples && start_time.elapsed() < timeout {
-            let remaining_timeout = timeout.saturating_sub(start_time.elapsed());
-            if remaining_timeout.is_zero() {
-                break;
-            }
-            match self.pull_sample(remaining_timeout).await? {
-                Some(sample) => samples.push(sample),
-                None => break, // No more samples available
-            }
-        }
-
-        Ok(samples)
-    }
-
-    /// Start continuous data collection
-    /// Returns a tokio channel receiver for samples
-    pub async fn start_collection(&self) -> Result<tokio::sync::mpsc::Receiver<Sample>, LslError> {
-        let (_sender, receiver) = tokio::sync::mpsc::channel(10000);
-
-        if !self.active.load(Ordering::Relaxed) {
-            return Err(LslError::LslLibraryError("Inlet not open".to_string()));
-        }
-
-        info!(
-            device = "lsl",
-            "Starting continuous collection for: {}", self.info.name
-        );
-
-        Ok(receiver)
-    }
-
     /// Calculate time correction offset
     async fn calculate_time_correction(&self) -> Result<f64, LslError> {
         let (response_tx, response_rx) = std_mpsc::channel();
@@ -644,21 +604,6 @@ impl StreamInlet {
         }
     }
 
-    /// Get stream information
-    pub fn get_info(&self) -> &StreamInfo {
-        &self.info
-    }
-
-    /// Get stream UID
-    pub fn get_uid(&self) -> &str {
-        &self.stream_uid
-    }
-
-    /// Get current status
-    pub async fn get_status(&self) -> StreamStatus {
-        self.status.read().await.clone()
-    }
-
     /// Check if inlet is active
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Relaxed)
@@ -678,17 +623,6 @@ impl StreamInlet {
     pub async fn get_buffer_usage(&self) -> (usize, usize) {
         let buffer = self.buffer.read().await;
         (buffer.len(), self.buffer_limit)
-    }
-
-    /// Flush buffer
-    pub async fn flush_buffer(&self) {
-        let mut buffer = self.buffer.write().await;
-        buffer.clear();
-    }
-
-    /// Get time correction offset
-    pub async fn get_time_correction(&self) -> f64 {
-        *self.time_correction.read().await
     }
 
     /// Get inlet statistics
@@ -734,15 +668,6 @@ impl InletManager {
         Self {
             inlets: Arc::new(RwLock::new(std::collections::HashMap::new())),
             default_config: InletConfig::default(),
-            time_sync,
-        }
-    }
-
-    /// Create inlet manager with custom configuration
-    pub fn with_config(time_sync: Arc<TimeSync>, config: InletConfig) -> Self {
-        Self {
-            inlets: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            default_config: config,
             time_sync,
         }
     }
@@ -826,12 +751,6 @@ impl InletManager {
         inlet.pull_sample(timeout).await
     }
 
-    /// List all inlets
-    pub async fn list_inlets(&self) -> Vec<String> {
-        let inlets = self.inlets.read().await;
-        inlets.keys().cloned().collect()
-    }
-
     /// Get inlet statistics for all inlets
     pub async fn get_all_stats(&self) -> serde_json::Value {
         let inlets = self.inlets.read().await;
@@ -845,24 +764,6 @@ impl InletManager {
             "inlet_count": inlets.len(),
             "inlets": stats
         })
-    }
-
-    /// Start all inlets
-    pub async fn start_all(&self, timeout: Duration) -> Result<(), LslError> {
-        let inlets = self.inlets.read().await;
-        for inlet in inlets.values() {
-            inlet.open(timeout).await?;
-        }
-        Ok(())
-    }
-
-    /// Stop all inlets
-    pub async fn stop_all(&self) -> Result<(), LslError> {
-        let inlets = self.inlets.read().await;
-        for inlet in inlets.values() {
-            inlet.close().await?;
-        }
-        Ok(())
     }
 }
 
@@ -881,7 +782,6 @@ mod tests {
             uid: "test_stream_001".to_string(),
             session_id: "session_001".to_string(),
             data_loss: 0.0,
-            time_stamps: (),
         }
     }
 
@@ -973,7 +873,7 @@ mod tests {
         // in unit tests without actual LSL streams
         if inlet.is_ok() {
             let inlet = inlet.unwrap();
-            assert_eq!(inlet.get_info().name, "test_device_TTL_Markers");
+            assert_eq!(inlet.info.name, "test_device_TTL_Markers");
             assert!(!inlet.is_active());
         }
     }

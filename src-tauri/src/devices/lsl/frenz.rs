@@ -248,19 +248,6 @@ impl FrenzLslManager {
         devices.get(device_name).cloned()
     }
 
-    /// Connect to a single FRENZ LSL stream
-    ///
-    /// Returns a channel receiver that will emit `FrenzSample` data.
-    /// The stream continues until `disconnect_stream` is called.
-    pub async fn connect_stream(
-        &self,
-        device_name: &str,
-        stream_suffix: &str,
-    ) -> Result<mpsc::Receiver<FrenzSample>, LslError> {
-        let _lifecycle = self.lifecycle.lock().await;
-        self.connect_stream_inner(device_name, stream_suffix).await
-    }
-
     async fn connect_stream_inner(
         &self,
         device_name: &str,

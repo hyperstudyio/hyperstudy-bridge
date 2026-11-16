@@ -1014,7 +1014,10 @@ mod lsl_panel_tests {
         );
         state
             .lsl_outlets
-            .create_device_outlet("panel_test", "ttl", None)
+            .create_outlet(
+                crate::devices::lsl::types::StreamInfo::ttl_markers("panel_test"),
+                None,
+            )
             .await
             .unwrap();
         let listed = state.lsl_bridge_streams().await;
