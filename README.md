@@ -239,7 +239,8 @@ same saved key. On macOS, the first time one build reads an entry the other save
 Bridge 0.8 and earlier kept these values in an encrypted Stronghold file, `vault.hold`, in the app data folder.
 On first launch, a newer Bridge moves them into the credential store and deletes that file. A value the credential
 store already has is kept; if the file held a different one (for example, the installed app and a development
-build had different keys saved), the file is renamed to `vault.hold.conflict` instead of deleted. If the file cannot
+build had different keys saved), that one is kept in the credential store as `frenz_product_key.from-old-vault`
+(or `frenz_device_id.from-old-vault`), where Keychain Access or Credential Manager can show it. If the file cannot
 be read, it is left in place, a warning is logged, and the product key can be entered again under **Configure**.
 
 ## Troubleshooting

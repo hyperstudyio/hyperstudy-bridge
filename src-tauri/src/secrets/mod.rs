@@ -19,6 +19,9 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 /// The credential-store service name shared by every Bridge build.
+/// Suffix of the account under which the vault migration keeps a conflicting old value (see `keep_aside`).
+pub(crate) const SET_ASIDE_SUFFIX: &str = "from-old-vault";
+
 pub const SERVICE: &str = "io.hyperstudy.bridge";
 
 /// The secrets the app keeps. Anything else is refused.
@@ -134,6 +137,29 @@ impl SecretStore {
                 Ok(()) | Err(StoreError::NoEntry) => Ok(()),
                 Err(error) => Err(store_error(key, error)),
             },
+        }
+    }
+
+    /// Keeps a value Bridge will not use under a separate account, `<key>.from-old-vault`, which no command reads or
+    /// writes. Used by the vault migration when the old vault's value differs from the saved one, so that value is
+    /// not destroyed along with the vault but can still be found in the system's credential manager. The value is
+    /// read back before this returns.
+    pub(crate) fn keep_aside(&self, key: &'static str, value: &str) -> Result<String, SecretError> {
+        let account = format!("{key}.{SET_ASIDE_SUFFIX}");
+        let entry = self
+            .store
+            .build(SERVICE, &account, None)
+            .map_err(|error| store_error(key, error))?;
+        entry
+            .set_password(value)
+            .map_err(|error| store_error(key, error))?;
+        match entry.get_password() {
+            Ok(saved) if saved == value => Ok(account),
+            Ok(_) => Err(SecretError::Store {
+                key,
+                message: "the set-aside copy did not read back".to_string(),
+            }),
+            Err(error) => Err(store_error(key, error)),
         }
     }
 
