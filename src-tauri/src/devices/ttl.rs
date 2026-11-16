@@ -29,9 +29,6 @@ impl Default for TtlConfig {
     }
 }
 
-/// Type alias for performance callback
-type PerformanceCallback = Box<dyn Fn(&str, Duration, u64, u64) + Send + Sync>;
-
 pub struct TtlDevice {
     /// Serial port wrapped in Arc<Mutex> to allow cloning into spawn_blocking tasks.
     /// Using std::sync::Mutex is correct here because serial I/O is inherently blocking
@@ -41,8 +38,6 @@ pub struct TtlDevice {
     status: DeviceStatus,
     config: TtlConfig,
     device_config: DeviceConfig,
-    /// Performance callback for recording metrics
-    performance_callback: Option<PerformanceCallback>,
 }
 
 impl std::fmt::Debug for TtlDevice {
@@ -52,10 +47,6 @@ impl std::fmt::Debug for TtlDevice {
             .field("status", &self.status)
             .field("config", &self.config)
             .field("device_config", &self.device_config)
-            .field(
-                "has_performance_callback",
-                &self.performance_callback.is_some(),
-            )
             .finish()
     }
 }
@@ -71,7 +62,6 @@ impl TtlDevice {
                 ..Default::default()
             },
             device_config: DeviceConfig::default(),
-            performance_callback: None,
         }
     }
 
@@ -105,14 +95,6 @@ impl TtlDevice {
         );
         self.port = None;
         self.status = DeviceStatus::Error;
-    }
-
-    /// Set performance callback for metrics recording
-    pub fn set_performance_callback<F>(&mut self, callback: F)
-    where
-        F: Fn(&str, Duration, u64, u64) + Send + Sync + 'static,
-    {
-        self.performance_callback = Some(Box::new(callback));
     }
 
     pub fn list_ports() -> Result<Vec<String>, DeviceError> {
@@ -289,13 +271,11 @@ impl TtlDevice {
     /// `PULSE <ms>` without reconfiguring the device.
     async fn send_pulse(&mut self, duration_override: Option<u64>) -> Result<(), DeviceError> {
         if let Some(ref port_arc) = self.port {
-            let device_id = self.get_info().id;
             let port_clone = Arc::clone(port_arc);
             let pulse_duration = duration_override.unwrap_or(self.config.pulse_duration_ms);
 
             // Format command with duration (firmware parses duration after GPIO toggle)
             let pulse_command = format!("PULSE {}\n", pulse_duration);
-            let command_len = pulse_command.len() as u64;
             let command_bytes = pulse_command.into_bytes();
 
             // Measure latency around the blocking operation
@@ -340,11 +320,6 @@ impl TtlDevice {
             .map_err(|e| DeviceError::CommunicationError(format!("Task join error: {}", e)))?;
 
             let latency = start.elapsed();
-
-            // Record performance metrics
-            if let Some(ref callback) = self.performance_callback {
-                callback(&device_id, latency, command_len, 0);
-            }
 
             info!(device = "ttl", "TTL pulse sent with latency: {:?}", latency);
 
@@ -521,12 +496,8 @@ impl Device for TtlDevice {
                 .and_then(|d| d.parse::<u64>().ok());
             self.send_pulse(duration_override).await
         } else if let Some(ref port_arc) = self.port {
-            let device_id = self.get_info().id;
             let port_clone = Arc::clone(port_arc);
             let data_owned = data.to_vec();
-            let data_len = data.len();
-
-            let start = Instant::now();
 
             // Run blocking serial I/O on the blocking thread pool with panic recovery
             let result = tokio::task::spawn_blocking(move || {
@@ -565,13 +536,6 @@ impl Device for TtlDevice {
             .await
             .map_err(|e| DeviceError::CommunicationError(format!("Task join error: {}", e)))?;
 
-            let latency = start.elapsed();
-
-            // Record performance metrics
-            if let Some(ref callback) = self.performance_callback {
-                callback(&device_id, latency, data_len as u64, 0);
-            }
-
             // Check if the error indicates a physical disconnection
             if let Err(ref e) = result {
                 if let DeviceError::CommunicationError(msg) = e {
@@ -589,10 +553,7 @@ impl Device for TtlDevice {
 
     async fn receive(&mut self) -> Result<Vec<u8>, DeviceError> {
         if let Some(ref port_arc) = self.port {
-            let device_id = self.get_info().id;
             let port_clone = Arc::clone(port_arc);
-
-            let start = Instant::now();
 
             // Run blocking serial I/O on the blocking thread pool with panic recovery
             let result = tokio::task::spawn_blocking(move || {
@@ -634,15 +595,6 @@ impl Device for TtlDevice {
             })
             .await
             .map_err(|e| DeviceError::CommunicationError(format!("Task join error: {}", e)))?;
-
-            let latency = start.elapsed();
-
-            // Record performance metrics
-            if let Ok(ref data) = result {
-                if let Some(ref callback) = self.performance_callback {
-                    callback(&device_id, latency, 0, data.len() as u64);
-                }
-            }
 
             // Check if the error indicates a physical disconnection
             if let Err(ref e) = result {

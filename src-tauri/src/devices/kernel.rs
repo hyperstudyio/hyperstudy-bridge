@@ -130,9 +130,6 @@ impl Default for KernelConfig {
     }
 }
 
-/// Type alias for performance callback
-type PerformanceCallback = Box<dyn Fn(&str, Duration, u64, u64) + Send + Sync>;
-
 pub struct KernelDevice {
     socket: Option<TcpStream>,
     status: DeviceStatus,
@@ -144,8 +141,6 @@ pub struct KernelDevice {
     last_successful_connection: Option<Instant>,
     /// Counter for generating unique event IDs
     next_event_id: i64,
-    /// Performance callback for recording metrics
-    performance_callback: Option<PerformanceCallback>,
 }
 
 impl std::fmt::Debug for KernelDevice {
@@ -163,10 +158,6 @@ impl std::fmt::Debug for KernelDevice {
                 &self.last_successful_connection,
             )
             .field("next_event_id", &self.next_event_id)
-            .field(
-                "has_performance_callback",
-                &self.performance_callback.is_some(),
-            )
             .finish()
     }
 }
@@ -186,16 +177,7 @@ impl KernelDevice {
             last_successful_operation: None,
             last_successful_connection: None,
             next_event_id: 1,
-            performance_callback: None,
         }
-    }
-
-    /// Set performance callback for metrics recording
-    pub fn set_performance_callback<F>(&mut self, callback: F)
-    where
-        F: Fn(&str, Duration, u64, u64) + Send + Sync + 'static,
-    {
-        self.performance_callback = Some(Box::new(callback));
     }
 
     /// Calculate exponential backoff delay
@@ -494,9 +476,6 @@ impl Device for KernelDevice {
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<(), DeviceError> {
-        // Get device_id before mutable borrow
-        let device_id = self.get_info().id;
-
         for attempt in 0..2u8 {
             // Ensure we have a connection (reconnect if socket is gone)
             if !self.is_connection_healthy() {
@@ -515,11 +494,6 @@ impl Device for KernelDevice {
                 Ok(latency) => {
                     // Record success
                     self.last_successful_operation = Some(Instant::now());
-
-                    // Record performance metrics
-                    if let Some(ref callback) = self.performance_callback {
-                        callback(&device_id, latency, data.len() as u64, 0);
-                    }
 
                     debug!(
                         device = "kernel",
@@ -562,9 +536,6 @@ impl Device for KernelDevice {
             }
         }
 
-        // Get device_id before mutable borrow
-        let device_id = self.get_info().id;
-
         if let Some(ref mut socket) = self.socket {
             let io_timeout = Duration::from_millis(IO_TIMEOUT_MS);
 
@@ -572,10 +543,7 @@ impl Device for KernelDevice {
             self.buffer.clear();
             self.buffer.resize(self.config.buffer_size, 0);
 
-            // Measure latency for the read operation with timeout
-            let start = Instant::now();
             let read_result = timeout(io_timeout, socket.read(&mut self.buffer)).await;
-            let latency = start.elapsed();
 
             match read_result {
                 Ok(Ok(0)) => {
@@ -600,11 +568,6 @@ impl Device for KernelDevice {
                     // Record success
                     if !data.is_empty() {
                         self.last_successful_operation = Some(Instant::now());
-                    }
-
-                    // Record performance metrics
-                    if let Some(ref callback) = self.performance_callback {
-                        callback(&device_id, latency, 0, data.len() as u64);
                     }
 
                     Ok(data)

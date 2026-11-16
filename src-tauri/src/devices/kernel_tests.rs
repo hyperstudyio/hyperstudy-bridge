@@ -71,21 +71,6 @@ mod tests {
     }
 
     #[test]
-    fn test_performance_callback() {
-        use std::sync::{Arc, Mutex};
-
-        let mut device = KernelDevice::new("192.168.1.100".to_string());
-        let callback_called = Arc::new(Mutex::new(false));
-        let callback_called_clone = callback_called.clone();
-
-        device.set_performance_callback(move |_id, _latency, _sent, _recv| {
-            *callback_called_clone.lock().unwrap() = true;
-        });
-
-        // The callback is set (can't directly verify but shouldn't panic)
-    }
-
-    #[test]
     fn test_device_config() {
         let mut device = KernelDevice::new("192.168.1.100".to_string());
 
@@ -590,26 +575,6 @@ mod integration_tests {
             assert!(info.id.starts_with("kernel_"));
             assert_eq!(info.device_type, DeviceType::Kernel);
         }
-    }
-
-    #[tokio::test]
-    async fn test_performance_metrics_collection() {
-        use std::sync::{Arc, Mutex};
-
-        let mut device = KernelDevice::new(TEST_IP.to_string());
-
-        let metrics = Arc::new(Mutex::new(Vec::new()));
-        let metrics_clone = metrics.clone();
-
-        device.set_performance_callback(move |id, latency, sent, recv| {
-            metrics_clone
-                .lock()
-                .unwrap()
-                .push((id.to_string(), latency, sent, recv));
-        });
-
-        // Performance callback is now set
-        // Actual metrics collection requires connection to hardware
     }
 
     #[tokio::test]

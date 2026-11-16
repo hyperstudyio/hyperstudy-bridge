@@ -98,7 +98,6 @@ pub struct TtlDevice {
     port_name: String,
     status: DeviceStatus,
     config: TtlConfig,
-    performance_callback: Option<PerformanceCallback>,
 }
 ```
 
@@ -124,21 +123,10 @@ sequenceDiagram
     Bridge->>App: WebSocket: {type: "data", device: "ttl", id: "req-123", latency: 0.8ms}
 ```
 
-### Performance Monitoring
+### Latency Logging
 
-The TTL module includes built-in performance monitoring to ensure sub-millisecond latency requirements are met:
-
-```rust
-pub fn set_performance_callback<F>(&mut self, callback: F)
-where
-    F: Fn(&str, Duration, u64, u64) + Send + Sync + 'static
-```
-
-Metrics tracked:
-- **Command Latency**: Time from send() call to completion
-- **Bytes Sent**: Number of bytes transmitted
-- **Bytes Received**: Number of bytes in response
-- **Success Rate**: Percentage of successful commands
+Each pulse's write latency is logged, with a warning when it exceeds 500µs and
+another when it exceeds the 1ms requirement.
 
 ## Error Handling
 
@@ -167,7 +155,6 @@ Located in `src-tauri/src/devices/ttl_tests.rs`
 - Configuration validation
 - Connection state management
 - Error handling
-- Performance callback verification
 
 ### Integration Tests
 
@@ -180,18 +167,6 @@ cargo test --features integration-tests -- --ignored
 # Run specific TTL tests
 cargo test ttl_tests --features integration-tests
 ```
-
-### Performance Benchmarks
-
-```bash
-# Run performance benchmarks
-cargo bench --bench ttl_performance
-```
-
-Expected results:
-- Command latency: <1ms (99th percentile)
-- Throughput: >100 commands/second
-- Memory usage: <1MB per device connection
 
 ## Firmware Requirements
 
