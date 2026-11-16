@@ -97,13 +97,6 @@ impl TtlDevice {
         self.status = DeviceStatus::Error;
     }
 
-    pub fn list_ports() -> Result<Vec<String>, DeviceError> {
-        let ports =
-            serialport::available_ports().map_err(|e| DeviceError::SerialError(e.to_string()))?;
-
-        Ok(ports.into_iter().map(|p| p.port_name).collect())
-    }
-
     /// Debug function to list ALL serial ports with detailed USB info
     pub fn list_all_ports_debug() -> Result<Vec<serde_json::Value>, DeviceError> {
         let ports =
@@ -227,37 +220,6 @@ impl TtlDevice {
         };
 
         Ok(result)
-    }
-
-    /// Find a TTL device port by serial number
-    pub fn find_port_by_serial(serial_number: &str) -> Result<Option<String>, DeviceError> {
-        let ports =
-            serialport::available_ports().map_err(|e| DeviceError::SerialError(e.to_string()))?;
-
-        for port in ports {
-            if let serialport::SerialPortType::UsbPort(usb_info) = &port.port_type {
-                // Only check devices with matching VID/PID
-                if usb_info.vid == TTL_USB_VID && usb_info.pid == TTL_USB_PID {
-                    if let Some(ref sn) = usb_info.serial_number {
-                        if sn == serial_number {
-                            info!(
-                                device = "ttl",
-                                "Found TTL device with serial number {} at port {}",
-                                serial_number,
-                                port.port_name
-                            );
-                            return Ok(Some(port.port_name));
-                        }
-                    }
-                }
-            }
-        }
-
-        info!(
-            device = "ttl",
-            "No TTL device found with serial number: {}", serial_number
-        );
-        Ok(None)
     }
 
     /// Send a TTL pulse using spawn_blocking to avoid blocking the async runtime.
@@ -551,66 +513,6 @@ impl Device for TtlDevice {
         }
     }
 
-    async fn receive(&mut self) -> Result<Vec<u8>, DeviceError> {
-        if let Some(ref port_arc) = self.port {
-            let port_clone = Arc::clone(port_arc);
-
-            // Run blocking serial I/O on the blocking thread pool with panic recovery
-            let result = tokio::task::spawn_blocking(move || {
-                let panic_result = catch_unwind(AssertUnwindSafe(|| {
-                    let mut buffer = vec![0u8; 256];
-                    let mut port = port_clone.lock().map_err(|e| {
-                        error!(device = "ttl", "Mutex poisoned in receive: {}", e);
-                        DeviceError::CommunicationError(
-                            "Mutex poisoned - device needs reset".to_string(),
-                        )
-                    })?;
-                    match port.read(&mut buffer) {
-                        Ok(bytes_read) => {
-                            buffer.truncate(bytes_read);
-                            Ok(buffer)
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(Vec::new()),
-                        Err(e) => Err(DeviceError::CommunicationError(e.to_string())),
-                    }
-                }));
-
-                match panic_result {
-                    Ok(result) => result,
-                    Err(panic_info) => {
-                        let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                            s.to_string()
-                        } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                            s.clone()
-                        } else {
-                            "Unknown panic in receive operation".to_string()
-                        };
-                        error!(device = "ttl", "Panic caught in receive: {}", msg);
-                        Err(DeviceError::CommunicationError(format!(
-                            "Receive operation panicked: {}",
-                            msg
-                        )))
-                    }
-                }
-            })
-            .await
-            .map_err(|e| DeviceError::CommunicationError(format!("Task join error: {}", e)))?;
-
-            // Check if the error indicates a physical disconnection
-            if let Err(ref e) = result {
-                if let DeviceError::CommunicationError(msg) = e {
-                    if Self::is_connection_lost_error(msg) {
-                        self.mark_disconnected(msg);
-                    }
-                }
-            }
-
-            result
-        } else {
-            Err(DeviceError::NotConnected)
-        }
-    }
-
     fn get_info(&self) -> DeviceInfo {
         DeviceInfo {
             id: format!("ttl_{}", self.port_name.replace('/', "_")),
@@ -648,14 +550,6 @@ impl Device for TtlDevice {
         }
 
         Ok(())
-    }
-
-    async fn heartbeat(&mut self) -> Result<(), DeviceError> {
-        if self.port.is_some() {
-            Ok(())
-        } else {
-            Err(DeviceError::NotConnected)
-        }
     }
 
     fn as_any(&self) -> Option<&dyn std::any::Any> {

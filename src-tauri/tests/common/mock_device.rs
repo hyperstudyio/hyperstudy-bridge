@@ -170,28 +170,6 @@ impl Device for TestMockDevice {
         Ok(())
     }
 
-    async fn receive(&mut self) -> Result<Vec<u8>, DeviceError> {
-        if self.should_simulate_error() {
-            return Err(DeviceError::CommunicationError(
-                "Simulated receive failure".to_string(),
-            ));
-        }
-
-        let status = *self.status.read().await;
-        if status != DeviceStatus::Connected {
-            return Err(DeviceError::NotConnected);
-        }
-
-        tokio::time::sleep(self.operation_delay).await;
-
-        let mut received_data = self.received_data.write().await;
-        if !received_data.is_empty() {
-            Ok(received_data.remove(0))
-        } else {
-            Ok(b"mock_response".to_vec())
-        }
-    }
-
     fn get_info(&self) -> DeviceInfo {
         DeviceInfo {
             id: self.id.clone(),
@@ -234,20 +212,6 @@ impl Device for TestMockDevice {
                 "Could not acquire config lock".to_string(),
             ))
         }
-    }
-
-    async fn heartbeat(&mut self) -> Result<(), DeviceError> {
-        if self.should_simulate_error() {
-            return Err(DeviceError::Timeout);
-        }
-
-        let status = *self.status.read().await;
-        if status != DeviceStatus::Connected {
-            return Err(DeviceError::NotConnected);
-        }
-
-        *self.last_operation.lock().await = Some(Instant::now());
-        Ok(())
     }
 
     fn as_any(&self) -> Option<&dyn std::any::Any> {

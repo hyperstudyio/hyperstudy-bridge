@@ -738,16 +738,6 @@ impl PupilDevice {
         Ok(event_resp)
     }
 
-    /// Check if a recording is currently active.
-    pub fn is_recording(&self) -> bool {
-        self.recording_id.is_some()
-    }
-
-    /// Get the cached Neon status (from last connect/heartbeat).
-    pub fn get_cached_status(&self) -> Option<&NeonStatus> {
-        self.neon_status.as_ref()
-    }
-
     /// Route a JSON command to the appropriate REST endpoint.
     async fn route_command(&mut self, data: &[u8]) -> Result<serde_json::Value, DeviceError> {
         let text = String::from_utf8_lossy(data);
@@ -946,26 +936,6 @@ impl Device for PupilDevice {
         }
     }
 
-    async fn receive(&mut self) -> Result<Vec<u8>, DeviceError> {
-        if self.status != DeviceStatus::Connected {
-            return Err(DeviceError::NotConnected);
-        }
-
-        // Poll status endpoint for updates.
-        // Gaze data streaming is handled by the LSL neon.rs module, not here.
-        match self.get_neon_status().await {
-            Ok(status) => {
-                let json = serde_json::to_vec(&status)
-                    .map_err(|e| DeviceError::InvalidData(e.to_string()))?;
-                Ok(json)
-            }
-            Err(e) => {
-                warn!(device = "pupil", "Failed to poll status: {}", e);
-                Ok(Vec::new())
-            }
-        }
-    }
-
     fn get_info(&self) -> DeviceInfo {
         let mut metadata = serde_json::json!({
             "base_url": self.base_url,
@@ -1039,24 +1009,6 @@ impl Device for PupilDevice {
         Ok(())
     }
 
-    async fn heartbeat(&mut self) -> Result<(), DeviceError> {
-        if self.status != DeviceStatus::Connected {
-            return Err(DeviceError::NotConnected);
-        }
-
-        match self.get_neon_status().await {
-            Ok(_) => {
-                debug!(device = "pupil", "Heartbeat OK");
-                Ok(())
-            }
-            Err(e) => {
-                error!(device = "pupil", "Heartbeat failed: {}", e);
-                self.status = DeviceStatus::Error;
-                Err(e)
-            }
-        }
-    }
-
     async fn test_connection(&mut self) -> Result<bool, DeviceError> {
         let test_url = format!("{}/status", self.base_url);
         let test_client = reqwest::Client::builder()
@@ -1109,7 +1061,7 @@ mod tests {
         let device = PupilDevice::new("192.168.1.100".to_string());
 
         assert_eq!(device.get_status(), DeviceStatus::Disconnected);
-        assert!(!device.is_recording());
+        assert!(device.recording_id.is_none());
         assert_eq!(device.base_url, "http://192.168.1.100:8080/api");
         assert_eq!(device.device_ip, "192.168.1.100");
     }

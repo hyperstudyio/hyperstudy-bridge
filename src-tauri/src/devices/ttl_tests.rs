@@ -37,14 +37,6 @@ mod tests {
         assert_eq!(device.get_status(), DeviceStatus::Disconnected);
     }
 
-    #[test]
-    fn test_ttl_list_ports() {
-        // This test might fail if no serial ports are available
-        // but it tests the function doesn't panic
-        let result = TtlDevice::list_ports();
-        assert!(result.is_ok());
-    }
-
     #[tokio::test]
     async fn test_connect_without_port() {
         let mut device = TtlDevice::new("/dev/nonexistent".to_string());

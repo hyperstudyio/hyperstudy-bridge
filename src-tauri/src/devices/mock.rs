@@ -30,22 +30,9 @@ impl MockDevice {
         }
     }
 
-    pub fn with_latency(mut self, latency_ms: u64) -> Self {
-        self.simulate_latency = true;
-        self.latency_ms = latency_ms;
-        self
-    }
-
-    pub fn push_receive_data(&mut self, data: Vec<u8>) {
-        self.receive_buffer.push_back(data);
-    }
-
-    pub fn pop_send_data(&mut self) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    fn pop_send_data(&mut self) -> Option<Vec<u8>> {
         self.send_buffer.pop_front()
-    }
-
-    pub fn get_all_sent_data(&self) -> Vec<Vec<u8>> {
-        self.send_buffer.clone().into_iter().collect()
     }
 
     async fn simulate_operation(&self) {
@@ -97,16 +84,6 @@ impl Device for MockDevice {
         Ok(())
     }
 
-    async fn receive(&mut self) -> Result<Vec<u8>, DeviceError> {
-        if self.status != DeviceStatus::Connected {
-            return Err(DeviceError::NotConnected);
-        }
-
-        self.simulate_operation().await;
-
-        Ok(self.receive_buffer.pop_front().unwrap_or_default())
-    }
-
     fn get_info(&self) -> DeviceInfo {
         DeviceInfo {
             id: self.id.clone(),
@@ -141,14 +118,6 @@ impl Device for MockDevice {
 
         Ok(())
     }
-
-    async fn heartbeat(&mut self) -> Result<(), DeviceError> {
-        if self.status == DeviceStatus::Connected {
-            Ok(())
-        } else {
-            Err(DeviceError::NotConnected)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -182,8 +151,7 @@ mod tests {
 
         device.send(b"ECHO").await.unwrap();
 
-        let received = device.receive().await.unwrap();
-        assert_eq!(received, b"ECHO");
+        assert_eq!(device.get_info().metadata["receive_buffer_size"], 1);
     }
 
     #[tokio::test]
@@ -191,9 +159,6 @@ mod tests {
         let mut device = MockDevice::new("error_test".to_string(), "Error Device".to_string());
 
         let result = device.send(b"test").await;
-        assert!(matches!(result, Err(DeviceError::NotConnected)));
-
-        let result = device.receive().await;
         assert!(matches!(result, Err(DeviceError::NotConnected)));
     }
 }

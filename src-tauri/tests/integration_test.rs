@@ -114,14 +114,6 @@ mod device_lifecycle_tests {
             device.send(test_data).await?;
         }
 
-        // Test receive operation
-        {
-            let device_lock = harness.app_state.get_device(&device_id).await.unwrap();
-            let mut device = device_lock.write().await;
-            let received = device.receive().await?;
-            assert!(!received.is_empty());
-        }
-
         harness.cleanup().await
     }
 
@@ -404,32 +396,6 @@ mod error_recovery_tests {
 
         harness.cleanup().await
     }
-
-    #[tokio::test]
-    async fn test_heartbeat_detection() -> TestResult<()> {
-        let mut harness = TestHarness::new().await;
-        let device_id = harness.add_connected_device(DeviceType::TTL).await?;
-
-        // Test heartbeat functionality
-        let mut heartbeat_results = Vec::new();
-        {
-            let device_lock = harness.app_state.get_device(&device_id).await.unwrap();
-            let mut device = device_lock.write().await;
-            for _ in 0..5 {
-                let result = device.heartbeat().await;
-                heartbeat_results.push(result.is_ok());
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-
-        // All heartbeats should succeed for a healthy device
-        assert!(
-            heartbeat_results.iter().all(|&success| success),
-            "Some heartbeats failed"
-        );
-
-        harness.cleanup().await
-    }
 }
 
 /// Test suite for memory leak detection
@@ -696,18 +662,6 @@ mod edge_case_tests {
             // These should fail because device is not connected
             let send_result = device.send(b"test").await;
             assert!(send_result.is_err(), "Send should fail when disconnected");
-
-            let receive_result = device.receive().await;
-            assert!(
-                receive_result.is_err(),
-                "Receive should fail when disconnected"
-            );
-
-            let heartbeat_result = device.heartbeat().await;
-            assert!(
-                heartbeat_result.is_err(),
-                "Heartbeat should fail when disconnected"
-            );
         }
 
         harness.cleanup().await

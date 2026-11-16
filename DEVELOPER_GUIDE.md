@@ -157,7 +157,7 @@ Create a new module in `src-tauri/src/devices/your_device/`:
 // src-tauri/src/devices/your_device/mod.rs
 
 use async_trait::async_trait;
-use crate::devices::{Device, DeviceError, DeviceInfo};
+use crate::devices::{Device, DeviceConfig, DeviceError, DeviceInfo, DeviceStatus};
 
 pub struct YourDevice {
     info: DeviceInfo,
@@ -182,18 +182,18 @@ impl Device for YourDevice {
         Ok(())
     }
 
-    async fn receive(&mut self) -> Result<Vec<u8>, DeviceError> {
-        // Implement receive logic
-        Ok(vec![])
+    fn get_info(&self) -> DeviceInfo {
+        self.info.clone()
     }
 
-    fn get_info(&self) -> &DeviceInfo {
-        &self.info
-    }
-
-    async fn get_status(&self) -> DeviceStatus {
+    fn get_status(&self) -> DeviceStatus {
         // Return current status
         DeviceStatus::Connected
+    }
+
+    fn configure(&mut self, config: DeviceConfig) -> Result<(), DeviceError> {
+        // Apply device-specific settings from config.custom_settings
+        Ok(())
     }
 }
 ```
