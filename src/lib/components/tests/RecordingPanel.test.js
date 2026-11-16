@@ -211,6 +211,31 @@ describe('RecordingPanel', () => {
     expect(screen.queryByText(/Last recording/)).not.toBeInTheDocument();
   });
 
+  // The confirmation was not tied to a recording: if the study ended on its own while "Stop and save" was showing,
+  // the next study opened with it already armed, one click from being stopped.
+  it("a stop confirmation never carries over to the next study's recording", async () => {
+    let live = study('s1', '2026-11-12T04:59:10Z', { state: 'recording' });
+    invoke.mockImplementation(async command => {
+      if (command === 'list_study_recordings') return [live];
+      if (command === 'lsl_recording_status')
+        return { ...idle, state: 'recording', path: live.path };
+      return undefined;
+    });
+    render(RecordingPanel, { isOpen: true });
+    await userEvent.click(await screen.findByRole('button', { name: 'Stop recording' }));
+    expect(screen.getByRole('button', { name: 'Stop and save' })).toBeInTheDocument();
+
+    // That study ends by itself and the next one starts recording.
+    live = study('s2', '2026-11-12T05:30:00Z', { state: 'recording' });
+    await waitFor(
+      () => expect(screen.getByRole('button', { name: 'Stop recording' })).toBeInTheDocument(),
+      {
+        timeout: 2500,
+      }
+    );
+    expect(screen.queryByRole('button', { name: 'Stop and save' })).not.toBeInTheDocument();
+  });
+
   it('clears a failed refresh once Bridge answers again', async () => {
     let fail = true;
     invoke.mockImplementation(async command => {

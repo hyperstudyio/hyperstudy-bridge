@@ -68,11 +68,14 @@
         manualCheck = true;
       }),
     ];
-    // Subscribed first, so a check that finishes now is never missed; an event that already arrived is newer
-    // than this snapshot, so the snapshot never overwrites it.
-    invoke('update_status').then(current => {
-      if (!heardEvent) apply(current);
-    });
+    // The snapshot is taken only once every listener is registered, so a check that finishes meanwhile is either
+    // heard as an event or already reflected in the snapshot. An event that arrived first is newer than the
+    // snapshot, so the snapshot never overwrites it.
+    Promise.all(unlisteners)
+      .then(() => invoke('update_status'))
+      .then(current => {
+        if (!heardEvent) apply(current);
+      });
     return () => unlisteners.forEach(p => p.then(unlisten => unlisten()));
   });
 

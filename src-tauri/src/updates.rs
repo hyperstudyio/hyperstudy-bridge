@@ -120,7 +120,26 @@ pub async fn install(app: &AppHandle, recorder_state: impl Fn() -> String) -> Re
     if let Some(reason) = install_blocker(&app.config().identifier, &recorder_state()) {
         return Err(reason);
     }
-    let found = match app.updater() {
+    // On Windows the installer quits Bridge from inside `install`, skipping the normal exit path; stop the FRENZ
+    // helper (it holds the band over Bluetooth) and save buffered logs first. No recording can be running here.
+    let state = app
+        .state::<std::sync::Arc<crate::bridge::AppState>>()
+        .inner()
+        .clone();
+    let updater = app
+        .updater_builder()
+        .on_before_exit(move || {
+            let helper = state.frenz_process.clone();
+            let _ = std::thread::spawn(move || {
+                tauri::async_runtime::block_on(async move {
+                    let _ = helper.stop_for_exit().await;
+                    crate::logging::flush_logs().await;
+                })
+            })
+            .join();
+        })
+        .build();
+    let found = match updater {
         Ok(updater) => updater.check().await.map_err(|e| e.to_string()),
         Err(e) => Err(e.to_string()),
     };

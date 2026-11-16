@@ -14,10 +14,15 @@ pub struct StudySession {
     pub upload_status: String,
     pub upload_error: Option<String>,
 }
+/// The connection that started (or last reattached to) a study recording: true once that WebSocket has closed.
+pub type StudyOwner = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
 #[derive(Default)]
 pub(super) struct StudyRegistry {
     directory: Option<PathBuf>,
     sessions: BTreeMap<String, StudySession>,
+    /// In memory only: after a restart no connection owns anything, so nothing is running either.
+    owners: std::collections::HashMap<String, StudyOwner>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,7 +156,11 @@ impl RecordingManager {
         }
         Ok(())
     }
-    pub fn start_study(&self, request: StudyStartRequest) -> Result<StudySession> {
+    pub fn start_study(
+        &self,
+        request: StudyStartRequest,
+        owner: StudyOwner,
+    ) -> Result<StudySession> {
         validate_context(&request.context)?;
         let mut registry = self.study.lock().unwrap();
         registry.refresh(&self.status())?;
@@ -159,13 +168,19 @@ impl RecordingManager {
             .sessions
             .values()
             .find(|s| same_context(&s.context, &request.context) && active(&s.recording.state))
+            .cloned()
         {
-            return Ok(session.clone());
+            // A reload or reconnect of the same study attaches; the new connection now owns the recording.
+            registry.owners.insert(session.recording_id.clone(), owner);
+            return Ok(session);
         }
-        // One study records at a time on a station (one band, one participant). A study that is still recording here
-        // but is not the one asking was abandoned: its boot failed, its tab closed, or it crashed without stopping.
-        // Save it and record the new study, rather than blocking every later study until Bridge is quit. A recording
-        // started in Bridge's own window is the operator's and is never cut off.
+        // Checked before anything below can stop a running recording.
+        super::validate_stream_uids(&request.stream_uids)?;
+        // One study records at a time on a station (one band, one participant). A study recording whose connection
+        // has closed was abandoned (its boot failed, its tab closed, it crashed without stopping): save it and record
+        // the new study, rather than blocking every later study until Bridge is quit. While that connection is open
+        // the study is live (a second participant in another tab, say) and is never cut. A recording started in
+        // Bridge's own window is the operator's and is never cut either.
         let current = self.status();
         if active(&current.state) {
             let abandoned = registry
@@ -178,6 +193,15 @@ impl RecordingManager {
                     "A recording started in Bridge is running. Stop it in Bridge's Recordings panel, then try again."
                 );
             };
+            let still_connected = registry
+                .owners
+                .get(&abandoned.recording_id)
+                .is_some_and(|closed| !closed.load(std::sync::atomic::Ordering::Relaxed));
+            ensure!(
+                !still_connected,
+                "Another study is recording on this Bridge and is still connected. Finish that study, or stop its \
+                 recording in Bridge's Recordings panel, then try again."
+            );
             tracing::info!(
                 "Saving study recording {} (room {:?}): a different study on this station started recording",
                 abandoned.recording_id,
@@ -232,6 +256,7 @@ impl RecordingManager {
             }
         }
         registry.persist(&session)?;
+        registry.owners.insert(recording_id.clone(), owner);
         registry.sessions.insert(recording_id, session.clone());
         Ok(session)
     }
@@ -374,21 +399,6 @@ impl RecordingManager {
             .context("Recorder did not acknowledge marker")?
             .map_err(anyhow::Error::msg)?;
         Ok(json!({ "recording_id": id, "marker_lsl_timestamp": timestamp }))
-    }
-    /// Legacy WebSocket callers cannot bypass study ownership. The native
-    /// RecordingPanel deliberately keeps the explicit local stop control.
-    pub fn stop_unmanaged(&self, request: RecordingStopRequest) -> Result<RecordingStatus> {
-        let registry = self.study.lock().unwrap();
-        let status = self.status();
-        ensure!(
-            !active(&status.state)
-                || !registry
-                    .sessions
-                    .values()
-                    .any(|s| s.recording.path == status.path),
-            "Study recordings require recording_id and context; use scoped stop or stop locally"
-        );
-        self.stop_with(request)
     }
     pub fn study_path(&self, id: &str) -> Result<PathBuf> {
         let mut registry = self.study.lock().unwrap();

@@ -28,7 +28,7 @@ pub async fn bind_listener(addr: SocketAddr) -> Result<TcpListener, String> {
     TcpListener::bind(addr).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::AddrInUse {
             format!(
-                "Another Hyperstudy Device Bridge is already running on port {}. Quit it, then open this one again.",
+                "Port {} is already in use, most likely by another Hyperstudy Device Bridge. Quit it, then open this one again.",
                 addr.port()
             )
         } else {
@@ -2095,6 +2095,8 @@ async fn handle_device_command(
         | CommandAction::PrepareRecordingUpload
         | CommandAction::ListStudyRecordings => {
             let manager = state.recording.clone();
+            // A study recording belongs to the connection that started it, until that connection closes.
+            let owner = conn.closed.clone();
             let result =
                 tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
                     let value = payload.unwrap_or_else(|| json!({}));
@@ -2106,7 +2108,7 @@ async fn handle_device_command(
                     };
                     match action {
                         CommandAction::StartStudyRecording => Ok(serde_json::to_value(
-                            manager.start_study(serde_json::from_value(value)?)?,
+                            manager.start_study(serde_json::from_value(value)?, owner)?,
                         )?),
                         CommandAction::GetStudyRecording => Ok(serde_json::to_value(
                             manager.get_study(&serde_json::from_value(field("context")?)?)?,
@@ -2960,7 +2962,7 @@ mod bind_tests {
         let addr = first.local_addr().unwrap();
         let error = bind_listener(addr).await.unwrap_err();
         assert!(
-            error.contains("Another Hyperstudy Device Bridge"),
+            error.contains("another Hyperstudy Device Bridge"),
             "{error}"
         );
         assert!(error.contains(&addr.port().to_string()), "{error}");

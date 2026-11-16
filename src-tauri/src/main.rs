@@ -40,6 +40,12 @@ fn stop_frenz_sidecar(state: &Arc<AppState>) {
     }
 }
 
+/// Saves the log entries still buffered (up to 5 s / 100 of them), including the exit-time recording and helper
+/// lines. Runs on a fresh thread for the same reason as stop_frenz_sidecar.
+fn flush_logs_for_exit() {
+    let _ = std::thread::spawn(|| tauri::async_runtime::block_on(logging::flush_logs())).join();
+}
+
 #[tokio::main]
 async fn main() {
     // Create filters to prevent log explosion from dependencies.
@@ -363,6 +369,7 @@ async fn main() {
                     _ => {}
                 }
                 stop_frenz_sidecar(&exit_state);
+                flush_logs_for_exit();
             }
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
                 // Tauri exits the process without guaranteeing manager destructors.
@@ -380,6 +387,7 @@ async fn main() {
                             _ => {}
                         }
                         stop_frenz_sidecar(&state);
+                        flush_logs_for_exit();
                         finished.store(2, Ordering::Release);
                         handle.exit(code.unwrap_or(0));
                     });

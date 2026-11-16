@@ -26,7 +26,8 @@
   let searching = $state(false);
   let manualOpen = $state(false);
   let recoveredPath = $state('');
-  let confirmingStudyStop = $state(false);
+  // The recording whose Stop is awaiting confirmation; a confirmation never applies to a different recording.
+  let confirmingStopOf = $state(null);
 
   // Study and manual recordings share one recorder, so its status alone cannot say whose recording it is. The
   // study registry can: a recorder file that belongs to a listed study is that study's.
@@ -34,6 +35,7 @@
   const liveStudy = $derived(
     studies.find(s => ['starting', 'recording', 'stopping'].includes(s.state))
   );
+  const confirmingStudyStop = $derived(!!liveStudy && confirmingStopOf === liveStudy.recording_id);
   const studyFile = $derived(!!status.path && studies.some(s => s.path === status.path));
   const manualActive = $derived(active && !liveStudy && !studyFile);
   const manualFile = $derived(!!status.path && !active && !studyFile);
@@ -173,7 +175,7 @@
   async function stopStudy(recordingId) {
     await action(async () => {
       await invoke('stop_study_recording', { recordingId });
-      confirmingStudyStop = false;
+      confirmingStopOf = null;
     });
   }
 
@@ -289,12 +291,12 @@
                 onclick={() => stopStudy(liveStudy.recording_id)}
                 disabled={busy}>Stop and save</button
               >
-              <button class="rec-keep" onclick={() => (confirmingStudyStop = false)}
+              <button class="rec-keep" onclick={() => (confirmingStopOf = null)}
                 >Keep recording</button
               >
             </div>
           {:else}
-            <button class="rec-stop" onclick={() => (confirmingStudyStop = true)}
+            <button class="rec-stop" onclick={() => (confirmingStopOf = liveStudy.recording_id)}
               >Stop recording</button
             >
           {/if}

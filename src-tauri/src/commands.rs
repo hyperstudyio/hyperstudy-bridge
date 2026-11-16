@@ -214,11 +214,6 @@ pub async fn connect_device(
                 }
             }
 
-            // Set up performance callback for TTL devices AFTER registration
-            // This prevents race conditions where the callback fires before
-            // the device is in state
-            if is_ttl_device {}
-
             // Emit status update
             app_handle
                 .emit(
@@ -1176,7 +1171,7 @@ pub async fn reveal_recording(
         let status = reveal_command(&path)
             .status()
             .map_err(|e| format!("Couldn't open the folder: {e}"))?;
-        if status.success() {
+        if system_open_succeeded(status) {
             Ok(())
         } else {
             Err(format!("Couldn't open the folder ({status})"))
@@ -1199,7 +1194,7 @@ pub async fn reveal_data_folder(app: AppHandle) -> Result<(), String> {
         let status = open_with_system(folder.as_os_str())
             .status()
             .map_err(|e| format!("Couldn't open the folder: {e}"))?;
-        if status.success() {
+        if system_open_succeeded(status) {
             Ok(())
         } else {
             Err(format!("Couldn't open the folder ({status})"))
@@ -1217,7 +1212,7 @@ pub fn open_documentation() -> Result<(), String> {
     let status = open_with_system(std::ffi::OsStr::new(DOCS_URL))
         .status()
         .map_err(|e| format!("Couldn't open the documentation: {e}"))?;
-    if status.success() {
+    if system_open_succeeded(status) {
         Ok(())
     } else {
         Err(format!("Couldn't open the documentation ({status})"))
@@ -1234,6 +1229,12 @@ fn open_with_system(target: &std::ffi::OsStr) -> std::process::Command {
     let mut command = std::process::Command::new("xdg-open");
     command.arg(target);
     command
+}
+
+/// Whether the system file browser or URL handler opened what we asked for. Windows Explorer exits with 1 even when
+/// it worked, so its exit status says nothing there; elsewhere a failure exits non-zero.
+fn system_open_succeeded(status: std::process::ExitStatus) -> bool {
+    cfg!(target_os = "windows") || status.success()
 }
 
 fn reveal_command(path: &std::path::Path) -> std::process::Command {

@@ -168,6 +168,27 @@ pub struct RecordingManager {
     status: Arc<Mutex<RecordingStatus>>,
     study: Mutex<study::StudyRegistry>,
 }
+/// The stream selection a recording request may carry: 1–64 distinct, non-empty stream UIDs.
+pub(crate) fn validate_stream_uids(stream_uids: &[String]) -> Result<()> {
+    ensure!(
+        !stream_uids.is_empty() && stream_uids.len() <= 64,
+        "Select 1–64 streams"
+    );
+    ensure!(
+        stream_uids.iter().all(|u| !u.is_empty()),
+        "Empty stream UID"
+    );
+    ensure!(
+        stream_uids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            == stream_uids.len(),
+        "Duplicate stream UID"
+    );
+    Ok(())
+}
+
 impl RecordingManager {
     pub fn status(&self) -> RecordingStatus {
         self.status.lock().unwrap().clone()
@@ -181,23 +202,7 @@ impl RecordingManager {
         study: bool,
         recording_id: Option<String>,
     ) -> Result<RecordingStatus> {
-        ensure!(
-            !request.stream_uids.is_empty() && request.stream_uids.len() <= 64,
-            "Select 1–64 streams"
-        );
-        ensure!(
-            request.stream_uids.iter().all(|u| !u.is_empty()),
-            "Empty stream UID"
-        );
-        ensure!(
-            request
-                .stream_uids
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-                == request.stream_uids.len(),
-            "Duplicate stream UID"
-        );
+        validate_stream_uids(&request.stream_uids)?;
         let mut active = self.active.lock().unwrap();
         if active.as_ref().is_some_and(|a| a.handle.is_finished()) {
             if let Some(old) = active.take() {

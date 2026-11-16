@@ -64,6 +64,8 @@ describe('UpdateStatus', () => {
     );
     render(UpdateStatus, { appVersion: '0.8.28' });
     await ready();
+    // The snapshot is requested once the listeners are registered.
+    await waitFor(() => expect(release).toBeTypeOf('function'));
     emit('update-status', available);
     release({ state: 'up_to_date', version: '0.8.28' });
     await new Promise(r => setTimeout(r, 0));
@@ -106,5 +108,24 @@ describe('UpdateStatus', () => {
     await waitFor(() => expect(titles()).toContain("Couldn't install the update"));
     expect(titles()).toContain('Update available: v0.8.29');
     expect(titles()).not.toContain('Installing update');
+  });
+
+  // The page asked for the status before its listeners were registered. A launch check that finished in that gap
+  // sent its event to nobody, and the snapshot still said "checking", so the update was never offered.
+  it('takes its snapshot only after it is listening, so a launch check finishing in between is not lost', async () => {
+    const event = await import('@tauri-apps/api/event');
+    let listening = false;
+    event.listen.mockImplementationOnce(async (name, handler) => {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      handlers[name] = handler;
+      listening = true;
+      return () => delete handlers[name];
+    });
+    // The check finishes while the listeners are still being registered.
+    invoke.mockImplementation(async command =>
+      command === 'update_status' ? (listening ? available : { state: 'checking' }) : undefined
+    );
+    render(UpdateStatus, { appVersion: '0.8.28' });
+    await waitFor(() => expect(titles()).toContain('Update available: v0.8.29'));
   });
 });

@@ -17,7 +17,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Errors that can occur during storage operations.
 #[derive(Error, Debug)]
@@ -60,7 +60,10 @@ impl Storage {
     /// without bound. Runs once per launch.
     pub async fn open(db_path: &Path) -> StorageResult<Self> {
         let storage = Self::new(db_path).await?;
-        storage.cleanup_old_logs(LOG_RETENTION_DAYS).await?;
+        // Pruning is housekeeping: if it fails, keep the database and keep saving logs.
+        if let Err(error) = storage.cleanup_old_logs(LOG_RETENTION_DAYS).await {
+            warn!("Couldn't delete log entries older than {LOG_RETENTION_DAYS} days: {error}");
+        }
         Ok(storage)
     }
 

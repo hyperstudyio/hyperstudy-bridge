@@ -83,13 +83,12 @@
     });
   }
 
-  // Most important first; "All" shows every level.
+  // Most important first; "All" shows every level. No Debug chip: Bridge saves its logs at info level and above.
   const LEVELS = [
     { value: 'all', label: 'All' },
     { value: 'error', label: 'Errors' },
     { value: 'warn', label: 'Warnings' },
     { value: 'info', label: 'Info' },
-    { value: 'debug', label: 'Debug' },
   ];
   const filtered = $derived(
     levelFilter !== 'all' || deviceFilter !== 'all' || searchQuery.trim() !== ''
