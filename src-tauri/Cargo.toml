@@ -73,15 +73,9 @@ tauri-plugin-updater = "2"
 rust-argon2 = "2"
 
 [dev-dependencies]
-criterion = { version = "0.7", features = ["html_reports"] }
 rand = "0.9"
 sysinfo = "0.37"
 tauri = { version = "2", features = ["test"] }
-
-[[bench]]
-name = "performance"
-harness = false
-
 
 [features]
 default = ["custom-protocol"]

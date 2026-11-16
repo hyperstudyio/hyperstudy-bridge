@@ -39,15 +39,14 @@ HyperStudy Bridge is a unified, high-performance desktop application that serves
 - **Implementation**: Using `tokio::net::TcpStream`
 
 ### 3. Pupil Labs Neon Eye Tracker
-- **Connection**: WebSocket client to device's Real-Time API
-- **Protocol**: JSON messages over WebSocket
-- **Features**: Gaze data streaming, recording control
-- **Implementation**: Using `tokio-tungstenite` crate
+- **Control**: HTTP REST API of the Neon Companion app (port 8080), using `reqwest` (`devices/pupil.rs`)
+- **Discovery**: mDNS / DNS-SD browse for Companion phones (`devices/neon_discovery.rs`)
+- **Gaze data**: LSL inlets on the Companion app's gaze and event streams (`devices/lsl/neon.rs`)
+- **Features**: Recording control, event markers, gaze streaming
 
-### 4. Lab Streaming Layer (Future)
-- **Connection**: LSL network protocol
-- **Protocol**: Time-synced data streams
-- **Implementation**: Using `lsl` crate
+### 4. Lab Streaming Layer
+- **Connection**: LSL network protocol, using the `lsl` crate
+- **Used by**: Neon gaze (above), the FRENZ brainband (a Python sidecar publishes its streams over LSL; `devices/lsl/frenz.rs`, `devices/lsl/frenz_process.rs`), and study recordings of LSL streams (`recording/`)
 
 ### 5. EyeLink 1000 Plus Eye Tracker
 - **Connection**: Ethernet TCP/IP (default: 100.1.1.1)
@@ -121,7 +120,6 @@ interface BridgeResponse {
   - Maintain overall system architecture
   - Review PRs from other agents
   - Resolve conflicts between modules
-  - Update DEVELOPMENT_PLAN.md with progress
   - Ensure code quality and consistency
 
 #### 2. Backend Agent
@@ -155,14 +153,12 @@ interface BridgeResponse {
 Each device has a dedicated agent:
 - **TTL Agent**: Serial communication, pulse timing
 - **Kernel Agent**: TCP socket, data streaming
-- **Pupil Agent**: WebSocket client, gaze tracking
+- **Pupil Agent**: Neon REST control, LSL gaze streaming
 ### Coordination Protocol
 
-1. **Task Assignment**: Agents claim tasks in DEVELOPMENT_PLAN.md
-2. **Progress Updates**: Update task status (pending → in_progress → completed)
-3. **Code Review**: Coordinator reviews all module integrations
-4. **Communication**: Use PR comments for discussions
-5. **Conflict Resolution**: Coordinator has final say on architecture
+1. **Code Review**: Coordinator reviews all module integrations
+2. **Communication**: Use PR comments for discussions
+3. **Conflict Resolution**: Coordinator has final say on architecture
 
 ## Code Style Guidelines
 
@@ -263,18 +259,22 @@ interface DeviceStatus {
 ```
 src-tauri/src/
 ├── devices/
-│   ├── mod.rs          # Device trait definition
-│   ├── ttl/
-│   │   ├── mod.rs      # TTL module
-│   │   └── tests.rs    # TTL tests
-│   ├── kernel/
-│   ├── pupil/
-│   └── lsl/
+│   ├── mod.rs              # Device trait definition
+│   ├── ttl.rs              # TTL pulse generator (tests in ttl_tests.rs)
+│   ├── kernel.rs           # Kernel Flow2 (tests in kernel_tests.rs)
+│   ├── pupil.rs            # Neon REST control
+│   ├── neon_discovery.rs   # Neon mDNS discovery
+│   ├── mock.rs             # Mock device
+│   ├── eyelink/            # EyeLink (behind the `eyelink` feature)
+│   └── lsl/                # LSL inlets/outlets, Neon gaze, FRENZ
 ├── bridge/
-│   ├── mod.rs          # Bridge core
-│   ├── websocket.rs    # WS server
-│   └── state.rs        # App state
-└── main.rs             # Entry point
+│   ├── websocket.rs        # WS server
+│   ├── message.rs          # Protocol messages
+│   └── state.rs            # App state
+├── recording/              # Study recordings of LSL streams
+├── storage/                # SQLite log storage
+├── commands.rs             # Tauri commands
+└── main.rs                 # Entry point
 ```
 
 ## Common Patterns
