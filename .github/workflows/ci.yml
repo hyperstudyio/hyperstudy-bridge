@@ -75,7 +75,7 @@ jobs:
       - name: Run clippy
         run: |
           cd src-tauri
-          cargo clippy --lib --bins --all-features || echo "Clippy found warnings but continuing"
+          cargo clippy --lib --bins --all-features
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -122,42 +122,24 @@ jobs:
           workspaces: src-tauri
           shared-key: "rust-cache"
 
-      - name: Run backend tests
-        run: |
-          cd src-tauri
-          echo "Temporarily skipping backend tests that timeout"
-          # cargo test --lib --bins --all-features --verbose
-
-      - name: Setup Node.js for frontend build
-        if: matrix.os == 'ubuntu-latest'
+      # Tauri embeds the built frontend at compile time, so every platform builds it before compiling the tests.
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
       - name: Install frontend dependencies
-        if: matrix.os == 'ubuntu-latest'
         run: npm ci
 
-      - name: Build frontend for tests
-        if: matrix.os == 'ubuntu-latest'
+      - name: Build frontend
         run: npm run build
 
-      - name: Run backend tests with coverage
-        if: matrix.os == 'ubuntu-latest'
+      # Server tests bind a free port (never 9000), so they are safe in parallel and on a machine running Bridge.
+      - name: Run backend tests
         run: |
           cd src-tauri
-          cargo install cargo-tarpaulin --version ^0.27
-          cargo tarpaulin --lib --bins --all-features --workspace --timeout 120 --out xml || echo "Coverage collection failed but continuing"
-
-      - name: Upload coverage to Codecov
-        if: matrix.os == 'ubuntu-latest'
-        uses: codecov/codecov-action@v5
-        with:
-          file: src-tauri/cobertura.xml
-          flags: backend
-          name: backend-coverage
-          fail_ci_if_error: false
+          cargo test --locked
 
   test-frontend:
     name: Test Frontend (Svelte)
@@ -175,19 +157,29 @@ jobs:
         run: npm ci
 
       - name: Run frontend tests
-        run: echo "Skipping frontend tests temporarily due to Vitest/Svelte plugin issue"
-        # run: npm run test:coverage
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          file: coverage/lcov.info
-          flags: frontend
-          name: frontend-coverage
-          fail_ci_if_error: false
+        run: npm test
 
       - name: Build frontend
         run: npm run build
+
+  test-helper:
+    name: Test FRENZ helper (Python)
+    # The Earable SDK (frenztoolkit 0.3.2) ships compiled for Python 3.9; the helper's PyApp build uses the same.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install the helper and its dependencies
+        run: python -m pip install ./python/frenz-bridge
+
+      - name: Run helper tests
+        working-directory: python/frenz-bridge
+        run: python -m unittest discover -s tests -v
 
   build-app:
     name: Build Application
