@@ -65,18 +65,6 @@ impl StoredLogEntry {
     }
 }
 
-impl From<StoredLogEntry> for LogEntry {
-    fn from(stored: StoredLogEntry) -> Self {
-        LogEntry {
-            timestamp: stored.timestamp,
-            level: stored.level,
-            message: stored.message,
-            device: stored.device,
-            source: stored.source,
-        }
-    }
-}
-
 /// The filters shared by the count and the page query. Each `(? IS NULL OR column ...)` pair takes the same
 /// value twice, so an absent filter matches everything. All values are bound parameters.
 const FILTERS: &str = r#"

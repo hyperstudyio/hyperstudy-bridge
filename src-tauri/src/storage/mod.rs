@@ -2,7 +2,7 @@
 //!
 //! This module provides persistent storage for:
 //! - Application logs (replaces in-memory circular buffer for history)
-//! - Session metadata (recording sessions with timestamps)
+//! - Logging sessions (one per launch; each log entry records the session it was written in)
 //!
 //! Study recordings are not stored here: each one is its own SQLite file (see `crate::recording`).
 //!
@@ -14,7 +14,7 @@ pub mod schema;
 
 use crate::logging::LogEntry;
 use database::{Database, Location};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::params;
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
@@ -106,65 +106,9 @@ impl Storage {
         Ok(session_id)
     }
 
-    /// End the current recording session.
-    pub async fn end_session(&self) -> StorageResult<()> {
-        let session_id = self.current_session_id.write().await.take();
-
-        if let Some(id) = session_id {
-            let ended_at = chrono::Utc::now().to_rfc3339();
-            let session = id.clone();
-            self.db
-                .run(move |conn| {
-                    conn.execute(
-                        "UPDATE sessions SET ended_at = ? WHERE id = ?",
-                        params![ended_at, session],
-                    )?;
-                    Ok(())
-                })
-                .await?;
-
-            info!("Ended session: {}", id);
-        }
-
-        Ok(())
-    }
-
     /// Get the current session ID, if any.
     pub async fn current_session_id(&self) -> Option<String> {
         self.current_session_id.read().await.clone()
-    }
-
-    /// Get session metadata by ID.
-    pub async fn get_session(&self, session_id: &str) -> StorageResult<Option<Session>> {
-        let session_id = session_id.to_string();
-        self.db
-            .run(move |conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT id, started_at, ended_at, metadata FROM sessions WHERE id = ?",
-                        [session_id],
-                        Session::from_row,
-                    )
-                    .optional()?)
-            })
-            .await
-    }
-
-    /// List all sessions, ordered by start time (most recent first).
-    pub async fn list_sessions(&self, limit: Option<i64>) -> StorageResult<Vec<Session>> {
-        let limit = limit.unwrap_or(100);
-        self.db
-            .run(move |conn| {
-                let mut statement = conn.prepare(
-                    "SELECT id, started_at, ended_at, metadata FROM sessions
-                     ORDER BY started_at DESC LIMIT ?",
-                )?;
-                let sessions = statement
-                    .query_map([limit], Session::from_row)?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(sessions)
-            })
-            .await
     }
 
     /// Get database statistics for diagnostics.
@@ -245,26 +189,6 @@ impl Storage {
             .await?;
         info!("Deleted {} old log entries", deleted);
         Ok(deleted)
-    }
-}
-
-/// Session metadata stored in the database.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Session {
-    pub id: String,
-    pub started_at: String,
-    pub ended_at: Option<String>,
-    pub metadata: Option<String>,
-}
-
-impl Session {
-    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
-        Ok(Self {
-            id: row.get(0)?,
-            started_at: row.get(1)?,
-            ended_at: row.get(2)?,
-            metadata: row.get(3)?,
-        })
     }
 }
 
@@ -518,14 +442,6 @@ mod tests {
             .unwrap();
         assert_eq!(ttl.total_count, 2);
 
-        let sessions = storage.list_sessions(None).await.unwrap();
-        assert_eq!(
-            sessions.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
-            ["s-open", "s-ended"]
-        );
-        assert_eq!(sessions[1].metadata.as_deref(), Some("{\"k\":\"v\"}"));
-        assert!(sessions[1].ended_at.is_some());
-
         // New entries join an existing session (the foreign key to sessions is still enforced).
         storage
             .insert_logs_batch(vec![entry(0, "after upgrade")], Some("s-open".into()))
@@ -546,6 +462,20 @@ mod tests {
 
         let conn = Connection::open(&path).unwrap();
         let one = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
+        let sessions: Vec<(String, Option<String>, Option<String>)> = conn
+            .prepare("SELECT id, ended_at, metadata FROM sessions ORDER BY started_at DESC")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(sessions.len(), 2, "existing sessions are kept");
+        assert_eq!(sessions[0].0, "s-open");
+        assert_eq!(
+            (sessions[1].0.as_str(), sessions[1].2.as_deref()),
+            ("s-ended", Some("{\"k\":\"v\"}"))
+        );
+        assert!(sessions[1].1.is_some());
         assert_eq!(one("SELECT COUNT(*) FROM lsl_streams"), 1);
         assert_eq!(one("SELECT COUNT(*) FROM lsl_samples"), 1);
         assert_eq!(one("SELECT COUNT(*) FROM schema_version"), 1);
@@ -621,45 +551,23 @@ mod tests {
         assert_eq!(stats.session_count, 0);
     }
 
+    /// start_session records a session row and becomes the session new log entries are written in.
     #[tokio::test]
     async fn test_session_lifecycle() {
         let storage = Storage::new_in_memory().await.unwrap();
-
-        // Start session
-        let session_id = storage.start_session(None).await.unwrap();
-        assert!(!session_id.is_empty());
-
-        // Check current session
-        assert_eq!(storage.current_session_id().await, Some(session_id.clone()));
-
-        // End session
-        storage.end_session().await.unwrap();
         assert_eq!(storage.current_session_id().await, None);
 
-        // Verify session was updated
-        let session = storage.get_session(&session_id).await.unwrap().unwrap();
-        assert!(session.ended_at.is_some());
-        assert!(storage.get_session("missing").await.unwrap().is_none());
-    }
+        let session_id = storage.start_session(None).await.unwrap();
+        assert!(!session_id.is_empty());
+        assert_eq!(storage.current_session_id().await, Some(session_id.clone()));
+        assert_eq!(storage.get_stats().await.unwrap().session_count, 1);
 
-    #[tokio::test]
-    async fn test_list_sessions() {
-        let storage = Storage::new_in_memory().await.unwrap();
-
-        // Create multiple sessions
-        let id1 = storage.start_session(None).await.unwrap();
-        storage.end_session().await.unwrap();
-
-        let id2 = storage.start_session(None).await.unwrap();
-        storage.end_session().await.unwrap();
-
-        // List sessions
-        let sessions = storage.list_sessions(Some(10)).await.unwrap();
-        assert_eq!(sessions.len(), 2);
-
-        // Most recent first
-        assert_eq!(sessions[0].id, id2);
-        assert_eq!(sessions[1].id, id1);
+        storage
+            .insert_logs_batch(vec![entry(0, "in session")], Some(session_id.clone()))
+            .await
+            .unwrap();
+        let stored = storage.query_logs(Default::default()).await.unwrap();
+        assert_eq!(stored.logs[0].session_id, Some(session_id));
     }
 
     #[tokio::test]
