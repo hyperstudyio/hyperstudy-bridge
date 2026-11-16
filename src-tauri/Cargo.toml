@@ -58,7 +58,6 @@ uuid = { version = "1", features = ["v4"] }
 # Database
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 libc = "0.2"
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
 base64 = "0.22"
 
 # Runtime dynamic loading of the SR Research SDK (only with the `eyelink` feature)

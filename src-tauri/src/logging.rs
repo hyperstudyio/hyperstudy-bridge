@@ -196,12 +196,7 @@ impl LogPersister {
 
         if let Some(storage) = crate::storage::get_storage() {
             let session_id = storage.current_session_id().await;
-            crate::storage::logs::insert_logs_batch(
-                storage.pool(),
-                &entries,
-                session_id.as_deref(),
-            )
-            .await?;
+            storage.insert_logs_batch(entries, session_id).await?;
         }
 
         Ok(())

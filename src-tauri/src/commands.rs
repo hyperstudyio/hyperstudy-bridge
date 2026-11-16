@@ -187,7 +187,7 @@ pub async fn query_logs(
         session_id,
     };
 
-    match crate::storage::logs::query_logs(storage.pool(), options).await {
+    match storage.query_logs(options).await {
         Ok(result) => Ok(CommandResult::success(result)),
         Err(e) => Ok(CommandResult::error(format!("Query failed: {}", e))),
     }
@@ -203,7 +203,7 @@ pub async fn get_log_stats() -> Result<CommandResult<serde_json::Value>, ()> {
         }
     };
 
-    match crate::storage::logs::get_log_counts_by_level(storage.pool()).await {
+    match storage.log_counts_by_level().await {
         Ok(counts) => {
             let stats: serde_json::Map<String, serde_json::Value> = counts
                 .into_iter()

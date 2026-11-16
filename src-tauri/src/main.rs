@@ -45,8 +45,9 @@ fn flush_logs_for_exit() {
 #[tokio::main]
 async fn main() {
     // Create filters to prevent log explosion from dependencies.
-    // Without filtering, sqlx logs every INSERT statement, which triggers more logging,
-    // causing an infinite feedback loop that fills the database and consumes all memory.
+    // Every event that reaches the Tauri layer is also written to the log database. A dependency that logs
+    // its own work (sqlx, which the log database once used, logged every INSERT) would then feed back into
+    // itself, filling the database and consuming all memory, so only this crate's events get there.
     //
     // Console filter: Show our logs at INFO+, dependencies at WARN+
     let console_filter =

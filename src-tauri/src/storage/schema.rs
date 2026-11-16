@@ -5,7 +5,7 @@
 //! - Index creation for query optimization
 //! - Schema migrations for upgrades
 
-use sqlx::SqlitePool;
+use rusqlite::{params, Connection};
 use tracing::info;
 
 use super::StorageResult;
@@ -15,24 +15,21 @@ use super::StorageResult;
 const SCHEMA_VERSION: i32 = 1;
 
 /// Run all necessary migrations to bring the database up to date.
-pub async fn run_migrations(pool: &SqlitePool) -> StorageResult<()> {
+pub fn run_migrations(conn: &mut Connection) -> StorageResult<()> {
     // Create schema version table if it doesn't exist
-    sqlx::query(
+    conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER PRIMARY KEY,
             applied_at TEXT NOT NULL
         )",
-    )
-    .execute(pool)
-    .await?;
+    )?;
 
-    // Get current version
-    // Note: MAX() returns NULL when table is empty, so we use Option<i32>
-    let current_version: (Option<i32>,) = sqlx::query_as("SELECT MAX(version) FROM schema_version")
-        .fetch_one(pool)
-        .await?;
-
-    let current = current_version.0.unwrap_or(0);
+    // MAX() returns NULL when the table is empty.
+    let current: Option<i32> =
+        conn.query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+            row.get(0)
+        })?;
+    let current = current.unwrap_or(0);
 
     if current < SCHEMA_VERSION {
         info!(
@@ -40,9 +37,11 @@ pub async fn run_migrations(pool: &SqlitePool) -> StorageResult<()> {
             current, SCHEMA_VERSION
         );
 
-        // Run migrations in order
+        // Run migrations in order, each in its own transaction so a failure leaves no partial schema.
         if current < 1 {
-            migrate_v1(pool).await?;
+            let tx = conn.transaction()?;
+            migrate_v1(&tx)?;
+            tx.commit()?;
         }
 
         info!("Database migrations complete");
@@ -56,24 +55,20 @@ pub async fn run_migrations(pool: &SqlitePool) -> StorageResult<()> {
 /// Databases created before the LSL time-series store was removed also hold `lsl_streams` and `lsl_samples`
 /// (and their indexes). Nothing reads or writes them any more. They are left in place rather than dropped, so
 /// opening an existing database never deletes data; new databases simply don't get them.
-async fn migrate_v1(pool: &SqlitePool) -> StorageResult<()> {
+fn migrate_v1(conn: &Connection) -> StorageResult<()> {
     info!("Applying migration v1: Initial schema");
 
-    // Sessions table - tracks recording sessions
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS sessions (
+    conn.execute_batch(
+        "-- Sessions table - tracks recording sessions
+        CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             started_at TEXT NOT NULL,
             ended_at TEXT,
             metadata TEXT
-        )",
-    )
-    .execute(pool)
-    .await?;
+        );
 
-    // Logs table - stores application log entries
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS logs (
+        -- Logs table - stores application log entries
+        CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT,
             timestamp TEXT NOT NULL,
@@ -82,32 +77,21 @@ async fn migrate_v1(pool: &SqlitePool) -> StorageResult<()> {
             device TEXT,
             source TEXT NOT NULL,
             FOREIGN KEY (session_id) REFERENCES sessions(id)
-        )",
-    )
-    .execute(pool)
-    .await?;
+        );
 
-    // Log indexes for efficient querying
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)")
-        .execute(pool)
-        .await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)")
-        .execute(pool)
-        .await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_logs_device ON logs(device)")
-        .execute(pool)
-        .await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_logs_session ON logs(session_id)")
-        .execute(pool)
-        .await?;
+        -- Log indexes for efficient querying
+        CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
+        CREATE INDEX IF NOT EXISTS idx_logs_device ON logs(device);
+        CREATE INDEX IF NOT EXISTS idx_logs_session ON logs(session_id);",
+    )?;
 
     // Record migration
     let applied_at = chrono::Utc::now().to_rfc3339();
-    sqlx::query("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
-        .bind(1)
-        .bind(&applied_at)
-        .execute(pool)
-        .await?;
+    conn.execute(
+        "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+        params![1, applied_at],
+    )?;
 
     info!("Migration v1 complete");
     Ok(())
@@ -116,65 +100,66 @@ async fn migrate_v1(pool: &SqlitePool) -> StorageResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
 
-    async fn create_test_pool() -> SqlitePool {
-        SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap()
+    fn migrated() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        conn
     }
 
-    #[tokio::test]
-    async fn test_migrations_run_successfully() {
-        let pool = create_test_pool().await;
-        run_migrations(&pool).await.unwrap();
-
-        // Verify tables exist
-        let tables: Vec<(String,)> =
-            sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-
-        let table_names: Vec<&str> = tables.iter().map(|t| t.0.as_str()).collect();
-        assert!(table_names.contains(&"sessions"));
-        assert!(table_names.contains(&"logs"));
-        assert!(table_names.contains(&"schema_version"));
-    }
-
-    #[tokio::test]
-    async fn test_migrations_are_idempotent() {
-        let pool = create_test_pool().await;
-
-        // Run migrations twice
-        run_migrations(&pool).await.unwrap();
-        run_migrations(&pool).await.unwrap();
-
-        // Should still work
-        let version: (i32,) = sqlx::query_as("SELECT MAX(version) FROM schema_version")
-            .fetch_one(&pool)
-            .await
+    fn names(conn: &Connection, kind: &str) -> Vec<String> {
+        let mut statement = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = ? ORDER BY name")
             .unwrap();
-        assert_eq!(version.0, SCHEMA_VERSION);
+        let names = statement
+            .query_map([kind], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        names
     }
 
-    #[tokio::test]
-    async fn test_indexes_created() {
-        let pool = create_test_pool().await;
-        run_migrations(&pool).await.unwrap();
+    #[test]
+    fn test_migrations_run_successfully() {
+        let conn = migrated();
+        let tables = names(&conn, "table");
+        for table in ["sessions", "logs", "schema_version"] {
+            assert!(
+                tables.iter().any(|t| t == table),
+                "missing {table}: {tables:?}"
+            );
+        }
+    }
 
-        let indexes: Vec<(String,)> = sqlx::query_as(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+    #[test]
+    fn test_migrations_are_idempotent() {
+        let mut conn = migrated();
+        run_migrations(&mut conn).unwrap();
 
-        let index_names: Vec<&str> = indexes.iter().map(|i| i.0.as_str()).collect();
-        assert!(index_names.contains(&"idx_logs_timestamp"));
-        assert!(index_names.contains(&"idx_logs_level"));
-        assert!(index_names.contains(&"idx_logs_device"));
+        let (version, rows): (i32, i64) = conn
+            .query_row(
+                "SELECT MAX(version), COUNT(*) FROM schema_version",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((version, rows), (SCHEMA_VERSION, 1));
+    }
+
+    #[test]
+    fn test_indexes_created() {
+        let conn = migrated();
+        let indexes = names(&conn, "index");
+        for index in [
+            "idx_logs_timestamp",
+            "idx_logs_level",
+            "idx_logs_device",
+            "idx_logs_session",
+        ] {
+            assert!(
+                indexes.iter().any(|i| i == index),
+                "missing {index}: {indexes:?}"
+            );
+        }
     }
 }
