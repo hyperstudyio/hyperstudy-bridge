@@ -30,7 +30,7 @@ jobs:
     name: Build PyApp (${{ inputs.target }})
     runs-on: ${{ contains(inputs.target, 'windows') && 'windows-latest' || 'macos-latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -102,7 +102,7 @@ jobs:
           Get-ChildItem src-tauri/resources/
 
       - name: Upload PyApp binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frenz-bridge-${{ inputs.target }}
           path: src-tauri/resources/frenz-bridge*
