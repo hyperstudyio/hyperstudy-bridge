@@ -13,6 +13,11 @@
   import * as toastStore from './lib/stores/toast.svelte.js';
   import { initialize } from './lib/stores/websocket.svelte.js';
   import logo from './assets/hyperstudy-logo.svg';
+  import {
+    restoreSelectedDevices,
+    saveSelectedDevices,
+    canDisconnectAll,
+  } from './lib/devices/selectedDevices.js';
 
   // App version
   let appVersion = $state('...');
@@ -23,8 +28,9 @@
   let showLslPanel = $state(false);
   let showRecordingPanel = $state(false);
 
-  // Selected devices - user has explicitly added these
-  let selectedDevices = $state([]);
+  // Devices the user added, remembered across launches (ids and settings only; see selectedDevices.js)
+  let selectedDevices = $state(restoreSelectedDevices());
+  $effect(() => saveSelectedDevices(selectedDevices));
 
   // Import reactive state from store using getters
   const bridgeStatus = $derived(bridgeStore.getStatus());
@@ -200,7 +206,7 @@
       <button
         class="disconnect-btn"
         onclick={disconnectAll}
-        disabled={bridgeStatus !== 'ready' || selectedDevices.length === 0}
+        disabled={bridgeStatus !== 'ready' || !canDisconnectAll(devices)}
       >
         Disconnect All
       </button>
@@ -324,15 +330,15 @@
     border-color: var(--color-border-hover);
   }
 
+  /* Quiet until needed: an outline, offered only while a device is connected. */
   .disconnect-btn {
-    background: var(--color-error);
-    color: white;
+    background: transparent;
+    color: var(--color-error);
+    border: 1px solid var(--color-error);
   }
 
   .disconnect-btn:hover:not(:disabled) {
-    background: #dc2626;
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+    background: rgba(239, 68, 68, 0.12);
   }
 
   .header-btn {
