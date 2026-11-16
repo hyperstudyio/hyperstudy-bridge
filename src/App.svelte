@@ -10,7 +10,6 @@
   import Toast from './lib/components/Toast.svelte';
   import UpdateStatus from './lib/components/UpdateStatus.svelte';
   import * as bridgeStore from './lib/stores/websocket.svelte.js';
-  import * as toastStore from './lib/stores/toast.svelte.js';
   import { initialize } from './lib/stores/websocket.svelte.js';
   import logo from './assets/hyperstudy-logo.svg';
   import {

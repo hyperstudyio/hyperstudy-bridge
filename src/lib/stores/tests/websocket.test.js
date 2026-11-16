@@ -8,15 +8,6 @@ vi.mock('../../services/tauri.js', () => ({
   },
 }));
 
-// Helper to get the latest WebSocket instance
-function getLatestWebSocketInstance() {
-  const instances = global.MockWebSocket?.instances;
-  if (instances && instances.length > 0) {
-    return instances[instances.length - 1];
-  }
-  return null;
-}
-
 // Helper to get the first (or specific) WebSocket instance
 function getWebSocketInstance(index = 0) {
   const instances = global.MockWebSocket?.instances;
