@@ -85,7 +85,6 @@ async fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_stronghold::Builder::new(|password| {
                 use argon2::{hash_raw, Config, Variant, Version};

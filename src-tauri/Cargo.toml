@@ -52,7 +52,6 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 
 # State Management
-parking_lot = "0.12"
 dashmap = "6"
 uuid = { version = "1", features = ["v4"] }
 
@@ -65,21 +64,17 @@ base64 = "0.22"
 # Runtime dynamic loading of the SR Research SDK (only with the `eyelink` feature)
 libloading = { version = "0.8", optional = true }
 
-# Testing utilities
-rand = "0.9"
-
 # Plugins
 tauri-plugin-dialog = "2"
 tauri-plugin-stronghold = "2"
 tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
 
 # Credential storage (rust-argon2 provides hash_raw API used by stronghold examples)
 rust-argon2 = "2"
 
 [dev-dependencies]
 criterion = { version = "0.7", features = ["html_reports"] }
-tokio-test = "0.4"
+rand = "0.9"
 sysinfo = "0.37"
 tauri = { version = "2", features = ["test"] }
 
