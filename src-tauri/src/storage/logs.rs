@@ -1,157 +1,11 @@
 //! Log storage operations with batching for efficient writes.
 //!
-//! This module provides:
-//! - `LogBatcher`: Accumulates logs and flushes them to the database in batches
-//! - Query functions with filtering, pagination, and search
+//! This module provides batch inserts and query functions with filtering,
+//! pagination, and search.
 
 use super::StorageResult;
 use crate::logging::LogEntry;
 use sqlx::SqlitePool;
-use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
-use tracing::{debug, error};
-
-/// Configuration for the log batcher.
-#[derive(Debug, Clone)]
-pub struct LogBatcherConfig {
-    /// Number of logs to accumulate before flushing.
-    pub batch_size: usize,
-    /// Maximum time between flushes.
-    pub flush_interval: Duration,
-}
-
-impl Default for LogBatcherConfig {
-    fn default() -> Self {
-        Self {
-            batch_size: 100,
-            flush_interval: Duration::from_secs(5),
-        }
-    }
-}
-
-/// Batches log entries for efficient database writes.
-///
-/// Logs are accumulated in memory and periodically flushed to the database,
-/// reducing the overhead of individual insert operations.
-pub struct LogBatcher {
-    buffer: RwLock<Vec<LogEntry>>,
-    config: LogBatcherConfig,
-    last_flush: RwLock<Instant>,
-    pool: SqlitePool,
-}
-
-impl LogBatcher {
-    /// Create a new log batcher with the given configuration.
-    pub fn new(pool: SqlitePool, config: LogBatcherConfig) -> Self {
-        Self {
-            buffer: RwLock::new(Vec::with_capacity(config.batch_size)),
-            config,
-            last_flush: RwLock::new(Instant::now()),
-            pool,
-        }
-    }
-
-    /// Add a log entry to the batch.
-    ///
-    /// May trigger a flush if the batch is full or the flush interval has elapsed.
-    pub async fn add(&self, entry: LogEntry) {
-        let should_flush = {
-            let mut buffer = self.buffer.write().await;
-            buffer.push(entry);
-
-            let last_flush = *self.last_flush.read().await;
-            buffer.len() >= self.config.batch_size
-                || last_flush.elapsed() >= self.config.flush_interval
-        };
-
-        if should_flush {
-            self.flush().await;
-        }
-    }
-
-    /// Add multiple log entries to the batch.
-    pub async fn add_batch(&self, entries: Vec<LogEntry>) {
-        if entries.is_empty() {
-            return;
-        }
-
-        let should_flush = {
-            let mut buffer = self.buffer.write().await;
-            buffer.extend(entries);
-
-            let last_flush = *self.last_flush.read().await;
-            buffer.len() >= self.config.batch_size
-                || last_flush.elapsed() >= self.config.flush_interval
-        };
-
-        if should_flush {
-            self.flush().await;
-        }
-    }
-
-    /// Force flush all buffered logs to the database.
-    pub async fn flush(&self) {
-        let entries = {
-            let mut buffer = self.buffer.write().await;
-            if buffer.is_empty() {
-                return;
-            }
-            std::mem::take(&mut *buffer)
-        };
-
-        let count = entries.len();
-
-        // Session ID will be set during insert if storage is available
-
-        if let Err(e) = self.insert_batch(&entries, None).await {
-            error!("Failed to flush logs to database: {}", e);
-            // Re-add entries to buffer on failure (with size limit to prevent memory issues)
-            let mut buffer = self.buffer.write().await;
-            let remaining_capacity = self.config.batch_size.saturating_sub(buffer.len());
-            buffer.extend(entries.into_iter().take(remaining_capacity));
-        } else {
-            debug!("Flushed {} logs to database", count);
-            *self.last_flush.write().await = Instant::now();
-        }
-    }
-
-    /// Insert a batch of log entries into the database.
-    async fn insert_batch(
-        &self,
-        entries: &[LogEntry],
-        session_id: Option<&str>,
-    ) -> StorageResult<()> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-
-        // Use a transaction for batch insert
-        let mut tx = self.pool.begin().await?;
-
-        for entry in entries {
-            sqlx::query(
-                "INSERT INTO logs (session_id, timestamp, level, message, device, source)
-                 VALUES (?, ?, ?, ?, ?, ?)",
-            )
-            .bind(session_id)
-            .bind(&entry.timestamp)
-            .bind(&entry.level)
-            .bind(&entry.message)
-            .bind(&entry.device)
-            .bind(&entry.source)
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// Get the number of entries currently buffered.
-    pub async fn buffered_count(&self) -> usize {
-        self.buffer.read().await.len()
-    }
-}
 
 /// Options for querying logs.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -311,19 +165,6 @@ pub async fn query_logs(
     })
 }
 
-/// Get the most recent logs (for real-time display).
-pub async fn get_recent_logs(pool: &SqlitePool, limit: i64) -> StorageResult<Vec<StoredLogEntry>> {
-    let logs = sqlx::query_as::<_, StoredLogEntry>(
-        "SELECT id, session_id, timestamp, level, message, device, source
-         FROM logs ORDER BY timestamp DESC LIMIT ?",
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(logs)
-}
-
 /// Get log count by level (for dashboard statistics).
 pub async fn get_log_counts_by_level(pool: &SqlitePool) -> StorageResult<Vec<(String, i64)>> {
     let counts: Vec<(String, i64)> =
@@ -332,28 +173,6 @@ pub async fn get_log_counts_by_level(pool: &SqlitePool) -> StorageResult<Vec<(St
             .await?;
 
     Ok(counts)
-}
-
-/// Insert a single log entry directly (bypassing the batcher).
-pub async fn insert_log(
-    pool: &SqlitePool,
-    entry: &LogEntry,
-    session_id: Option<&str>,
-) -> StorageResult<i64> {
-    let result = sqlx::query(
-        "INSERT INTO logs (session_id, timestamp, level, message, device, source)
-         VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .bind(session_id)
-    .bind(&entry.timestamp)
-    .bind(&entry.level)
-    .bind(&entry.message)
-    .bind(&entry.device)
-    .bind(&entry.source)
-    .execute(pool)
-    .await?;
-
-    Ok(result.last_insert_rowid())
 }
 
 /// Batch insert logs directly (bypassing the batcher).
@@ -513,52 +332,6 @@ mod tests {
         assert_eq!(result.total_count, 10);
         assert_eq!(result.logs.len(), 3);
         assert!(result.has_more);
-    }
-
-    #[tokio::test]
-    async fn test_log_batcher() {
-        let pool = create_test_pool().await;
-        let config = LogBatcherConfig {
-            batch_size: 5,
-            flush_interval: Duration::from_secs(60),
-        };
-        let batcher = LogBatcher::new(pool.clone(), config);
-
-        // Add 4 entries (below threshold)
-        for i in 0..4 {
-            batcher
-                .add(create_test_entry("info", &format!("Msg {}", i)))
-                .await;
-        }
-
-        assert_eq!(batcher.buffered_count().await, 4);
-
-        // Add one more to trigger flush
-        batcher.add(create_test_entry("info", "Msg 4")).await;
-
-        // Give flush a moment to complete
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // Buffer should be empty after flush
-        assert_eq!(batcher.buffered_count().await, 0);
-
-        // Verify logs are in database
-        let result = query_logs(&pool, LogQueryOptions::default()).await.unwrap();
-        assert_eq!(result.total_count, 5);
-    }
-
-    #[tokio::test]
-    async fn test_get_recent_logs() {
-        let pool = create_test_pool().await;
-
-        let entries: Vec<LogEntry> = (0..10)
-            .map(|i| create_test_entry("info", &format!("Message {}", i)))
-            .collect();
-
-        insert_logs_batch(&pool, &entries, None).await.unwrap();
-
-        let recent = get_recent_logs(&pool, 5).await.unwrap();
-        assert_eq!(recent.len(), 5);
     }
 
     #[tokio::test]

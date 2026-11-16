@@ -17,7 +17,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Errors that can occur during storage operations.
 #[derive(Error, Debug)]

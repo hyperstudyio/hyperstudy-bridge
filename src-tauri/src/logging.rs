@@ -95,21 +95,6 @@ impl LogBuffer {
     pub fn get_all(&self) -> Vec<LogEntry> {
         self.entries.iter().cloned().collect()
     }
-
-    /// Get the number of entries in the buffer.
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Check if the buffer is empty.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Clear all entries from the buffer.
-    pub fn clear(&mut self) {
-        self.entries.clear();
-    }
 }
 
 impl Default for LogBuffer {
@@ -154,6 +139,7 @@ impl LogPersister {
     }
 
     /// Create a new log persister with custom settings.
+    #[cfg(test)]
     pub fn with_config(batch_size: usize, flush_interval: Duration) -> Self {
         Self {
             buffer: std::sync::Mutex::new(Vec::with_capacity(batch_size)),
@@ -234,6 +220,7 @@ impl LogPersister {
     }
 
     /// Get the number of entries currently buffered.
+    #[cfg(test)]
     pub fn buffered_count(&self) -> usize {
         match self.buffer.lock() {
             Ok(buffer) => buffer.len(),
@@ -242,6 +229,7 @@ impl LogPersister {
     }
 
     /// Get the count of dropped log entries (for diagnostics).
+    #[cfg(test)]
     pub fn dropped_count(&self) -> u64 {
         self.dropped_count
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -329,11 +317,6 @@ impl LogEmitter {
         }
     }
 
-    /// Flush buffered logs to the frontend immediately (public for shutdown).
-    pub fn flush(&self) {
-        self.flush_now();
-    }
-
     /// Flush buffered logs to the frontend immediately.
     fn flush_now(&self) {
         let entries = match self.buffer.lock() {
@@ -404,9 +387,8 @@ pub fn get_log_persister() -> Option<Arc<LogPersister>> {
     LOG_PERSISTER.get().cloned()
 }
 
-/// Flush all buffered logs to the database.
-///
-/// Should be called before application shutdown.
+/// Saves the log entries still buffered. Called on exit (main.rs `flush_logs_for_exit`, both exit paths) and before
+/// the Windows updater quits Bridge (updates.rs), so the last seconds of logs are not lost.
 pub async fn flush_logs() {
     if let Some(persister) = get_log_persister() {
         persister.flush().await;
@@ -445,15 +427,6 @@ pub fn init_log_emitter() -> Arc<LogEmitter> {
 /// Get the global log emitter, if initialized.
 pub fn get_log_emitter() -> Option<Arc<LogEmitter>> {
     LOG_EMITTER.get().cloned()
-}
-
-/// Flush all buffered logs to the frontend.
-///
-/// Should be called before application shutdown to ensure no logs are lost.
-pub fn flush_log_emitter() {
-    if let Some(emitter) = get_log_emitter() {
-        emitter.flush();
-    }
 }
 
 /// Get a reference to the global log buffer.

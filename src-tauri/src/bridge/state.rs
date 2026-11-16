@@ -155,16 +155,6 @@ impl DeviceStatusEvent {
         )
     }
 
-    pub fn connected(device_id: String, device_type: DeviceType, reason: &str) -> Self {
-        Self::with_status(
-            device_id,
-            device_type,
-            DeviceStatus::Connected,
-            reason,
-            None,
-        )
-    }
-
     pub fn connected_with_info(
         device_id: String,
         device_type: DeviceType,
@@ -567,25 +557,6 @@ impl AppState {
             entry.message_count += 1;
         }
     }
-    pub async fn cleanup_stale_connections(&self, max_idle_seconds: u64) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let mut to_remove = Vec::new();
-
-        for entry in self.connections.iter() {
-            if now - entry.value().last_activity > max_idle_seconds {
-                to_remove.push(entry.key().clone());
-            }
-        }
-
-        for id in to_remove {
-            self.remove_connection(&id);
-        }
-    }
-
     /// Remember the payload that last connected `device_id` successfully.
     pub fn remember_connect_config(&self, device_id: &str, config: serde_json::Value) {
         self.last_connect_configs

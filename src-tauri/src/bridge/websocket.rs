@@ -36,9 +36,6 @@ pub async fn bind_listener(addr: SocketAddr) -> Result<TcpListener, String> {
         }
     })
 }
-#[allow(dead_code)]
-const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024; // 10MB
-
 #[cfg(test)]
 mod hybrid_config_tests {
     use super::*;
