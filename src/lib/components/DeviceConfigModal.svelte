@@ -141,12 +141,6 @@
       streamTheta: { label: 'Theta Power (5ch, 0.5Hz)', type: 'checkbox', default: true },
       streamGamma: { label: 'Gamma Power (5ch, 0.5Hz)', type: 'checkbox', default: true },
       streamDelta: { label: 'Delta Power (5ch, 0.5Hz)', type: 'checkbox', default: true },
-      // Marker outlet
-      enableMarkerOutlet: {
-        label: 'Enable Event Marker Outlet',
-        type: 'checkbox',
-        default: true,
-      },
     },
     lsl: {
       enableOutlet: {

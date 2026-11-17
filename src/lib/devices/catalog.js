@@ -49,7 +49,6 @@ export const DEVICE_CATALOG = Object.freeze([
       streamTheta: true,
       streamGamma: true,
       streamDelta: true,
-      enableMarkerOutlet: true,
     },
   },
 ]);

@@ -241,11 +241,7 @@ impl AppState {
         let inlet_manager = Arc::new(InletManager::new(time_sync.clone()));
         let outlet_manager = Arc::new(OutletManager::new(time_sync));
         let neon_manager = Arc::new(NeonLslManager::new(resolver.clone(), inlet_manager.clone()));
-        let frenz_manager = Arc::new(FrenzLslManager::new(
-            resolver,
-            inlet_manager.clone(),
-            outlet_manager.clone(),
-        ));
+        let frenz_manager = Arc::new(FrenzLslManager::new(resolver, inlet_manager.clone()));
         let frenz_process = Arc::new(FrenzProcessManager::new());
 
         #[cfg(feature = "eyelink")]

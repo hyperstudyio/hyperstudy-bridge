@@ -792,18 +792,6 @@ async fn handle_device_command(
                 }
                 info!("FRENZ connect: using device '{}'", device_name);
 
-                // Create marker outlet if requested
-                let enable_markers = config
-                    .get("enableMarkerOutlet")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-
-                if enable_markers {
-                    if let Err(e) = state.frenz_manager.create_marker_outlet().await {
-                        warn!("Failed to create FRENZ marker outlet: {}", e);
-                    }
-                }
-
                 // Connect to selected streams
                 match state
                     .frenz_manager
@@ -2247,13 +2235,6 @@ async fn handle_device_command(
                 })
                 .unwrap_or_default();
 
-            // Check if marker outlet should be created
-            let enable_markers = payload
-                .as_ref()
-                .and_then(|p| p.get("enable_markers"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-
             info!(
                 "Connecting FRENZ streams for {}: {:?}",
                 device_name,
@@ -2263,13 +2244,6 @@ async fn handle_device_command(
                     format!("{} selected", selected_streams.len())
                 }
             );
-
-            // Create marker outlet if requested
-            if enable_markers {
-                if let Err(e) = state.frenz_manager.create_marker_outlet().await {
-                    warn!("Failed to create FRENZ marker outlet: {}", e);
-                }
-            }
 
             match state
                 .frenz_manager
@@ -2389,52 +2363,6 @@ async fn handle_device_command(
                 ),
             )
             .await;
-        }
-        CommandAction::SendFrenzMarker => {
-            let marker = payload
-                .as_ref()
-                .and_then(|p| p.get("marker"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            if marker.is_empty() {
-                send_response(
-                    tx,
-                    BridgeResponse::device_error(
-                        "frenz_lsl".to_string(),
-                        "Missing 'marker' in payload".to_string(),
-                        id,
-                    ),
-                )
-                .await;
-                return;
-            }
-
-            let timestamp = payload
-                .as_ref()
-                .and_then(|p| p.get("timestamp"))
-                .and_then(|v| v.as_f64());
-
-            match state.frenz_manager.send_marker(marker, timestamp).await {
-                Ok(()) => {
-                    send_response(
-                        tx,
-                        BridgeResponse::data(
-                            "frenz_lsl".to_string(),
-                            json!({ "success": true, "marker": marker }),
-                            id,
-                        ),
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    send_response(
-                        tx,
-                        BridgeResponse::device_error("frenz_lsl".to_string(), e.to_string(), id),
-                    )
-                    .await;
-                }
-            }
         }
         // ====================================================================
         // EyeLink commands (SDK loaded at runtime via libloading). Unfinished: off unless built with the `eyelink`

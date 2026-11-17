@@ -8,7 +8,7 @@ it('enables every FRENZ option by default', async () => {
   render(DeviceConfigModal, { device, isOpen: true });
   await screen.findByText('Selected band: FRENZI85');
   const options = screen.getAllByRole('checkbox');
-  expect(options).toHaveLength(20);
+  expect(options).toHaveLength(19);
   for (const option of options) expect(option).toBeChecked();
 });
 
@@ -17,7 +17,7 @@ it('preserves explicit choices and enables them all on request', async () => {
   render(DeviceConfigModal, {
     device: {
       ...device,
-      config: { streamPoas: false, streamEegRaw: false, enableMarkerOutlet: false },
+      config: { streamPoas: false, streamEegRaw: false, streamFocus: false },
     },
     isOpen: true,
     onSave,

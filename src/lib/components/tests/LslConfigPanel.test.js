@@ -52,10 +52,10 @@ describe('LslConfigPanel', () => {
   it('marks which network streams Bridge receives or publishes', async () => {
     backend({
       receiving: [inlet('FRENZI85_EEG_raw', 'a')],
-      publishing: [{ name: 'HyperStudy_FRENZ_Markers', type: 'Markers', sample_count: 3 }],
+      publishing: [{ name: 'HyperStudy_TTL_Markers', type: 'Markers', sample_count: 3 }],
       network: [
         { uid: 'a', name: 'FRENZI85_EEG_raw', channels: 7, nominal_rate: 125 },
-        { uid: 'm', name: 'HyperStudy_FRENZ_Markers', channels: 1, nominal_rate: 0 },
+        { uid: 'm', name: 'HyperStudy_TTL_Markers', channels: 1, nominal_rate: 0 },
         { uid: 'x', name: 'OtherApp_Audio', channels: 2, nominal_rate: 44100 },
       ],
     });
