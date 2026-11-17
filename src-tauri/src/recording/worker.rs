@@ -295,6 +295,15 @@ pub fn record(
         streams: reports(&evidence, &signal.request, true),
         unmapped_streams,
     };
+    for (spec, observed) in specs.iter().zip(&evidence) {
+        if observed.backward_steps() > 0 {
+            tracing::warn!(
+                stream = %spec.name,
+                backward_steps = observed.backward_steps(),
+                "Recorded stream timestamps stepped backward; the stream may contain repeated or missing data"
+            );
+        }
+    }
     store.save_end_report(&report)?;
     status.lock().unwrap().end_report = Some(report);
     let finalization_started = Instant::now();

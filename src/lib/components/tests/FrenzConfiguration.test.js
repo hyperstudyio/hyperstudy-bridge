@@ -12,6 +12,17 @@ it('enables every FRENZ option by default', async () => {
   for (const option of options) expect(option).toBeChecked();
 });
 
+it('warns that the three SDK raw streams can repeat and skip data', async () => {
+  render(DeviceConfigModal, { device, isOpen: true });
+  await screen.findByText('Selected band: FRENZI85');
+  const warnings = screen.getAllByText(/can repeat one second of data and skip the next/);
+  expect(warnings.map(warning => warning.textContent.split(' ')[0])).toEqual([
+    'The',
+    'PPG_raw',
+    'IMU_raw',
+  ]);
+});
+
 it('preserves explicit choices and enables them all on request', async () => {
   const onSave = vi.fn();
   render(DeviceConfigModal, {

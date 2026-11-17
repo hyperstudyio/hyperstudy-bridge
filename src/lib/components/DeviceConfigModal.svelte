@@ -33,6 +33,10 @@
   let phoneDiscoveryError = $state('');
 
   // Device configuration templates with validation rules
+  // frenztoolkit 0.3.2 sometimes repeats a one-second block in its raw data and skips the next.
+  const SDK_RAW_WARNING =
+    'comes from the FRENZ SDK, which can repeat one second of data and skip the next. Bridge records it unchanged.';
+
   const deviceConfigs = {
     ttl: {
       port: {
@@ -119,9 +123,20 @@
         label: 'EEG: Bluetooth raw and SDK comparison (125Hz)',
         type: 'checkbox',
         default: true,
+        warning: `The SDK comparison stream (EEG_raw) ${SDK_RAW_WARNING} The Bluetooth stream is not affected.`,
       },
-      streamPpgRaw: { label: 'PPG Raw (4ch, 25Hz)', type: 'checkbox', default: true },
-      streamImuRaw: { label: 'IMU Raw (4ch, 50Hz)', type: 'checkbox', default: true },
+      streamPpgRaw: {
+        label: 'PPG Raw (4ch, 25Hz)',
+        type: 'checkbox',
+        default: true,
+        warning: `PPG_raw ${SDK_RAW_WARNING} Keep "Original firmware streams" on for a second copy.`,
+      },
+      streamImuRaw: {
+        label: 'IMU Raw (4ch, 50Hz)',
+        type: 'checkbox',
+        default: true,
+        warning: `IMU_raw ${SDK_RAW_WARNING} Keep "Original firmware streams" on for a second copy.`,
+      },
       streamHrRaw: { label: 'Heart rate', type: 'checkbox', default: true },
       streamSpo2Raw: { label: 'SpO2', type: 'checkbox', default: true },
       streamFirmware: { label: 'Original firmware streams', type: 'checkbox', default: true },
@@ -652,6 +667,9 @@
                         />
                         <span class="checkbox-label">Enable {fieldConfig.label}</span>
                       </label>
+                      {#if fieldConfig.warning}
+                        <p class="field-warning">{fieldConfig.warning}</p>
+                      {/if}
                     {:else}
                       <div class="input-with-button">
                         <input
@@ -1060,6 +1078,12 @@
   .checkbox-label {
     color: var(--color-text-primary);
     font-size: 0.95rem;
+  }
+
+  .field-warning {
+    color: var(--color-text-secondary);
+    font-size: 0.8rem;
+    margin: 0 0 0.25rem 1.75rem;
   }
 
   .form-error {
