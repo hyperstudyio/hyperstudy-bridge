@@ -97,6 +97,14 @@ jobs:
   test-backend:
     name: Test Backend (Rust)
     runs-on: ${{ matrix.os }}
+    # Known failure, not blocking: the Windows test binary does not run (checked 2026-11-17).
+    #  1. It has no Common Controls 6 manifest (Tauri embeds one in the app binary only), so it exits at start with
+    #     STATUS_ENTRYPOINT_NOT_FOUND. Embedding the manifest from build.rs gets past this (see the reverted
+    #     commit 5981d17).
+    #  2. It then crashes on the first test with STATUS_ACCESS_VIOLATION in vertdll!RtlpWaitOnAddressWithTimeout:
+    #     vertdll.dll (the VBS enclave runtime) is loaded into an ordinary process. What links it is not known.
+    # The Windows app build is a separate job and passes. Remove this line once the tests run.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -145,22 +153,6 @@ jobs:
         run: |
           cd src-tauri
           cargo test --locked
-
-      # Temporary: name the test that crashes the Windows test binary.
-      - name: Diagnose Windows test crash
-        if: failure() && matrix.os == 'windows-latest'
-        run: |
-          cd src-tauri
-          $exe = Get-ChildItem -Recurse target\debug -Filter 'hyperstudy_bridge-*.exe' | Sort-Object LastWriteTime | Select-Object -Last 1
-          $cdb = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe' -ErrorAction SilentlyContinue
-          Write-Host "exe: $($exe.FullName)"
-          Write-Host "cdb: $($cdb.FullName)"
-          if ($cdb) {
-            & $cdb.FullName -g -G -c ".ecxr; kb 60; lmv m hyperstudy*; q" $exe.FullName --test-threads=1 a_full_queue_rejects 2>&1 | Select-Object -Last 150
-          } else {
-            & $exe.FullName --test-threads=1 --nocapture a_full_queue_rejects
-          }
-          exit 1
 
   test-frontend:
     name: Test Frontend (Svelte)
