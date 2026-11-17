@@ -367,6 +367,18 @@ impl PupilDevice {
     // Public helper methods (convenience wrappers for common REST operations)
     // -----------------------------------------------------------------------
 
+    /// What to try next when the Companion app does not answer. A `.local` name
+    /// that is still unresolved here means mDNS failed — usually a network that
+    /// blocks multicast — so the fix is the phone's IP, not retrying the name.
+    fn unreachable_hint(base_url: &str) -> &'static str {
+        if base_url.contains(".local:") {
+            "This name could not be found on the network, which some networks (campus or guest Wi-Fi) block. \
+             Use \"Find phones\", or enter the IP address shown in the Companion app"
+        } else {
+            "Check that the Companion app is open and the phone is on the same network as this computer"
+        }
+    }
+
     /// Fetch current device status from `GET /api/status`.
     ///
     /// The Neon API returns a heterogeneous array of `{"model": "...", "data": {...}}`
@@ -602,7 +614,7 @@ impl PupilDevice {
         // The HTTP 2xx already confirms the recording was stopped server-side,
         // so a response-shape mismatch should not be treated as an error.
         let body_text = resp.text().await.unwrap_or_default();
-        match serde_json::from_str::<ApiResponse<RecordingStopResponse>>(&body_text) {
+        match serde_json::from_str::<ApiResponse<Option<RecordingStopResponse>>>(&body_text) {
             Ok(_envelope) => {
                 info!(device = "pupil", "Recording stopped and saved");
             }
@@ -643,7 +655,7 @@ impl PupilDevice {
 
         // Read body as text first — HTTP 2xx confirms cancellation succeeded.
         let body_text = resp.text().await.unwrap_or_default();
-        match serde_json::from_str::<ApiResponse<RecordingCancelResponse>>(&body_text) {
+        match serde_json::from_str::<ApiResponse<Option<RecordingCancelResponse>>>(&body_text) {
             Ok(_envelope) => {
                 info!(device = "pupil", "Recording cancelled");
             }
@@ -876,8 +888,10 @@ impl Device for PupilDevice {
 
                     self.status = DeviceStatus::Error;
                     return Err(DeviceError::ConnectionFailed(format!(
-                        "Cannot reach Neon Companion at {}: {}",
-                        self.base_url, e
+                        "Cannot reach Neon Companion at {}: {}. {}",
+                        self.base_url,
+                        e,
+                        Self::unreachable_hint(&self.base_url)
                     )));
                 }
                 Err(_) => {
@@ -1233,6 +1247,14 @@ mod tests {
     }
 
     #[test]
+    fn test_unreachable_hint_distinguishes_unresolved_name_from_silent_ip() {
+        assert!(PupilDevice::unreachable_hint("http://neon.local:8080/api").contains("IP address"));
+        assert!(
+            PupilDevice::unreachable_hint("http://192.168.1.5:8080/api").contains("same network")
+        );
+    }
+
+    #[test]
     fn test_pupil_command_force_flag() {
         let cmd: PupilCommand = serde_json::from_str(r#"{"command":"recording_stop"}"#).unwrap();
         assert!(!cmd.force);
@@ -1322,6 +1344,21 @@ mod tests {
 
         let envelope: ApiResponse<RecordingStartResponse> = serde_json::from_value(json).unwrap();
         assert_eq!(envelope.result.id, "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_stop_and_cancel_accept_null_result() {
+        // Companion app 2.x answers stop_and_save with a null result.
+        let body = r#"{"message":"Stopped recording","result":null}"#;
+        assert!(serde_json::from_str::<ApiResponse<Option<RecordingStopResponse>>>(body).is_ok());
+        assert!(serde_json::from_str::<ApiResponse<Option<RecordingCancelResponse>>>(body).is_ok());
+        let full = r#"{"message":"ok","result":{"id":"r1","rec_duration_ns":5}}"#;
+        assert!(
+            serde_json::from_str::<ApiResponse<Option<RecordingStopResponse>>>(full)
+                .unwrap()
+                .result
+                .is_some()
+        );
     }
 
     #[test]

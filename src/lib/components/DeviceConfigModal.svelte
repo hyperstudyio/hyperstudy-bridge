@@ -670,10 +670,20 @@
                       {/each}
                     </ul>
                   {:else if phoneSearched && !isDiscoveringPhones && !phoneDiscoveryError}
-                    <p class="phone-hint">
-                      No Neon Companion phones found. Make sure the app is open and the phone is on
-                      the same Wi-Fi as this computer.
-                    </p>
+                    <div class="phone-empty">
+                      <p class="phone-hint">
+                        <strong>No Neon Companion phones found.</strong> Check that the Companion app
+                        is open and the phone is on the same Wi-Fi as this computer.
+                      </p>
+                      <p class="phone-hint">
+                        Some networks (campus and guest Wi-Fi especially) block the broadcast this
+                        search relies on. You can still connect: find the phone's IP address in the
+                        Companion app (it shows the address it streams on), then type it into
+                        <em>Neon Companion URL</em> above, e.g. <code>192.168.1.101:8080</code>. If
+                        that also fails, the network is keeping devices apart; a dedicated router or
+                        a phone hotspot will work.
+                      </p>
+                    </div>
                   {/if}
                 </div>
               {/if}
@@ -702,6 +712,9 @@
     padding: 0;
     margin: 0;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
   }
   .modal-overlay {
     position: fixed;
@@ -1100,9 +1113,8 @@
 
   /* Neon phone finder */
   .phone-finder {
-    margin-top: 1rem;
-    padding-top: 1rem;
-    border-top: 1px solid var(--border-color, #e2e8f0);
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--color-border);
   }
   .phone-finder-header {
     display: flex;
@@ -1113,25 +1125,38 @@
   .phone-hint {
     margin: 0.35rem 0 0;
     font-size: 0.8rem;
-    color: var(--text-secondary, #64748b);
+    color: var(--color-text-secondary);
+  }
+  .phone-hint code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.78rem;
+    padding: 0 0.3rem;
+    border-radius: 4px;
+    background: var(--color-surface-elevated);
+  }
+  .phone-hint strong,
+  .phone-hint em {
+    color: var(--color-text-primary);
+    font-style: normal;
   }
   .phone-error {
     margin: 0.5rem 0 0;
     font-size: 0.8rem;
-    color: var(--error-color, #dc2626);
+    color: var(--color-error);
   }
   .phone-btn {
     padding: 0.4rem 0.8rem;
-    border: 1px solid var(--border-color, #cbd5e1);
+    border: 1px solid var(--color-border);
     border-radius: 6px;
-    background: var(--bg-secondary, #f8fafc);
-    color: inherit;
+    background: var(--color-surface-elevated);
+    color: var(--color-text-primary);
     font-size: 0.85rem;
     cursor: pointer;
     white-space: nowrap;
   }
   .phone-btn:hover:not(:disabled) {
-    background: var(--bg-hover, #eef2f7);
+    border-color: var(--color-border-hover);
+    background: var(--color-surface);
   }
   .phone-btn:disabled {
     opacity: 0.6;
@@ -1158,12 +1183,12 @@
     gap: 0.15rem 0.75rem;
     align-items: center;
     padding: 0.6rem 0.75rem;
-    border: 1px solid var(--border-color, #e2e8f0);
+    border: 1px solid var(--color-border);
     border-radius: 6px;
   }
   .phone-row.selected {
-    border-color: var(--primary-color, #2563eb);
-    background: var(--bg-selected, rgba(37, 99, 235, 0.06));
+    border-color: var(--color-primary);
+    background: rgba(76, 175, 80, 0.08);
   }
   .phone-main {
     grid-area: main;
@@ -1178,7 +1203,7 @@
   .phone-id {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.8rem;
-    color: var(--text-secondary, #64748b);
+    color: var(--color-text-secondary);
   }
   .phone-meta {
     grid-area: meta;
@@ -1186,7 +1211,7 @@
     flex-wrap: wrap;
     gap: 0.6rem;
     font-size: 0.78rem;
-    color: var(--text-secondary, #64748b);
+    color: var(--color-text-secondary);
   }
   .phone-row .phone-btn {
     grid-area: action;
@@ -1200,10 +1225,10 @@
   }
   .phone-flag.busy {
     background: rgba(220, 38, 38, 0.12);
-    color: var(--error-color, #dc2626);
+    color: var(--color-error);
   }
   .phone-flag.warn {
     background: rgba(217, 119, 6, 0.14);
-    color: #b45309;
+    color: var(--color-warning);
   }
 </style>
