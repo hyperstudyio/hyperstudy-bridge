@@ -66,6 +66,10 @@ impl StreamEvidence {
         self.last_timestamp = Some(timestamp);
         self.samples += 1;
     }
+    /// Times a timestamp was earlier than the one before it.
+    pub fn backward_steps(&self) -> u64 {
+        self.backwards
+    }
     pub fn outcome(&self, target: f64, expired: bool) -> &'static str {
         if self.backwards > 0 || self.forward_gaps > 0 || self.repeated > 0 {
             "unreliable_timestamps"

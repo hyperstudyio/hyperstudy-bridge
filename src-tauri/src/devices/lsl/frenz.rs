@@ -7,7 +7,6 @@
 //!
 //! ```text
 //! FRENZ Band ──BLE──> Python (frenztoolkit + pylsl) ──LSL──> HyperStudy Bridge (Rust LSL inlet)
-//!                                                     LSL <── HyperStudy Bridge (marker outlet)
 //! ```
 //!
 //! # FRENZ LSL Streams
@@ -21,7 +20,7 @@
 //! # Usage
 //!
 //! ```ignore
-//! let manager = FrenzLslManager::new(resolver, inlet_manager, outlet_manager);
+//! let manager = FrenzLslManager::new(resolver, inlet_manager);
 //!
 //! // Discover FRENZ devices
 //! let devices = manager.discover_frenz_devices().await?;
@@ -34,11 +33,9 @@
 //! ```
 
 use super::inlet::{InletConfig, InletManager};
-use super::outlet::OutletManager;
 use super::resolver::{StreamFilter, StreamResolver};
 use super::types::{
-    frenz_stream_category, ChannelFormat, DiscoveredFrenzDevice, FrenzStreamInfo, LslError, Sample,
-    SampleData, StreamInfo, StreamType,
+    frenz_stream_category, DiscoveredFrenzDevice, FrenzStreamInfo, LslError, SampleData,
 };
 use futures_util::future::join_all;
 use std::collections::HashMap;
@@ -114,7 +111,7 @@ fn buffer_size_for_rate(nominal_srate: f64) -> usize {
 /// FRENZ LSL Manager
 ///
 /// Manages discovery and data streaming from Earable FRENZ brainband devices via LSL.
-/// Uses the existing LSL infrastructure (resolver, inlet manager, outlet manager)
+/// Uses the existing LSL infrastructure (resolver, inlet manager)
 /// with FRENZ-specific discovery patterns and generic stream handling.
 pub struct FrenzLslManager {
     /// Serialize lifecycle requests; individual inlets still open/close concurrently.
@@ -123,14 +120,10 @@ pub struct FrenzLslManager {
     resolver: Arc<StreamResolver>,
     /// Inlet manager for consuming streams (shared with Neon manager)
     inlet_manager: Arc<InletManager>,
-    /// Outlet manager for creating marker outlets
-    outlet_manager: Arc<OutletManager>,
     /// Discovered FRENZ devices (device_name -> DiscoveredFrenzDevice)
     discovered_devices: Arc<RwLock<HashMap<String, DiscoveredFrenzDevice>>>,
     /// Active stream tasks keyed by (device_name, stream_suffix)
     stream_tasks: Arc<RwLock<HashMap<(String, String), FrenzStreamTask>>>,
-    /// Marker outlet ID (created once, shared across all FRENZ devices)
-    marker_outlet_id: Arc<RwLock<Option<String>>>,
 }
 
 impl FrenzLslManager {
@@ -139,20 +132,13 @@ impl FrenzLslManager {
     /// # Arguments
     /// * `resolver` - Stream resolver for LSL discovery (shared to maintain cache)
     /// * `inlet_manager` - Inlet manager for consuming LSL streams
-    /// * `outlet_manager` - Outlet manager for creating marker outlets
-    pub fn new(
-        resolver: Arc<StreamResolver>,
-        inlet_manager: Arc<InletManager>,
-        outlet_manager: Arc<OutletManager>,
-    ) -> Self {
+    pub fn new(resolver: Arc<StreamResolver>, inlet_manager: Arc<InletManager>) -> Self {
         Self {
             lifecycle: Mutex::new(()),
             resolver,
             inlet_manager,
-            outlet_manager,
             discovered_devices: Arc::new(RwLock::new(HashMap::new())),
             stream_tasks: Arc::new(RwLock::new(HashMap::new())),
-            marker_outlet_id: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -246,19 +232,6 @@ impl FrenzLslManager {
     pub async fn get_device(&self, device_name: &str) -> Option<DiscoveredFrenzDevice> {
         let devices = self.discovered_devices.read().await;
         devices.get(device_name).cloned()
-    }
-
-    /// Connect to a single FRENZ LSL stream
-    ///
-    /// Returns a channel receiver that will emit `FrenzSample` data.
-    /// The stream continues until `disconnect_stream` is called.
-    pub async fn connect_stream(
-        &self,
-        device_name: &str,
-        stream_suffix: &str,
-    ) -> Result<mpsc::Receiver<FrenzSample>, LslError> {
-        let _lifecycle = self.lifecycle.lock().await;
-        self.connect_stream_inner(device_name, stream_suffix).await
     }
 
     async fn connect_stream_inner(
@@ -567,7 +540,6 @@ impl FrenzLslManager {
     }
 
     /// Disconnect only this device's owned readers, independently of discovery.
-    /// The marker outlet is shared and remains available for other devices.
     pub async fn disconnect_device(&self, device_name: &str) -> Result<(), LslError> {
         let _lifecycle = self.lifecycle.lock().await;
         let started = std::time::Instant::now();
@@ -616,16 +588,7 @@ impl FrenzLslManager {
         let started = std::time::Instant::now();
         let task_keys: Vec<(String, String)> =
             self.stream_tasks.read().await.keys().cloned().collect();
-        let mut errors = self.disconnect_tasks_inner(&task_keys).await;
-        let mut outlet_id = self.marker_outlet_id.write().await;
-        if let Some(id) = outlet_id.as_ref() {
-            match self.outlet_manager.remove_outlet(id).await {
-                Ok(()) => {
-                    *outlet_id = None;
-                }
-                Err(error) => errors.push(error.to_string()),
-            }
-        }
+        let errors = self.disconnect_tasks_inner(&task_keys).await;
         if !errors.is_empty() {
             return Err(LslError::LslLibraryError(format!(
                 "FRENZ disconnect failed: {}",
@@ -641,71 +604,10 @@ impl FrenzLslManager {
         Ok(())
     }
 
-    /// Create an LSL marker outlet for sending event markers alongside FRENZ data.
-    ///
-    /// The outlet is named `HyperStudy_FRENZ_Markers` so LabRecorder can capture
-    /// experiment events time-synced with the FRENZ physiological data.
-    pub async fn create_marker_outlet(&self) -> Result<(), LslError> {
-        {
-            let existing = self.marker_outlet_id.read().await;
-            if existing.is_some() {
-                info!(device = "frenz", "FRENZ marker outlet already exists");
-                return Ok(());
-            }
-        }
-
-        let stream_info = StreamInfo::new(
-            "HyperStudy_FRENZ_Markers".to_string(),
-            StreamType::Markers,
-            1,
-            0.0, // Irregular sampling rate
-            ChannelFormat::String,
-            "hyperstudy-frenz-markers".to_string(),
-        );
-
-        let outlet_id = self.outlet_manager.create_outlet(stream_info, None).await?;
-        self.outlet_manager.start_outlet(&outlet_id).await?;
-
-        {
-            let mut stored_id = self.marker_outlet_id.write().await;
-            *stored_id = Some(outlet_id.clone());
-        }
-
-        info!(
-            device = "frenz",
-            "Created FRENZ marker outlet: {}", outlet_id
-        );
-        Ok(())
-    }
-
-    /// Send an event marker to the FRENZ marker outlet
-    pub async fn send_marker(&self, marker: &str, timestamp: Option<f64>) -> Result<(), LslError> {
-        let outlet_id = {
-            let stored = self.marker_outlet_id.read().await;
-            stored.clone().ok_or_else(|| {
-                LslError::LslLibraryError(
-                    "FRENZ marker outlet not created. Call create_marker_outlet() first."
-                        .to_string(),
-                )
-            })?
-        };
-
-        let sample = Sample {
-            data: SampleData::String(vec![marker.to_string()]),
-            timestamp: timestamp.unwrap_or(0.0),
-        };
-
-        self.outlet_manager.send_sample(&outlet_id, sample).await?;
-
-        debug!(device = "frenz", "Sent FRENZ marker: {}", marker);
-        Ok(())
-    }
-
     /// Get statistics for all FRENZ streams
     pub async fn get_stats(&self) -> serde_json::Value {
         let devices = self.discovered_devices.read().await;
         let tasks = self.stream_tasks.read().await;
-        let marker_outlet = self.marker_outlet_id.read().await;
 
         let device_stats: Vec<serde_json::Value> = devices
             .values()
@@ -738,7 +640,6 @@ impl FrenzLslManager {
         serde_json::json!({
             "discovered_device_count": devices.len(),
             "active_stream_count": tasks.len(),
-            "marker_outlet_active": marker_outlet.is_some(),
             "devices": device_stats,
         })
     }
@@ -760,7 +661,6 @@ mod tests {
         FrenzLslManager::new(
             Arc::new(StreamResolver::new(0.1)),
             Arc::new(InletManager::new(time_sync.clone())),
-            Arc::new(OutletManager::new(time_sync)),
         )
     }
 
@@ -968,16 +868,14 @@ mod tests {
     #[test]
     fn test_frenz_manager_creation() {
         use crate::devices::lsl::inlet::InletManager;
-        use crate::devices::lsl::outlet::OutletManager;
         use crate::devices::lsl::resolver::StreamResolver;
         use crate::devices::lsl::sync::TimeSync;
 
         let time_sync = Arc::new(TimeSync::new(false));
         let resolver = Arc::new(StreamResolver::new(1.0));
-        let inlet_manager = Arc::new(InletManager::new(time_sync.clone()));
-        let outlet_manager = Arc::new(OutletManager::new(time_sync));
+        let inlet_manager = Arc::new(InletManager::new(time_sync));
 
-        let manager = FrenzLslManager::new(resolver, inlet_manager, outlet_manager);
+        let manager = FrenzLslManager::new(resolver, inlet_manager);
         // Verify creation doesn't panic
         let _ = format!("{:?}", manager);
     }
@@ -985,16 +883,14 @@ mod tests {
     #[tokio::test]
     async fn test_frenz_discovery_no_streams() {
         use crate::devices::lsl::inlet::InletManager;
-        use crate::devices::lsl::outlet::OutletManager;
         use crate::devices::lsl::resolver::StreamResolver;
         use crate::devices::lsl::sync::TimeSync;
 
         let time_sync = Arc::new(TimeSync::new(false));
         let resolver = Arc::new(StreamResolver::new(0.5));
-        let inlet_manager = Arc::new(InletManager::new(time_sync.clone()));
-        let outlet_manager = Arc::new(OutletManager::new(time_sync));
+        let inlet_manager = Arc::new(InletManager::new(time_sync));
 
-        let manager = FrenzLslManager::new(resolver, inlet_manager, outlet_manager);
+        let manager = FrenzLslManager::new(resolver, inlet_manager);
 
         // Discovery should succeed even with no FRENZ streams on network
         let devices = manager.discover_frenz_devices().await.unwrap();

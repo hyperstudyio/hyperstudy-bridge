@@ -1,6 +1,6 @@
 {
   "name": "hyperstudy-bridge",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "type": "module",
   "description": "A unified, high-performance desktop application for bridging HyperStudy web experiments with research hardware devices.",
   "main": "index.js",
@@ -24,13 +24,7 @@
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:debug": "playwright test --debug",
     "test:e2e:report": "playwright show-report",
-    "test:load": "node scripts/load-test.js",
-    "test:load:light": "node scripts/load-test.js --clients 5 --duration 15",
-    "test:load:heavy": "node scripts/load-test.js --clients 50 --duration 120 --rate 20",
-    "test:bench": "cd src-tauri && cargo bench --bench performance",
-    "test:stress": "cd src-tauri && cargo bench --bench stress_test",
-    "test:all": "npm run test && npm run test:e2e && npm run test:load:light",
-    "perf:dashboard": "python -m http.server 8080 --directory src/test",
+    "test:all": "npm run test && npm run test:e2e",
     "lint": "eslint src --ext .js,.ts,.svelte --fix",
     "lint:check": "eslint src --ext .js,.ts,.svelte",
     "format": "prettier --write \"src/**/*.{js,ts,svelte,html,css,md}\"",
@@ -67,10 +61,6 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
-    "@tauri-apps/plugin-dialog": "^2.6.0",
-    "@tauri-apps/plugin-process": "^2.0.0",
-    "@tauri-apps/plugin-stronghold": "^2.0.0",
-    "@tauri-apps/plugin-websocket": "^2.4.0",
-    "ws": "^8.18.3"
+    "@tauri-apps/plugin-dialog": "^2.6.0"
   }
 }

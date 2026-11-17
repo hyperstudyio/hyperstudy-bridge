@@ -59,7 +59,8 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
-            pkg-config
+            pkg-config \
+            libudev-dev
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -71,11 +72,6 @@ jobs:
         with:
           workspaces: src-tauri
           shared-key: "rust-cache"
-
-      - name: Run clippy
-        run: |
-          cd src-tauri
-          cargo clippy --lib --bins --all-features || echo "Clippy found warnings but continuing"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -89,9 +85,26 @@ jobs:
       - name: Type check frontend
         run: npm run type-check
 
+      # Tauri embeds the built frontend at compile time, so clippy on the app binary needs it built first.
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run clippy
+        run: |
+          cd src-tauri
+          cargo clippy --lib --bins --all-features
+
   test-backend:
     name: Test Backend (Rust)
     runs-on: ${{ matrix.os }}
+    # Known failure, not blocking: the Windows test binary does not run (checked 2026-11-17).
+    #  1. It has no Common Controls 6 manifest (Tauri embeds one in the app binary only), so it exits at start with
+    #     STATUS_ENTRYPOINT_NOT_FOUND. Embedding the manifest from build.rs gets past this (see the reverted
+    #     commit 5981d17).
+    #  2. It then crashes on the first test with STATUS_ACCESS_VIOLATION in vertdll!RtlpWaitOnAddressWithTimeout:
+    #     vertdll.dll (the VBS enclave runtime) is loaded into an ordinary process. What links it is not known.
+    # The Windows app build is a separate job and passes. Remove this line once the tests run.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -122,42 +135,24 @@ jobs:
           workspaces: src-tauri
           shared-key: "rust-cache"
 
-      - name: Run backend tests
-        run: |
-          cd src-tauri
-          echo "Temporarily skipping backend tests that timeout"
-          # cargo test --lib --bins --all-features --verbose
-
-      - name: Setup Node.js for frontend build
-        if: matrix.os == 'ubuntu-latest'
+      # Tauri embeds the built frontend at compile time, so every platform builds it before compiling the tests.
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
       - name: Install frontend dependencies
-        if: matrix.os == 'ubuntu-latest'
         run: npm ci
 
-      - name: Build frontend for tests
-        if: matrix.os == 'ubuntu-latest'
+      - name: Build frontend
         run: npm run build
 
-      - name: Run backend tests with coverage
-        if: matrix.os == 'ubuntu-latest'
+      # Server tests bind a free port (never 9000), so they are safe in parallel and on a machine running Bridge.
+      - name: Run backend tests
         run: |
           cd src-tauri
-          cargo install cargo-tarpaulin --version ^0.27
-          cargo tarpaulin --lib --bins --all-features --workspace --timeout 120 --out xml || echo "Coverage collection failed but continuing"
-
-      - name: Upload coverage to Codecov
-        if: matrix.os == 'ubuntu-latest'
-        uses: codecov/codecov-action@v5
-        with:
-          file: src-tauri/cobertura.xml
-          flags: backend
-          name: backend-coverage
-          fail_ci_if_error: false
+          cargo test --locked
 
   test-frontend:
     name: Test Frontend (Svelte)
@@ -175,19 +170,29 @@ jobs:
         run: npm ci
 
       - name: Run frontend tests
-        run: echo "Skipping frontend tests temporarily due to Vitest/Svelte plugin issue"
-        # run: npm run test:coverage
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          file: coverage/lcov.info
-          flags: frontend
-          name: frontend-coverage
-          fail_ci_if_error: false
+        run: npm test
 
       - name: Build frontend
         run: npm run build
+
+  test-helper:
+    name: Test FRENZ helper (Python)
+    # The Earable SDK (frenztoolkit 0.3.2) ships compiled for Python 3.9; the helper's PyApp build uses the same.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install the helper and its dependencies
+        run: python -m pip install ./python/frenz-bridge
+
+      - name: Run helper tests
+        working-directory: python/frenz-bridge
+        run: python -m unittest discover -s tests -v
 
   build-app:
     name: Build Application
@@ -326,8 +331,8 @@ jobs:
 
   security-audit:
     name: Security Audit
-    # Gating: a high-severity npm advisory or an un-ignored RUSTSEC advisory
-    # fails CI. Moderate npm findings stay informational (|| true below).
+    # Gating: an un-ignored high-severity npm advisory (ignores: scripts/npm-audit.mjs)
+    # or an un-ignored RUSTSEC advisory fails CI. Moderate npm findings stay informational (|| true below).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -356,7 +361,7 @@ jobs:
 
       - name: Run npm audit
         run: |
-          npm audit --audit-level=high
+          node scripts/npm-audit.mjs
           npm audit --audit-level=moderate || true
 
   dependency-check:

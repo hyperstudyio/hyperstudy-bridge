@@ -26,8 +26,7 @@ const CONNECT_TIMEOUT_MS = 30000;
 const DISCONNECT_TIMEOUT_MS = 5000;
 const COMMAND_TIMEOUT_MS = 5000;
 
-// Message handlers and callbacks
-const messageHandlers = new Map();
+// Request callbacks
 const requestCallbacks = new Map();
 
 // Monotonic counter for truly unique IDs (avoids collisions from rapid calls)
@@ -177,22 +176,10 @@ function handleMessage(message) {
     }
   }
 
-  // Call all registered message handlers
-  messageHandlers.forEach(handler => {
-    try {
-      handler(message);
-    } catch (error) {
-      console.error('Message handler error:', error);
-    }
-  });
-
   switch (message.type) {
     case 'status':
       // Handle both message.status and message.payload for backwards compatibility
       updateDeviceStatus(message.device, message.status || message.payload, message.info);
-      break;
-    case 'data':
-      handleDeviceData(message.device, message.payload);
       break;
     case 'error':
       handleError(message);
@@ -203,17 +190,8 @@ function handleMessage(message) {
     case 'event':
       handleEvent(message);
       break;
-    // LSL-specific message types are handled by component message handlers
-    case 'stream_list':
-    case 'inlet_connected':
-    case 'inlet_disconnected':
-    case 'outlet_created':
-    case 'outlet_removed':
-    case 'sync_status':
-      // These are handled by component-specific handlers registered via subscribe()
-      break;
     default:
-      // Unknown types are logged in validateMessage but still passed to handlers
+      // Other types (logged in validateMessage when unknown) need no store update
       break;
   }
 }
@@ -234,13 +212,6 @@ function updateDeviceStatus(deviceId, deviceStatus, info = undefined) {
   device.lastUpdate = Date.now();
   devices.set(deviceId, device);
   devices = new Map(devices); // Trigger reactivity
-}
-
-function handleDeviceData(deviceId, data) {
-  const handlers = messageHandlers.get(deviceId);
-  if (handlers) {
-    handlers.forEach(handler => handler(data));
-  }
 }
 
 function handleError(message) {
@@ -506,12 +477,9 @@ export function disconnect() {
 
   // Clear all callbacks and handlers
   requestCallbacks.clear();
-  messageHandlers.clear();
-
-  tauriService.cleanupEventListeners();
 }
 
-// Initialize the WebSocket connection and Tauri listeners
+// Initialize the WebSocket connection
 // Call this once from App.svelte on mount
 export function initialize() {
   if (initialized) {
@@ -520,7 +488,6 @@ export function initialize() {
   }
   initialized = true;
   connect();
-  tauriService.setupEventListeners();
 }
 
 // Reset all state for testing - allows proper test isolation
@@ -546,28 +513,6 @@ export function _resetForTesting() {
 
   // Clear callbacks and handlers
   requestCallbacks.clear();
-  messageHandlers.clear();
-
-  tauriService.cleanupEventListeners();
-}
-
-// Generic message sending function
-export function sendMessage(message) {
-  return send(message);
-}
-
-// Subscribe to message updates (for compatibility)
-export function subscribe(callback) {
-  // Create a unique handler ID
-  const handlerId = generateId();
-
-  // Add the callback to message handlers
-  messageHandlers.set(handlerId, callback);
-
-  // Return unsubscribe function
-  return () => {
-    messageHandlers.delete(handlerId);
-  };
 }
 
 // Export getters for reactive state (Svelte 5 pattern for reassigned state)

@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 import numpy as np
-from frenz_streams import StreamPublisher, STREAMS
+from frenz_streams import StreamPublisher
 
 class PublisherTests(unittest.TestCase):
     def test_focus_history_keeps_identical_consecutive_scores(self):

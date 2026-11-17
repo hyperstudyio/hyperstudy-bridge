@@ -8,7 +8,7 @@
     getFrenzBridgeStatus,
     checkFrenzBridgeAvailable,
   } from '../services/tauri.js';
-  import { getSecret } from '../services/stronghold.js';
+  import { getSecret } from '../services/secrets.js';
   import { listen } from '@tauri-apps/api/event';
   import DeviceConfigModal from './DeviceConfigModal.svelte';
 
@@ -120,7 +120,7 @@
       frenzDeviceId = deviceId || null;
       frenzKeyConfigured = !!productKey;
     } catch {
-      // Stronghold not initialized yet — that's fine
+      // Credential store unavailable — the card shows the band as not configured
     }
   }
 
@@ -376,19 +376,16 @@
     }
   }
 
-  async function handleConfigSave(deviceId, newConfig, newLslConfig = null) {
+  async function handleConfigSave(deviceId, newConfig) {
     // Capture device name at start to prevent stale closure
     const deviceName = device.name;
     const wasConnected = device.status === 'connected';
 
     console.log(`Saving configuration for ${deviceId}:`, newConfig);
-    if (newLslConfig) {
-      console.log(`Saving LSL configuration:`, newLslConfig);
-    }
 
     try {
       // Update the device config via parent callback (persists to selectedDevices)
-      onConfigUpdate(deviceId, newConfig, newLslConfig);
+      onConfigUpdate(deviceId, newConfig);
 
       // If the device was connected, reconnect with new config
       // disconnectDevice properly awaits completion, so no arbitrary delay needed

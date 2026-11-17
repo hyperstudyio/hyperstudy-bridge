@@ -1,13 +1,19 @@
 # cargo-audit configuration (used by `cargo audit` locally and in CI, which
 # runs it from src-tauri/).
 [advisories]
+# RUSTSEC-2023-0071 (rsa) used to be ignored here: rsa was in Cargo.lock only
+# through sqlx-mysql. sqlx has been removed, so rsa is gone and so is the ignore.
 ignore = [
-    # rsa 0.9 Marvin timing side-channel (RUSTSEC-2023-0071). No patched
-    # release exists upstream. As of 2026-09 the crate is present in Cargo.lock
-    # only via sqlx-mysql and is NOT in the active build graph
-    # (`cargo tree -i rsa` prints nothing), so nothing here executes RSA.
-    # Re-check when the rsa crate publishes a fix, or immediately if a MySQL
-    # feature is ever enabled — at that point this ignore would be masking a
-    # compiled dependency and must be re-justified or removed.
-    "RUSTSEC-2023-0071",
+    # crypto-bigint 0.5.5 timing variability (RUSTSEC-2026-0387). Present in
+    # Cargo.lock only: iota-crypto's `std` feature names `k256?/std`, and Cargo
+    # records optional dependencies named by weak features in the lockfile even
+    # when nothing enables them. Nothing enables iota-crypto's `secp256k1`
+    # feature (only iota_stronghold did, and it is gone), so k256 and
+    # crypto-bigint are NOT built: `cargo tree --target all -i crypto-bigint`
+    # prints nothing (checked 2026-11-16). iota-crypto is here only through
+    # stronghold_engine, used to read the old vault once
+    # (src/secrets/stronghold_migration.rs).
+    # TODO: Remove after 2027-03-01 (Stronghold vault migration) - delete this
+    # ignore together with the migration and its stronghold_engine dependency.
+    "RUSTSEC-2026-0387",
 ]

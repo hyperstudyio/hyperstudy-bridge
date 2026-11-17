@@ -7,7 +7,6 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, RwLock};
@@ -28,9 +27,6 @@ pub struct AppState {
     pub recording: Arc<crate::recording::RecordingManager>,
     pub devices: Arc<RwLock<HashMap<String, Arc<RwLock<BoxedDevice>>>>>,
     pub connections: Arc<DashMap<String, ConnectionInfo>>,
-    pub start_time: Instant,
-    pub message_count: Arc<AtomicU64>,
-    pub last_error: Arc<RwLock<Option<String>>>,
     /// Neon LSL Manager for Pupil Labs Neon eye tracking via LSL
     pub neon_manager: Arc<NeonLslManager>,
     /// FRENZ LSL Manager for Earable FRENZ brainband via LSL
@@ -159,16 +155,6 @@ impl DeviceStatusEvent {
         )
     }
 
-    pub fn connected(device_id: String, device_type: DeviceType, reason: &str) -> Self {
-        Self::with_status(
-            device_id,
-            device_type,
-            DeviceStatus::Connected,
-            reason,
-            None,
-        )
-    }
-
     pub fn connected_with_info(
         device_id: String,
         device_type: DeviceType,
@@ -227,9 +213,6 @@ impl std::fmt::Debug for AppState {
         let mut s = f.debug_struct("AppState");
         s.field("devices", &self.devices)
             .field("connections", &self.connections)
-            .field("start_time", &self.start_time)
-            .field("message_count", &self.message_count)
-            .field("last_error", &self.last_error)
             .field("neon_manager", &self.neon_manager)
             .field("frenz_manager", &self.frenz_manager)
             .field("frenz_process", &self.frenz_process);
@@ -258,11 +241,7 @@ impl AppState {
         let inlet_manager = Arc::new(InletManager::new(time_sync.clone()));
         let outlet_manager = Arc::new(OutletManager::new(time_sync));
         let neon_manager = Arc::new(NeonLslManager::new(resolver.clone(), inlet_manager.clone()));
-        let frenz_manager = Arc::new(FrenzLslManager::new(
-            resolver,
-            inlet_manager.clone(),
-            outlet_manager.clone(),
-        ));
+        let frenz_manager = Arc::new(FrenzLslManager::new(resolver, inlet_manager.clone()));
         let frenz_process = Arc::new(FrenzProcessManager::new());
 
         #[cfg(feature = "eyelink")]
@@ -280,9 +259,6 @@ impl AppState {
             registered_tickets: Arc::new(DashMap::new()),
             ticket_issued_at: Arc::new(DashMap::new()),
             finished_tickets: Arc::new(DashMap::new()),
-            start_time: Instant::now(),
-            message_count: Arc::new(AtomicU64::new(0)),
-            last_error: Arc::new(RwLock::new(None)),
             neon_manager,
             frenz_manager,
             frenz_process,
@@ -577,52 +553,6 @@ impl AppState {
             entry.message_count += 1;
         }
     }
-    pub async fn cleanup_stale_connections(&self, max_idle_seconds: u64) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let mut to_remove = Vec::new();
-
-        for entry in self.connections.iter() {
-            if now - entry.value().last_activity > max_idle_seconds {
-                to_remove.push(entry.key().clone());
-            }
-        }
-
-        for id in to_remove {
-            self.remove_connection(&id);
-        }
-    }
-
-    pub fn get_uptime(&self) -> Duration {
-        self.start_time.elapsed()
-    }
-
-    pub async fn get_message_count(&self) -> u64 {
-        self.message_count.load(Ordering::Relaxed)
-    }
-
-    pub fn increment_message_count(&self) {
-        self.message_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub async fn set_last_error(&self, error: Option<String>) {
-        let mut last_error = self.last_error.write().await;
-        *last_error = error;
-    }
-
-    pub async fn get_last_error(&self) -> Option<String> {
-        self.last_error.read().await.clone()
-    }
-
-    /// Record a device error as the bridge's last error.
-    pub async fn record_device_error(&self, device_id: &str, error_msg: &str) {
-        self.set_last_error(Some(format!("{device_id}: {error_msg}")))
-            .await;
-    }
-
     /// Remember the payload that last connected `device_id` successfully.
     pub fn remember_connect_config(&self, device_id: &str, config: serde_json::Value) {
         self.last_connect_configs
@@ -693,13 +623,6 @@ impl AppState {
 
             // Remove the device from the registry
             self.remove_device(&device_id).await;
-
-            // Record the error
-            self.record_device_error(
-                &device_id,
-                "Device physically disconnected (USB unplug detected)",
-            )
-            .await;
 
             // Broadcast status change to WebSocket clients
             self.broadcast_device_status(DeviceStatusEvent::disconnected(
@@ -1058,7 +981,10 @@ mod lsl_panel_tests {
         );
         state
             .lsl_outlets
-            .create_device_outlet("panel_test", "ttl", None)
+            .create_outlet(
+                crate::devices::lsl::types::StreamInfo::ttl_markers("panel_test"),
+                None,
+            )
             .await
             .unwrap();
         let listed = state.lsl_bridge_streams().await;

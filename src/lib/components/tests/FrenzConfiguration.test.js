@@ -1,15 +1,26 @@
 import { it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import DeviceConfigModal from '../DeviceConfigModal.svelte';
-import { getSecret, setSecrets } from '../../services/stronghold.js';
-vi.mock('../../services/stronghold.js', () => ({ getSecret: vi.fn(), setSecrets: vi.fn() }));
+import { getSecret, setSecrets } from '../../services/secrets.js';
+vi.mock('../../services/secrets.js', () => ({ getSecret: vi.fn(), setSecrets: vi.fn() }));
 const device = { id: 'frenz', name: 'FRENZ', config: {} };
 it('enables every FRENZ option by default', async () => {
   render(DeviceConfigModal, { device, isOpen: true });
   await screen.findByText('Selected band: FRENZI85');
   const options = screen.getAllByRole('checkbox');
-  expect(options).toHaveLength(20);
+  expect(options).toHaveLength(19);
   for (const option of options) expect(option).toBeChecked();
+});
+
+it('warns that the three SDK raw streams can repeat and skip data', async () => {
+  render(DeviceConfigModal, { device, isOpen: true });
+  await screen.findByText('Selected band: FRENZI85');
+  const warnings = screen.getAllByText(/can repeat one second of data and skip the next/);
+  expect(warnings.map(warning => warning.textContent.split(' ')[0])).toEqual([
+    'The',
+    'PPG_raw',
+    'IMU_raw',
+  ]);
 });
 
 it('preserves explicit choices and enables them all on request', async () => {
@@ -17,7 +28,7 @@ it('preserves explicit choices and enables them all on request', async () => {
   render(DeviceConfigModal, {
     device: {
       ...device,
-      config: { streamPoas: false, streamEegRaw: false, enableMarkerOutlet: false },
+      config: { streamPoas: false, streamEegRaw: false, streamFocus: false },
     },
     isOpen: true,
     onSave,
@@ -34,7 +45,7 @@ it('preserves explicit choices and enables them all on request', async () => {
 beforeEach(() => {
   vi.clearAllMocks();
   getSecret.mockImplementation(async k => (k === 'frenz_device_id' ? 'FRENZI85' : 'test-only'));
-  setSecrets.mockResolvedValue();
+  setSecrets.mockResolvedValue([]);
 });
 it('saves the selected band and key in one operation without waiting for acquisition', async () => {
   const onSave = vi.fn(),
@@ -49,12 +60,11 @@ it('saves the selected band and key in one operation without waiting for acquisi
   });
   expect(onSave).toHaveBeenCalledWith(
     'frenz',
-    expect.not.objectContaining({ frenzProductKey: expect.anything() }),
-    expect.any(Object)
+    expect.not.objectContaining({ frenzProductKey: expect.anything() })
   );
 });
 it('shows persistence failure and keeps configuration open', async () => {
-  setSecrets.mockRejectedValue(Error('test disk failure'));
+  setSecrets.mockRejectedValue('Credential store error for frenz_product_key: test failure');
   const onClose = vi.fn();
   render(DeviceConfigModal, { device, isOpen: true, onSave: vi.fn(), onClose });
   await screen.findByText('Selected band: FRENZI85');

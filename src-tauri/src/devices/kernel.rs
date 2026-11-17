@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use socket2::SockRef;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
@@ -52,21 +52,6 @@ pub struct KernelEvent {
 }
 
 impl KernelEvent {
-    /// Create a new KernelEvent with the current timestamp
-    pub fn new(id: i64, event: impl Into<String>, value: serde_json::Value) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_micros() as i64)
-            .unwrap_or(0);
-
-        Self {
-            id,
-            timestamp,
-            event: event.into(),
-            value,
-        }
-    }
-
     /// Create a new KernelEvent with a specific timestamp
     pub fn with_timestamp(
         id: i64,
@@ -130,22 +115,16 @@ impl Default for KernelConfig {
     }
 }
 
-/// Type alias for performance callback
-type PerformanceCallback = Box<dyn Fn(&str, Duration, u64, u64) + Send + Sync>;
-
 pub struct KernelDevice {
     socket: Option<TcpStream>,
     status: DeviceStatus,
     config: KernelConfig,
     device_config: DeviceConfig,
-    buffer: Vec<u8>,
     reconnect_attempts: u32,
     last_successful_operation: Option<Instant>,
     last_successful_connection: Option<Instant>,
     /// Counter for generating unique event IDs
     next_event_id: i64,
-    /// Performance callback for recording metrics
-    performance_callback: Option<PerformanceCallback>,
 }
 
 impl std::fmt::Debug for KernelDevice {
@@ -163,10 +142,6 @@ impl std::fmt::Debug for KernelDevice {
                 &self.last_successful_connection,
             )
             .field("next_event_id", &self.next_event_id)
-            .field(
-                "has_performance_callback",
-                &self.performance_callback.is_some(),
-            )
             .finish()
     }
 }
@@ -181,21 +156,11 @@ impl KernelDevice {
                 ..Default::default()
             },
             device_config: DeviceConfig::default(),
-            buffer: Vec::with_capacity(READ_BUFFER_SIZE),
             reconnect_attempts: 0,
             last_successful_operation: None,
             last_successful_connection: None,
             next_event_id: 1,
-            performance_callback: None,
         }
-    }
-
-    /// Set performance callback for metrics recording
-    pub fn set_performance_callback<F>(&mut self, callback: F)
-    where
-        F: Fn(&str, Duration, u64, u64) + Send + Sync + 'static,
-    {
-        self.performance_callback = Some(Box::new(callback));
     }
 
     /// Calculate exponential backoff delay
@@ -400,39 +365,10 @@ impl KernelDevice {
         }
     }
 
-    /// Get connection uptime
-    pub fn get_connection_uptime(&self) -> Option<Duration> {
-        self.last_successful_connection.map(|t| t.elapsed())
-    }
-
-    /// Get current reconnection attempt count
-    pub fn get_reconnect_attempts(&self) -> u32 {
-        self.reconnect_attempts
-    }
-
-    /// Reset reconnection attempts counter
-    pub fn reset_reconnect_attempts(&mut self) {
-        self.reconnect_attempts = 0;
-    }
-
-    /// Check if device is currently connected
-    pub fn is_connected(&self) -> bool {
-        self.socket.is_some() && self.status == DeviceStatus::Connected
-    }
-
-    /// Get kernel-specific configuration
-    pub fn get_kernel_config(&self) -> &KernelConfig {
-        &self.config
-    }
-
-    /// Update kernel-specific configuration
+    /// Replace the kernel-specific configuration (tests point the device at a mock server)
+    #[cfg(test)]
     pub fn update_kernel_config(&mut self, config: KernelConfig) {
         self.config = config;
-        // Resize buffer if size changed
-        if self.buffer.capacity() < self.config.buffer_size {
-            self.buffer
-                .reserve(self.config.buffer_size - self.buffer.capacity());
-        }
     }
 }
 
@@ -484,7 +420,6 @@ impl Device for KernelDevice {
         }
 
         self.status = DeviceStatus::Disconnected;
-        self.buffer.clear();
         self.last_successful_operation = None;
         self.last_successful_connection = None;
         self.reconnect_attempts = 0;
@@ -494,9 +429,6 @@ impl Device for KernelDevice {
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<(), DeviceError> {
-        // Get device_id before mutable borrow
-        let device_id = self.get_info().id;
-
         for attempt in 0..2u8 {
             // Ensure we have a connection (reconnect if socket is gone)
             if !self.is_connection_healthy() {
@@ -515,11 +447,6 @@ impl Device for KernelDevice {
                 Ok(latency) => {
                     // Record success
                     self.last_successful_operation = Some(Instant::now());
-
-                    // Record performance metrics
-                    if let Some(ref callback) = self.performance_callback {
-                        callback(&device_id, latency, data.len() as u64, 0);
-                    }
 
                     debug!(
                         device = "kernel",
@@ -546,101 +473,6 @@ impl Device for KernelDevice {
             }
         }
         unreachable!()
-    }
-
-    async fn receive(&mut self) -> Result<Vec<u8>, DeviceError> {
-        // Check connection health before receiving
-        if !self.is_connection_healthy() {
-            warn!(
-                device = "kernel",
-                "Connection unhealthy, attempting reconnection before receive"
-            );
-            if self.device_config.auto_reconnect {
-                self.attempt_reconnect().await?;
-            } else {
-                return Err(DeviceError::NotConnected);
-            }
-        }
-
-        // Get device_id before mutable borrow
-        let device_id = self.get_info().id;
-
-        if let Some(ref mut socket) = self.socket {
-            let io_timeout = Duration::from_millis(IO_TIMEOUT_MS);
-
-            // Prepare buffer for reading
-            self.buffer.clear();
-            self.buffer.resize(self.config.buffer_size, 0);
-
-            // Measure latency for the read operation with timeout
-            let start = Instant::now();
-            let read_result = timeout(io_timeout, socket.read(&mut self.buffer)).await;
-            let latency = start.elapsed();
-
-            match read_result {
-                Ok(Ok(0)) => {
-                    // Connection closed by remote
-                    warn!(
-                        device = "kernel",
-                        "Kernel Flow2 connection closed by remote"
-                    );
-                    self.status = DeviceStatus::Error;
-                    self.socket = None;
-                    Err(DeviceError::ConnectionFailed(
-                        "Connection closed by remote".to_string(),
-                    ))
-                }
-                Ok(Ok(n)) => {
-                    self.buffer.truncate(n);
-                    debug!(device = "kernel", "Kernel Flow2 received {} bytes", n);
-
-                    // Use mem::take to avoid cloning - moves the data out and replaces with empty Vec
-                    let data = std::mem::take(&mut self.buffer);
-
-                    // Record success
-                    if !data.is_empty() {
-                        self.last_successful_operation = Some(Instant::now());
-                    }
-
-                    // Record performance metrics
-                    if let Some(ref callback) = self.performance_callback {
-                        callback(&device_id, latency, 0, data.len() as u64);
-                    }
-
-                    Ok(data)
-                }
-                Ok(Err(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    // Timeout is acceptable, just return empty data
-                    Ok(Vec::new())
-                }
-                Ok(Err(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // Non-blocking read, no data available
-                    Ok(Vec::new())
-                }
-                Ok(Err(e)) => {
-                    error!(device = "kernel", "Kernel Flow2 read error: {}", e);
-                    if self.is_io_error_connection_lost(&e) {
-                        self.socket = None;
-                        self.status = DeviceStatus::Error;
-                        Err(DeviceError::ConnectionFailed(format!(
-                            "Connection lost during read: {}",
-                            e
-                        )))
-                    } else {
-                        Err(DeviceError::CommunicationError(format!(
-                            "Read failed: {}",
-                            e
-                        )))
-                    }
-                }
-                Err(_) => {
-                    // Timeout elapsed - this is acceptable for receive, return empty data
-                    Ok(Vec::new())
-                }
-            }
-        } else {
-            Err(DeviceError::NotConnected)
-        }
     }
 
     fn get_info(&self) -> DeviceInfo {
@@ -707,8 +539,6 @@ impl Device for KernelDevice {
 
             if let Some(buffer_size) = custom.get("buffer_size").and_then(|v| v.as_u64()) {
                 self.config.buffer_size = buffer_size as usize;
-                // Resize buffer to new size
-                self.buffer.reserve(self.config.buffer_size);
             }
         }
 
@@ -717,26 +547,6 @@ impl Device for KernelDevice {
             "Kernel Flow2 device configured: {}:{}", self.config.ip_address, self.config.port
         );
         Ok(())
-    }
-
-    async fn heartbeat(&mut self) -> Result<(), DeviceError> {
-        // Check connection health (no data is sent to the device).
-        // The Kernel Tasks SDK protocol does not define a heartbeat mechanism,
-        // so we rely on tracking successful operations and TCP-level error detection.
-        if self.socket.is_some() {
-            // If auto-reconnect is enabled and connection is unhealthy, try to reconnect
-            if !self.is_connection_healthy() && self.device_config.auto_reconnect {
-                warn!(
-                    device = "kernel",
-                    "Connection health check failed, attempting automatic reconnection"
-                );
-                self.attempt_reconnect().await?;
-            }
-
-            Ok(())
-        } else {
-            Err(DeviceError::NotConnected)
-        }
     }
 
     /// Test if the Kernel device can be reached without maintaining a connection
@@ -853,240 +663,6 @@ impl KernelDevice {
             "Kernel event delivered: id={}, event='{}'", event.id, event.event
         );
         Ok(())
-    }
-
-    /// Create and send an event with auto-generated ID and current timestamp.
-    ///
-    /// This is a convenience method that handles ID generation and timestamping.
-    pub async fn send_event_simple(
-        &mut self,
-        event_name: impl Into<String>,
-        value: serde_json::Value,
-    ) -> Result<i64, DeviceError> {
-        let event_id = self.next_event_id;
-        self.next_event_id += 1;
-
-        let event = KernelEvent::new(event_id, event_name, value);
-        self.send_kernel_event(&event).await?;
-
-        Ok(event_id)
-    }
-
-    // =========================================================================
-    // Experiment Lifecycle Methods
-    // =========================================================================
-    // Per Kernel Tasks SDK: First event MUST be start_experiment, last MUST be end_experiment
-    // Reference: https://docs.kernel.com/docs/kernel-tasks-sdk
-
-    /// Send the required `start_experiment` event.
-    ///
-    /// **This must be the first event sent** according to the Kernel Tasks SDK.
-    /// Call this at the beginning of your experiment session.
-    ///
-    /// # Arguments
-    /// * `experiment_name` - Optional name/identifier for the experiment
-    ///
-    /// # Returns
-    /// The event ID assigned to this event
-    pub async fn start_experiment(
-        &mut self,
-        experiment_name: Option<&str>,
-    ) -> Result<i64, DeviceError> {
-        let value = match experiment_name {
-            Some(name) => serde_json::json!({ "name": name }),
-            None => serde_json::json!(null),
-        };
-        self.send_event_simple("start_experiment", value).await
-    }
-
-    /// Send the required `end_experiment` event.
-    ///
-    /// **This must be the last event sent** according to the Kernel Tasks SDK.
-    /// Call this at the end of your experiment session.
-    ///
-    /// # Returns
-    /// The event ID assigned to this event
-    pub async fn end_experiment(&mut self) -> Result<i64, DeviceError> {
-        self.send_event_simple("end_experiment", serde_json::json!(null))
-            .await
-    }
-
-    // =========================================================================
-    // Event Hierarchy Helpers
-    // =========================================================================
-    // Hierarchy: experiment > task > block > trial
-    // Task, block, and trial are optional but must respect the hierarchy.
-
-    /// Send a `start_task` event to begin a task block.
-    ///
-    /// Tasks are the first level of optional hierarchy below experiment.
-    /// Use tasks to group related blocks together.
-    ///
-    /// # Arguments
-    /// * `task_name` - Identifier for this task
-    /// * `metadata` - Optional additional metadata (becomes columns in SNIRF export)
-    pub async fn start_task(
-        &mut self,
-        task_name: &str,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<i64, DeviceError> {
-        let value = match metadata {
-            Some(mut meta) => {
-                if let Some(obj) = meta.as_object_mut() {
-                    obj.insert("task_name".to_string(), serde_json::json!(task_name));
-                }
-                meta
-            }
-            None => serde_json::json!({ "task_name": task_name }),
-        };
-        self.send_event_simple("start_task", value).await
-    }
-
-    /// Send an `end_task` event to end the current task.
-    pub async fn end_task(&mut self, task_name: &str) -> Result<i64, DeviceError> {
-        self.send_event_simple("end_task", serde_json::json!({ "task_name": task_name }))
-            .await
-    }
-
-    /// Send a `start_block` event to begin a block within a task.
-    ///
-    /// Blocks are the second level of optional hierarchy (within tasks).
-    /// Use blocks to group related trials together.
-    ///
-    /// # Arguments
-    /// * `block_number` - Block identifier/number
-    /// * `metadata` - Optional additional metadata
-    pub async fn start_block(
-        &mut self,
-        block_number: i32,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<i64, DeviceError> {
-        let value = match metadata {
-            Some(mut meta) => {
-                if let Some(obj) = meta.as_object_mut() {
-                    obj.insert("block_number".to_string(), serde_json::json!(block_number));
-                }
-                meta
-            }
-            None => serde_json::json!({ "block_number": block_number }),
-        };
-        self.send_event_simple("start_block", value).await
-    }
-
-    /// Send an `end_block` event to end the current block.
-    pub async fn end_block(&mut self, block_number: i32) -> Result<i64, DeviceError> {
-        self.send_event_simple(
-            "end_block",
-            serde_json::json!({ "block_number": block_number }),
-        )
-        .await
-    }
-
-    /// Send a `start_trial` event to begin a trial within a block.
-    ///
-    /// Trials are the third level of optional hierarchy (within blocks).
-    /// Use trials for individual stimulus presentations or response periods.
-    ///
-    /// # Arguments
-    /// * `trial_number` - Trial identifier/number
-    /// * `metadata` - Optional additional metadata (e.g., condition, stimulus type)
-    pub async fn start_trial(
-        &mut self,
-        trial_number: i32,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<i64, DeviceError> {
-        let value = match metadata {
-            Some(mut meta) => {
-                if let Some(obj) = meta.as_object_mut() {
-                    obj.insert("trial_number".to_string(), serde_json::json!(trial_number));
-                }
-                meta
-            }
-            None => serde_json::json!({ "trial_number": trial_number }),
-        };
-        self.send_event_simple("start_trial", value).await
-    }
-
-    /// Send an `end_trial` event to end the current trial.
-    pub async fn end_trial(&mut self, trial_number: i32) -> Result<i64, DeviceError> {
-        self.send_event_simple(
-            "end_trial",
-            serde_json::json!({ "trial_number": trial_number }),
-        )
-        .await
-    }
-
-    // =========================================================================
-    // Common Event Helpers
-    // =========================================================================
-
-    /// Send a stimulus onset event.
-    ///
-    /// Use this when presenting a stimulus to the participant.
-    /// Send as close in time as possible to the actual screen flip or stimulus delivery.
-    ///
-    /// # Arguments
-    /// * `stimulus_type` - Type of stimulus (e.g., "visual", "auditory", "image_name.png")
-    /// * `metadata` - Optional additional metadata about the stimulus
-    pub async fn stimulus_onset(
-        &mut self,
-        stimulus_type: &str,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<i64, DeviceError> {
-        let value = match metadata {
-            Some(mut meta) => {
-                if let Some(obj) = meta.as_object_mut() {
-                    obj.insert(
-                        "stimulus_type".to_string(),
-                        serde_json::json!(stimulus_type),
-                    );
-                }
-                meta
-            }
-            None => serde_json::json!({ "stimulus_type": stimulus_type }),
-        };
-        self.send_event_simple("event_stimulus_onset", value).await
-    }
-
-    /// Send a response event.
-    ///
-    /// Use this when the participant makes a response.
-    ///
-    /// # Arguments
-    /// * `response` - The response made (e.g., "left", "right", "correct", key pressed)
-    /// * `response_time_ms` - Optional response time in milliseconds
-    /// * `correct` - Optional correctness flag
-    pub async fn response(
-        &mut self,
-        response: &str,
-        response_time_ms: Option<f64>,
-        correct: Option<bool>,
-    ) -> Result<i64, DeviceError> {
-        let mut value = serde_json::json!({ "response": response });
-        if let Some(rt) = response_time_ms {
-            value["response_time_ms"] = serde_json::json!(rt);
-        }
-        if let Some(c) = correct {
-            value["correct"] = serde_json::json!(c);
-        }
-        self.send_event_simple("event_response", value).await
-    }
-
-    /// Send a generic marker event.
-    ///
-    /// Use for custom events that don't fit the standard categories.
-    /// Events prefixed with `event_` will have their timestamps included in SNIRF exports.
-    ///
-    /// # Arguments
-    /// * `marker_name` - Name of the marker (will be prefixed with "event_")
-    /// * `value` - Associated value or metadata
-    pub async fn marker(
-        &mut self,
-        marker_name: &str,
-        value: serde_json::Value,
-    ) -> Result<i64, DeviceError> {
-        self.send_event_simple(format!("event_{}", marker_name), value)
-            .await
     }
 }
 

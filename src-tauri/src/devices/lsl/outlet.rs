@@ -26,8 +26,6 @@ enum OutletCommand {
         timestamp: f64,
         response: ResponseSender<Result<(), LslError>>,
     },
-    /// Check if outlet has consumers
-    HaveConsumers { response: ResponseSender<bool> },
     /// Shutdown the outlet thread
     Shutdown,
 }
@@ -217,10 +215,6 @@ impl StreamOutlet {
                     }) => {
                         let result = Self::push_sample_to_lsl(&lsl_outlet, &data, timestamp);
                         let _ = response.send(result);
-                    }
-                    Ok(OutletCommand::HaveConsumers { response }) => {
-                        let has = lsl_outlet.have_consumers();
-                        let _ = response.send(has);
                     }
                     Ok(OutletCommand::Shutdown) => {
                         info!(
@@ -509,52 +503,6 @@ impl StreamOutlet {
         Ok(())
     }
 
-    /// Send multiple samples as a chunk
-    pub async fn send_chunk(&self, samples: Vec<Sample>) -> Result<(), LslError> {
-        for sample in samples {
-            self.send_sample(sample).await?;
-        }
-        Ok(())
-    }
-
-    /// Check if there are consumers listening to this outlet
-    pub async fn have_consumers(&self) -> bool {
-        let (response_tx, response_rx) = std_mpsc::channel();
-        if self
-            .command_tx
-            .send(OutletCommand::HaveConsumers {
-                response: response_tx,
-            })
-            .is_err()
-        {
-            return false;
-        }
-
-        // Use spawn_blocking for the blocking recv
-        let result = tokio::time::timeout(Duration::from_secs(1), async {
-            tokio::task::spawn_blocking(move || {
-                response_rx.recv_timeout(std::time::Duration::from_secs(1))
-            })
-            .await
-        })
-        .await;
-
-        match result {
-            Ok(Ok(Ok(has))) => has,
-            _ => false,
-        }
-    }
-
-    /// Get stream information
-    pub fn get_info(&self) -> &StreamInfo {
-        &self.info
-    }
-
-    /// Get current status
-    pub async fn get_status(&self) -> StreamStatus {
-        self.status.read().await.clone()
-    }
-
     /// Check if outlet is active
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Relaxed)
@@ -574,12 +522,6 @@ impl StreamOutlet {
     pub async fn get_buffer_usage(&self) -> (usize, usize) {
         let buffer = self.buffer.read().await;
         (buffer.len(), self.buffer_limit)
-    }
-
-    /// Clear buffer
-    pub async fn clear_buffer(&self) {
-        let mut buffer = self.buffer.write().await;
-        buffer.clear();
     }
 
     /// Get outlet statistics
@@ -624,15 +566,6 @@ impl OutletManager {
         }
     }
 
-    /// Create outlet with custom configuration
-    pub fn with_config(time_sync: Arc<TimeSync>, config: OutletConfig) -> Self {
-        Self {
-            outlets: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            default_config: config,
-            time_sync,
-        }
-    }
-
     /// Create a new outlet
     pub async fn create_outlet(
         &self,
@@ -668,16 +601,6 @@ impl OutletManager {
         outlet.start().await
     }
 
-    /// Stop outlet
-    pub async fn stop_outlet(&self, outlet_id: &str) -> Result<(), LslError> {
-        let outlet = self
-            .get_outlet(outlet_id)
-            .await
-            .ok_or_else(|| LslError::StreamNotFound(outlet_id.to_string()))?;
-
-        outlet.stop().await
-    }
-
     /// Remove outlet
     pub async fn remove_outlet(&self, outlet_id: &str) -> Result<(), LslError> {
         // Stop outlet first
@@ -702,12 +625,6 @@ impl OutletManager {
         outlet.send_sample(sample).await
     }
 
-    /// List all outlets
-    pub async fn list_outlets(&self) -> Vec<String> {
-        let outlets = self.outlets.read().await;
-        outlets.keys().cloned().collect()
-    }
-
     /// Get outlet statistics for all outlets
     pub async fn get_all_stats(&self) -> serde_json::Value {
         let outlets = self.outlets.read().await;
@@ -721,46 +638,6 @@ impl OutletManager {
             "outlet_count": outlets.len(),
             "outlets": stats
         })
-    }
-
-    /// Create outlet for specific device types
-    pub async fn create_device_outlet(
-        &self,
-        device_id: &str,
-        device_type: &str,
-        config: Option<OutletConfig>,
-    ) -> Result<String, LslError> {
-        let stream_info = match device_type {
-            "ttl" => StreamInfo::ttl_markers(device_id),
-            "kernel" => StreamInfo::kernel_fnirs(device_id, 16), // Default 16 channels
-            "pupil" => StreamInfo::pupil_gaze(device_id),
-            _ => {
-                return Err(LslError::LslLibraryError(format!(
-                    "Unknown device type: {}",
-                    device_type
-                )))
-            }
-        };
-
-        self.create_outlet(stream_info, config).await
-    }
-
-    /// Start all outlets
-    pub async fn start_all(&self) -> Result<(), LslError> {
-        let outlets = self.outlets.read().await;
-        for outlet in outlets.values() {
-            outlet.start().await?;
-        }
-        Ok(())
-    }
-
-    /// Stop all outlets
-    pub async fn stop_all(&self) -> Result<(), LslError> {
-        let outlets = self.outlets.read().await;
-        for outlet in outlets.values() {
-            outlet.stop().await?;
-        }
-        Ok(())
     }
 }
 
@@ -780,7 +657,7 @@ mod tests {
         assert!(outlet.is_ok());
 
         let outlet = outlet.unwrap();
-        assert_eq!(outlet.get_info().name, "test_device_TTL_Markers");
+        assert_eq!(outlet.info.name, "test_device_TTL_Markers");
         assert!(!outlet.is_active());
     }
 
@@ -825,16 +702,13 @@ mod tests {
         let manager = OutletManager::new(time_sync);
 
         let outlet_id = manager
-            .create_device_outlet("test_device", "ttl", None)
+            .create_outlet(StreamInfo::ttl_markers("test_device"), None)
             .await;
         assert!(outlet_id.is_ok());
 
         let outlet_id = outlet_id.unwrap();
         assert!(manager.start_outlet(&outlet_id).await.is_ok());
-
-        let outlets = manager.list_outlets().await;
-        assert_eq!(outlets.len(), 1);
-        assert!(outlets.contains(&outlet_id));
+        assert!(manager.get_outlet(&outlet_id).await.is_some());
     }
 
     #[tokio::test]
@@ -858,7 +732,7 @@ mod tests {
         assert_eq!(outlet.get_sample_count(), 1);
 
         // Verify the status records the explicit timestamp
-        let status = outlet.get_status().await;
+        let status = outlet.status.read().await.clone();
         assert!((status.last_timestamp - explicit_timestamp).abs() < 0.001);
     }
 
@@ -881,7 +755,7 @@ mod tests {
         assert!(outlet.send_sample(sample).await.is_ok());
 
         // Verify a timestamp was assigned
-        let status = outlet.get_status().await;
+        let status = outlet.status.read().await.clone();
         assert!(status.last_timestamp > 0.0);
     }
 

@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tauri::Manager;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Current state of the FRENZ bridge process
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,8 +178,6 @@ struct PythonStatusLine {
     device_id: Option<String>,
     #[serde(default)]
     package: Option<String>,
-    #[serde(default)]
-    progress: Option<u32>,
     #[serde(default)]
     timing: Option<serde_json::Value>,
     #[serde(default)]
@@ -966,7 +964,6 @@ mod tests {
         assert_eq!(parsed.status, "bootstrapping");
         assert_eq!(parsed.phase.unwrap(), "installing");
         assert_eq!(parsed.package.unwrap(), "tensorflow");
-        assert_eq!(parsed.progress.unwrap(), 45);
     }
 
     #[test]

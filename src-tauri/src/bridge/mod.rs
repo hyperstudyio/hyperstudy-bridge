@@ -4,5 +4,5 @@ pub mod state;
 pub mod websocket;
 
 pub use message::{BridgeCommand, BridgeResponse, MessageHandler};
-pub use state::{AppState, DeviceStatusEvent};
+pub use state::AppState;
 pub use websocket::BridgeServer;

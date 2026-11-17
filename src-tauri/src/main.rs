@@ -3,16 +3,6 @@
     windows_subsystem = "windows"
 )]
 
-mod bridge;
-mod commands;
-mod devices;
-mod logging;
-mod open_files;
-mod recording;
-mod storage;
-mod updates;
-mod usb_monitor;
-
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc,
@@ -23,9 +13,12 @@ use tracing::{error, info, warn};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
-use crate::bridge::{AppState, BridgeServer};
-use crate::commands::*;
-use crate::logging::{init_log_emitter, init_log_persister, set_app_handle, TauriLogLayer};
+use hyperstudy_bridge::bridge::{AppState, BridgeServer};
+use hyperstudy_bridge::commands::{self, *};
+use hyperstudy_bridge::logging::{
+    init_log_emitter, init_log_persister, set_app_handle, TauriLogLayer,
+};
+use hyperstudy_bridge::{open_files, secrets, storage, updates, usb_monitor};
 
 /// Stops the FRENZ sidecar when Bridge exits, after the recording is finalized. Left running, it stayed connected
 /// to the band over Bluetooth, so no later Bridge could connect to it. Runs on a fresh thread: the sidecar belongs to
@@ -43,14 +36,18 @@ fn stop_frenz_sidecar(state: &Arc<AppState>) {
 /// Saves the log entries still buffered (up to 5 s / 100 of them), including the exit-time recording and helper
 /// lines. Runs on a fresh thread for the same reason as stop_frenz_sidecar.
 fn flush_logs_for_exit() {
-    let _ = std::thread::spawn(|| tauri::async_runtime::block_on(logging::flush_logs())).join();
+    let _ = std::thread::spawn(|| {
+        tauri::async_runtime::block_on(hyperstudy_bridge::logging::flush_logs())
+    })
+    .join();
 }
 
 #[tokio::main]
 async fn main() {
     // Create filters to prevent log explosion from dependencies.
-    // Without filtering, sqlx logs every INSERT statement, which triggers more logging,
-    // causing an infinite feedback loop that fills the database and consumes all memory.
+    // Every event that reaches the Tauri layer is also written to the log database. A dependency that logs
+    // its own work (sqlx, which the log database once used, logged every INSERT) would then feed back into
+    // itself, filling the database and consuming all memory, so only this crate's events get there.
     //
     // Console filter: Show our logs at INFO+, dependencies at WARN+
     let console_filter =
@@ -85,25 +82,6 @@ async fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
-        .plugin(
-            tauri_plugin_stronghold::Builder::new(|password| {
-                use argon2::{hash_raw, Config, Variant, Version};
-                let config = Config {
-                    lanes: 4,
-                    mem_cost: 10_000,
-                    time_cost: 10,
-                    variant: Variant::Argon2id,
-                    version: Version::Version13,
-                    ..Default::default()
-                };
-                let salt = b"hyperstudy-bridge-vault-salt";
-                hash_raw(password.as_ref(), salt, &config)
-                    .expect("failed to hash password")
-                    .to_vec()
-            })
-            .build(),
-        )
         .setup(move |app| {
             let state = state_clone.clone();
             let app_handle = app.handle().clone();
@@ -115,6 +93,12 @@ async fn main() {
 
             // Initialize log emitter for batched frontend events
             init_log_emitter();
+
+            // Saved device credentials live in the OS credential store. Before any page can ask for them, start
+            // moving the keys out of the old Stronghold vault (the migration holds the store until it is done).
+            // TODO: Remove after 2027-03-01 (Stronghold vault migration)
+            let secrets_state = app.state::<secrets::SecretsState>();
+            secrets_state.migrate_stronghold_vault(app_handle.path().app_data_dir()?.join("vault.hold"));
 
             // Initialize database storage
             let app_handle_for_db = app_handle.clone();
@@ -176,7 +160,6 @@ async fn main() {
 
             // Start USB device monitoring for TTL disconnect detection
             let state_for_usb = state.clone();
-            let app_handle_for_usb = app_handle.clone();
             tokio::spawn(async move {
                 let mut usb_rx = usb_monitor::start_usb_monitor();
                 info!("USB device monitoring started");
@@ -190,21 +173,8 @@ async fn main() {
                             port, serial
                         );
 
-                        // Handle the disconnect
-                        let updated = state_for_usb.handle_ttl_usb_disconnect().await;
-
-                        if updated {
-                            // Emit Tauri event to notify frontend
-                            if let Err(e) = app_handle_for_usb.emit("device_status_changed", serde_json::json!({
-                                "device": "ttl",
-                                "status": "Disconnected",
-                                "reason": "USB device unplugged",
-                                "port": port,
-                                "serial_number": serial
-                            })) {
-                                warn!("Failed to emit device_status_changed event: {}", e);
-                            }
-                        }
+                        // Unregisters the device and tells WebSocket clients (the page among them).
+                        state_for_usb.handle_ttl_usb_disconnect().await;
                     }
                 }
             });
@@ -311,33 +281,17 @@ async fn main() {
             Ok(())
         })
         .manage(app_state)
+        .manage(secrets::SecretsState::new(secrets::SecretStore::platform()))
         .manage(updates::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
-            start_bridge_server,
-            stop_bridge_server,
-            get_bridge_status,
-            connect_device,
-            disconnect_device,
-            send_device_command,
             send_ttl_pulse,
-            list_serial_ports,
-            list_all_serial_ports_debug,
             list_ttl_devices,
-            find_ttl_port_by_serial,
-            discover_devices,
-            get_system_diagnostics,
             get_logs,
             query_logs,
             get_log_stats,
             get_storage_stats,
-            start_session,
-            end_session,
-            list_sessions,
-            cleanup_old_logs,
             clear_all_logs,
             export_logs,
-            test_ttl_device,
-            reset_device,
             get_app_info,
             discover_recording_streams,
             start_lsl_recording,
@@ -348,14 +302,14 @@ async fn main() {
             reveal_recording,
             lsl_bridge_streams,
             update_status,
-            check_for_updates,
             install_update,
             recover_lsl_recording,
             scan_frenz_devices,
             start_frenz_bridge,
-            stop_frenz_bridge,
             get_frenz_bridge_status,
-            check_frenz_bridge_available
+            check_frenz_bridge_available,
+            secrets::get_secret,
+            secrets::set_secrets
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

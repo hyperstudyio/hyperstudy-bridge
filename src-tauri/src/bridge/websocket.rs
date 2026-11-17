@@ -36,9 +36,6 @@ pub async fn bind_listener(addr: SocketAddr) -> Result<TcpListener, String> {
         }
     })
 }
-#[allow(dead_code)]
-const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024; // 10MB
-
 #[cfg(test)]
 mod hybrid_config_tests {
     use super::*;
@@ -333,7 +330,6 @@ async fn handle_connection<R: Runtime>(
             match msg {
                 Ok(Message::Text(text)) => {
                     state_clone.update_connection_activity(&connection_id_clone);
-                    state_clone.increment_message_count();
                     // Payloads can contain short-lived upload capabilities and device secrets.
                     info!(bytes = text.len(), "Received WebSocket message");
 
@@ -796,18 +792,6 @@ async fn handle_device_command(
                 }
                 info!("FRENZ connect: using device '{}'", device_name);
 
-                // Create marker outlet if requested
-                let enable_markers = config
-                    .get("enableMarkerOutlet")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-
-                if enable_markers {
-                    if let Err(e) = state.frenz_manager.create_marker_outlet().await {
-                        warn!("Failed to create FRENZ marker outlet: {}", e);
-                    }
-                }
-
                 // Connect to selected streams
                 match state
                     .frenz_manager
@@ -1004,9 +988,6 @@ async fn handle_device_command(
                                         "Neon {} is not advertising on this network — is the Companion app open and the phone on the same Wi-Fi?",
                                         pin
                                     ));
-                                    state
-                                        .record_device_error(&device_id, &err.to_string())
-                                        .await;
                                     send_response(
                                         tx,
                                         BridgeResponse::device_error_from(
@@ -1129,9 +1110,6 @@ async fn handle_device_command(
                     .await;
                 }
                 Err(e) => {
-                    // Record failed connection attempt
-                    state.record_device_error(&device_id, &e.to_string()).await;
-
                     // Keep the machine-readable code (wrong_device, device_not_found…)
                     // so the client can tell an identity refusal from a plain failure.
                     send_response(
@@ -1986,8 +1964,6 @@ async fn handle_device_command(
                     .await;
                 }
                 Err(e) => {
-                    state.record_device_error("pupil", &e.to_string()).await;
-
                     send_response(
                         tx,
                         BridgeResponse::device_error_from("pupil".to_string(), &e, id),
@@ -2259,13 +2235,6 @@ async fn handle_device_command(
                 })
                 .unwrap_or_default();
 
-            // Check if marker outlet should be created
-            let enable_markers = payload
-                .as_ref()
-                .and_then(|p| p.get("enable_markers"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-
             info!(
                 "Connecting FRENZ streams for {}: {:?}",
                 device_name,
@@ -2275,13 +2244,6 @@ async fn handle_device_command(
                     format!("{} selected", selected_streams.len())
                 }
             );
-
-            // Create marker outlet if requested
-            if enable_markers {
-                if let Err(e) = state.frenz_manager.create_marker_outlet().await {
-                    warn!("Failed to create FRENZ marker outlet: {}", e);
-                }
-            }
 
             match state
                 .frenz_manager
@@ -2401,52 +2363,6 @@ async fn handle_device_command(
                 ),
             )
             .await;
-        }
-        CommandAction::SendFrenzMarker => {
-            let marker = payload
-                .as_ref()
-                .and_then(|p| p.get("marker"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            if marker.is_empty() {
-                send_response(
-                    tx,
-                    BridgeResponse::device_error(
-                        "frenz_lsl".to_string(),
-                        "Missing 'marker' in payload".to_string(),
-                        id,
-                    ),
-                )
-                .await;
-                return;
-            }
-
-            let timestamp = payload
-                .as_ref()
-                .and_then(|p| p.get("timestamp"))
-                .and_then(|v| v.as_f64());
-
-            match state.frenz_manager.send_marker(marker, timestamp).await {
-                Ok(()) => {
-                    send_response(
-                        tx,
-                        BridgeResponse::data(
-                            "frenz_lsl".to_string(),
-                            json!({ "success": true, "marker": marker }),
-                            id,
-                        ),
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    send_response(
-                        tx,
-                        BridgeResponse::device_error("frenz_lsl".to_string(), e.to_string(), id),
-                    )
-                    .await;
-                }
-            }
         }
         // ====================================================================
         // EyeLink commands (SDK loaded at runtime via libloading). Unfinished: off unless built with the `eyelink`

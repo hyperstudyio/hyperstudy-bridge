@@ -180,12 +180,9 @@ impl DeviceQueues {
     }
 
     /// Number of distinct device queues created so far.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.queues.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.queues.is_empty()
     }
 }
 

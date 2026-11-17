@@ -15,6 +15,23 @@ Selecting EEG in Bridge includes two separately named streams:
   historical name is retained, but XML identifies it as processed comparison
   data rather than original packets.
 
+## Known SDK issue: repeated raw blocks
+
+With frenztoolkit 0.3.2, the SDK raw store behind `_EEG_raw`, `_IMU_raw` and
+`_PPG_raw` sometimes appends the previous one-second block a second time
+(identical timestamps and values) and omits the following second. The three
+streams are affected at the same moments. It was seen 3 and 10 times in two
+68-second recordings on November 17, 2026, and in 4 of 13 earlier recordings.
+The Bluetooth packet counter stays consecutive across these moments, so the
+data reaches the computer; the missing rows were found in `_EEG_bluetooth` and
+the firmware streams.
+
+The sidecar publishes the SDK rows unchanged and never deduplicates them. The
+repeat appears in a recording as a backward timestamp step of about one second;
+Bridge logs a warning when a recording ends with any, and counts them as
+`backward_steps` in the end report. Reported to Earable; remove this section
+and the warning in the device settings once a fixed SDK is adopted.
+
 `_focus` remains the unmodified SDK score history. Equal consecutive scores are
 separate observations and are never deduplicated by value or timestamp.
 

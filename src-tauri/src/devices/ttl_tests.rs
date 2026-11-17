@@ -37,14 +37,6 @@ mod tests {
         assert_eq!(device.get_status(), DeviceStatus::Disconnected);
     }
 
-    #[test]
-    fn test_ttl_list_ports() {
-        // This test might fail if no serial ports are available
-        // but it tests the function doesn't panic
-        let result = TtlDevice::list_ports();
-        assert!(result.is_ok());
-    }
-
     #[tokio::test]
     async fn test_connect_without_port() {
         let mut device = TtlDevice::new("/dev/nonexistent".to_string());
@@ -80,22 +72,6 @@ mod tests {
             Err(DeviceError::NotConnected) => (),
             _ => panic!("Expected NotConnected error"),
         }
-    }
-
-    #[test]
-    fn test_performance_callback() {
-        use std::sync::{Arc, Mutex};
-
-        let mut device = TtlDevice::new("/dev/ttyUSB0".to_string());
-        let callback_called = Arc::new(Mutex::new(false));
-        let callback_called_clone = callback_called.clone();
-
-        device.set_performance_callback(move |_id, _latency, _sent, _recv| {
-            *callback_called_clone.lock().unwrap() = true;
-        });
-
-        // The callback should be set
-        assert!(device.performance_callback.is_some());
     }
 
     #[test]
@@ -197,26 +173,6 @@ mod integration_tests {
             // Hardware not available, skip test
             println!("TTL hardware not available, skipping integration test");
         }
-    }
-
-    #[tokio::test]
-    async fn test_performance_metrics() {
-        use std::sync::{Arc, Mutex};
-
-        let mut device = TtlDevice::new(TEST_PORT.to_string());
-
-        let metrics = Arc::new(Mutex::new(Vec::new()));
-        let metrics_clone = metrics.clone();
-
-        device.set_performance_callback(move |id, latency, sent, recv| {
-            metrics_clone
-                .lock()
-                .unwrap()
-                .push((id.to_string(), latency, sent, recv));
-        });
-
-        // This test verifies the callback mechanism works
-        // Actual testing requires hardware
     }
 
     #[tokio::test]

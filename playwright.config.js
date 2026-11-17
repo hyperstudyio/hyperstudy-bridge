@@ -36,10 +36,6 @@ export default defineConfig({
     },
   ],
 
-  // Global setup and teardown
-  globalSetup: './e2e/global-setup.js',
-  globalTeardown: './e2e/global-teardown.js',
-
   // Web Server configuration for Tauri app
   webServer: {
     command: 'npm run tauri:dev',

@@ -39,12 +39,6 @@ pub enum DeviceError {
     #[error("Serial port error: {0}")]
     SerialError(String),
 
-    #[error("WebSocket error: {0}")]
-    WebSocketError(String),
-
-    #[error("Unknown error: {0}")]
-    Unknown(String),
-
     /// The phone is already recording something this bridge did not start.
     /// On a shared lab network this is the tell-tale of two stations having
     /// resolved the same device.
@@ -80,8 +74,6 @@ impl DeviceError {
             DeviceError::InvalidData(_) => "invalid_data",
             DeviceError::IoError(_) => "io_error",
             DeviceError::SerialError(_) => "serial_error",
-            DeviceError::WebSocketError(_) => "websocket_error",
-            DeviceError::Unknown(_) => "unknown",
             DeviceError::PhoneBusy(_) => "phone_busy",
             DeviceError::RecordingNotOwned(_) => "recording_not_owned",
             DeviceError::WrongDevice { .. } => "wrong_device",
@@ -144,17 +136,11 @@ pub trait Device: Send + Sync + Debug {
 
     async fn send(&mut self, data: &[u8]) -> Result<(), DeviceError>;
 
-    async fn receive(&mut self) -> Result<Vec<u8>, DeviceError>;
-
     fn get_info(&self) -> DeviceInfo;
 
     fn get_status(&self) -> DeviceStatus;
 
     fn configure(&mut self, config: DeviceConfig) -> Result<(), DeviceError>;
-
-    async fn heartbeat(&mut self) -> Result<(), DeviceError> {
-        Ok(())
-    }
 
     /// Test if the device can be reached without establishing a persistent connection
     async fn test_connection(&mut self) -> Result<bool, DeviceError> {

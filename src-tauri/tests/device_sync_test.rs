@@ -273,10 +273,14 @@ mod multi_device_sync_tests {
 
 /// Test suite for time alignment verification
 #[cfg(test)]
+// These tests time real sleeps between sends to mock devices and assert tight limits (10-20 ms, 10% rate). They
+// measure how evenly the host wakes a sleeping task, so one late wake-up on a shared CI runner fails them without
+// any Bridge code being slow (seen on macOS CI: 64 ms spread, 15 ms deviation). They are ignored by default.
 mod time_alignment_tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "depends on host scheduling; run on a quiet machine with --ignored"]
     async fn test_device_timestamp_synchronization() -> TestResult<()> {
         let mut harness = TestHarness::new().await;
 
@@ -355,6 +359,7 @@ mod time_alignment_tests {
     }
 
     #[tokio::test]
+    #[ignore = "depends on host scheduling; run on a quiet machine with --ignored"]
     async fn test_operation_timing_precision() -> TestResult<()> {
         let mut harness = TestHarness::new().await;
 
@@ -413,6 +418,7 @@ mod time_alignment_tests {
     }
 
     #[tokio::test]
+    #[ignore = "depends on host scheduling; run on a quiet machine with --ignored"]
     async fn test_cross_device_timing_correlation() -> TestResult<()> {
         let mut harness = TestHarness::new().await;
 
@@ -481,6 +487,7 @@ mod time_alignment_tests {
     }
 
     #[tokio::test]
+    #[ignore = "depends on host scheduling; run on a quiet machine with --ignored"]
     async fn test_long_term_timing_stability() -> TestResult<()> {
         let mut harness = TestHarness::new().await;
 

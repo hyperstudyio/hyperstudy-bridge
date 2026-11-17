@@ -63,7 +63,6 @@ pub enum CommandAction {
     ConnectFrenzStreams, // Connect to selected FRENZ streams
     DisconnectFrenz,     // Disconnect from FRENZ streams
     FrenzStatus,         // Get FRENZ LSL manager status
-    SendFrenzMarker,     // Send event marker to FRENZ marker outlet
     // EyeLink specific actions
     ConnectEyeLink,        // Connect to EyeLink tracker
     DisconnectEyeLink,     // Disconnect from EyeLink tracker

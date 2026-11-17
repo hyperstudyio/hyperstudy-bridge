@@ -5,19 +5,8 @@ import * as websocketStore from '../websocket.svelte.js';
 vi.mock('../../services/tauri.js', () => ({
   tauriService: {
     sendTtlPulse: vi.fn(),
-    setupEventListeners: vi.fn(),
-    cleanupEventListeners: vi.fn(),
   },
 }));
-
-// Helper to get the latest WebSocket instance
-function getLatestWebSocketInstance() {
-  const instances = global.MockWebSocket?.instances;
-  if (instances && instances.length > 0) {
-    return instances[instances.length - 1];
-  }
-  return null;
-}
 
 // Helper to get the first (or specific) WebSocket instance
 function getWebSocketInstance(index = 0) {
@@ -528,15 +517,6 @@ describe('WebSocket Store', () => {
 
       // Should not have created any new WebSocket instances
       expect(global.MockWebSocket.instances.length).toBe(instanceCountBeforeDisconnect);
-    });
-
-    it('cleans up Tauri event listeners on disconnect', async () => {
-      const { tauriService } = await import('../../services/tauri.js');
-      websocketStore.initialize();
-
-      websocketStore.disconnect();
-
-      expect(tauriService.cleanupEventListeners).toHaveBeenCalled();
     });
   });
 

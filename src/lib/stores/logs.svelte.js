@@ -163,7 +163,6 @@ function addLogFromEvent(logData) {
 function handleLogBatch(batch) {
   if (!Array.isArray(batch) || batch.length === 0) return;
 
-  let addedCount = 0;
   for (const logData of batch) {
     if (!logData || typeof logData !== 'object') continue;
 
@@ -184,7 +183,6 @@ function handleLogBatch(batch) {
 
     recentLogHashes.add(hash);
     streamBuffer.logs.unshift(entry);
-    addedCount++;
   }
 
   // Trim buffer after batch processing
@@ -604,7 +602,4 @@ export const setSearchQuery = query => {
 
 export const setMaxLogs = max => {
   streamBuffer.maxSize = max;
-};
-export const setDbPageSize = size => {
-  dbState.pageSize = size;
 };

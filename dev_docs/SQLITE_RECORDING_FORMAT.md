@@ -2,8 +2,9 @@
 
 SQLite is the selected acquisition format. This batch records locally; cloud
 upload, Data API listing/download, Python SDK access and automatic experiment
-lifecycle integration remain a separate batch. Existing FRENZ product-key entry
-uses the credential vault. The band name is now editable before connecting.
+lifecycle integration remain a separate batch. The FRENZ product key is kept in
+the system credential store (it was the Stronghold vault before 0.9). The band
+name is now editable before connecting.
 
 ## Use
 
