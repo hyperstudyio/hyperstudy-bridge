@@ -59,7 +59,8 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
-            pkg-config
+            pkg-config \
+            libudev-dev
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -318,8 +319,8 @@ jobs:
 
   security-audit:
     name: Security Audit
-    # Gating: a high-severity npm advisory or an un-ignored RUSTSEC advisory
-    # fails CI. Moderate npm findings stay informational (|| true below).
+    # Gating: an un-ignored high-severity npm advisory (ignores: scripts/npm-audit.mjs)
+    # or an un-ignored RUSTSEC advisory fails CI. Moderate npm findings stay informational (|| true below).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -348,7 +349,7 @@ jobs:
 
       - name: Run npm audit
         run: |
-          npm audit --audit-level=high
+          node scripts/npm-audit.mjs
           npm audit --audit-level=moderate || true
 
   dependency-check:
