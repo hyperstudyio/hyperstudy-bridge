@@ -151,7 +151,16 @@ jobs:
         if: failure() && matrix.os == 'windows-latest'
         run: |
           cd src-tauri
-          cargo test --locked --lib -- --test-threads=1 --nocapture
+          $exe = Get-ChildItem -Recurse target\debug -Filter 'hyperstudy_bridge-*.exe' | Sort-Object LastWriteTime | Select-Object -Last 1
+          $cdb = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe' -ErrorAction SilentlyContinue
+          Write-Host "exe: $($exe.FullName)"
+          Write-Host "cdb: $($cdb.FullName)"
+          if ($cdb) {
+            & $cdb.FullName -g -G -c ".ecxr; kb 60; lmv m hyperstudy*; q" $exe.FullName --test-threads=1 a_full_queue_rejects 2>&1 | Select-Object -Last 150
+          } else {
+            & $exe.FullName --test-threads=1 --nocapture a_full_queue_rejects
+          }
+          exit 1
 
   test-frontend:
     name: Test Frontend (Svelte)
