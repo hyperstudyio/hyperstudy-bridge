@@ -6,11 +6,7 @@ const STORAGE_KEY = 'hyperstudy-bridge:devices';
 
 /** Remember the devices on the main screen. Storage can be unavailable; the list then lasts until quit. */
 export function saveSelectedDevices(devices, storage = globalThis.localStorage) {
-  const saved = devices.map(({ id, config, lslConfig }) => ({
-    id,
-    config,
-    ...(lslConfig ? { lslConfig } : {}),
-  }));
+  const saved = devices.map(({ id, config }) => ({ id, config }));
   try {
     storage.setItem(STORAGE_KEY, JSON.stringify(saved));
   } catch {
@@ -38,7 +34,6 @@ export function restoreSelectedDevices(
     if (!offered) return [];
     const device = structuredClone(offered);
     device.config = { ...device.config, ...(entry.config ?? {}) };
-    if (entry.lslConfig) device.lslConfig = entry.lslConfig;
     return [device];
   });
 }

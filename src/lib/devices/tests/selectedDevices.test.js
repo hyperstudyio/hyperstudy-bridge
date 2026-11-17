@@ -25,7 +25,6 @@ describe('remembering added devices', () => {
     const storage = memoryStorage();
     const frenz = catalogEntry('frenz');
     frenz.config.streamPoas = false;
-    frenz.lslConfig = { streamName: 'Lab_Band' };
     saveSelectedDevices([frenz, catalogEntry('ttl')], storage);
 
     const restored = restoreSelectedDevices(storage);
@@ -33,7 +32,6 @@ describe('remembering added devices', () => {
     expect(restored[0].name).toBe('Earable FRENZ Brainband');
     expect(restored[0].config.streamPoas).toBe(false);
     expect(restored[0].config.streamEegRaw).toBe(true);
-    expect(restored[0].lslConfig).toEqual({ streamName: 'Lab_Band' });
   });
 
   it('saves only ids and settings, never runtime state', () => {

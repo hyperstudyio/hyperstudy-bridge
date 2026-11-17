@@ -83,13 +83,12 @@
   }
 
   // Update device configuration (called from DeviceCard)
-  function updateDeviceConfig(deviceId, newConfig, newLslConfig = null) {
+  function updateDeviceConfig(deviceId, newConfig) {
     selectedDevices = selectedDevices.map(device => {
       if (device.id === deviceId) {
         return {
           ...device,
           config: { ...device.config, ...newConfig },
-          ...(newLslConfig && { lslConfig: { ...device.lslConfig, ...newLslConfig } }),
         };
       }
       return device;

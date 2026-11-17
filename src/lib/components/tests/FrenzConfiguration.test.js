@@ -60,8 +60,7 @@ it('saves the selected band and key in one operation without waiting for acquisi
   });
   expect(onSave).toHaveBeenCalledWith(
     'frenz',
-    expect.not.objectContaining({ frenzProductKey: expect.anything() }),
-    expect.any(Object)
+    expect.not.objectContaining({ frenzProductKey: expect.anything() })
   );
 });
 it('shows persistence failure and keeps configuration open', async () => {
