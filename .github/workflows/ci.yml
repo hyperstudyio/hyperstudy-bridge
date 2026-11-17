@@ -73,11 +73,6 @@ jobs:
           workspaces: src-tauri
           shared-key: "rust-cache"
 
-      - name: Run clippy
-        run: |
-          cd src-tauri
-          cargo clippy --lib --bins --all-features
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -89,6 +84,15 @@ jobs:
 
       - name: Type check frontend
         run: npm run type-check
+
+      # Tauri embeds the built frontend at compile time, so clippy on the app binary needs it built first.
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run clippy
+        run: |
+          cd src-tauri
+          cargo clippy --lib --bins --all-features
 
   test-backend:
     name: Test Backend (Rust)
@@ -141,6 +145,13 @@ jobs:
         run: |
           cd src-tauri
           cargo test --locked
+
+      # Temporary: name the test that crashes the Windows test binary.
+      - name: Diagnose Windows test crash
+        if: failure() && matrix.os == 'windows-latest'
+        run: |
+          cd src-tauri
+          cargo test --locked --lib -- --test-threads=1 --nocapture
 
   test-frontend:
     name: Test Frontend (Svelte)
