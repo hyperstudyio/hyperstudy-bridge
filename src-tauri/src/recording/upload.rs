@@ -222,6 +222,20 @@ fn validate_grant(base: &str, grant: &UploadGrant, id: &str, room: &str, size: u
 }
 /// All disk validation/hashing happens in a blocking worker; HTTP streams bounded
 /// chunks and follows no redirects. No retry loop and no stored bearer material.
+/// `reqwest::Error`'s Display stops at the outer kind ("error decoding response
+/// body"); the transport cause (EOF, reset, framing) is only in `source()`.
+/// The persisted upload error must name it, or a failure cannot be diagnosed.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut cause = error.source();
+    while let Some(inner) = cause {
+        message.push_str(": ");
+        message.push_str(&inner.to_string());
+        cause = inner.source();
+    }
+    message
+}
+
 pub async fn enqueue(
     manager: Arc<RecordingManager>,
     id: String,
@@ -273,7 +287,7 @@ pub async fn enqueue(
                     .body(body)
                     .send()
                     .await
-                    .map_err(|e| e.without_url())?;
+                    .map_err(|e| anyhow::anyhow!(error_chain(&e.without_url())))?;
                 ensure!(
                     response.status().is_success(),
                     "Cloud upload failed with HTTP {}; local file retained",
@@ -290,14 +304,18 @@ pub async fn enqueue(
                 .json(&json!({}))
                 .send()
                 .await
-                .map_err(|e| e.without_url())?;
+                .map_err(|e| anyhow::anyhow!(error_chain(&e.without_url())))?;
             ensure!(
                 response.status().is_success(),
                 "Cloud verification failed with HTTP {}; local file retained",
                 response.status().as_u16()
             );
             let mut bytes = Vec::new();
-            while let Some(chunk) = response.chunk().await.map_err(|e| e.without_url())? {
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|e| anyhow::anyhow!(error_chain(&e.without_url())))?
+            {
                 ensure!(
                     bytes.len() + chunk.len() <= 64 * 1024,
                     "Cloud verification response exceeds 64 KiB"
@@ -326,6 +344,17 @@ pub async fn enqueue(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn error_chain_includes_every_cause() {
+        let io = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "connection closed early");
+        let outer = anyhow::Error::new(io).context("error decoding response body");
+        let chained = error_chain(outer.as_ref());
+        assert_eq!(
+            chained,
+            "error decoding response body: connection closed early"
+        );
+    }
+
     #[test]
     fn grants_bind_exact_path_headers_expiry_and_recording() {
         let expiration = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
