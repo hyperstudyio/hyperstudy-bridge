@@ -312,6 +312,30 @@ impl NeonLslManager {
         devices.get(device_name).cloned()
     }
 
+    /// Look up a device by display name, discovering once if it is not cached.
+    ///
+    /// Clients connect by name, and the cache only exists after a discovery in
+    /// *this* bridge process. HyperStudy skips discovery when it already knows
+    /// the phone's name (from REST status), so after a bridge restart every
+    /// connect used to fail with "not found" even though the stream was live.
+    /// Discovering here also refreshes the resolver cache the connect needs.
+    async fn resolve_device(&self, device_name: &str) -> Result<DiscoveredNeonDevice, LslError> {
+        if let Some(device) = self.get_device(device_name).await {
+            return Ok(device);
+        }
+        info!(
+            device = "neon",
+            "{} not discovered yet in this session; discovering Neon LSL streams", device_name
+        );
+        self.discover_neon_devices().await?;
+        self.get_device(device_name).await.ok_or_else(|| {
+            LslError::NeonDeviceNotFound(format!(
+                "No Neon LSL streams named '{}' on this network. Check that \"Stream over LSL\" is on in the Companion app and the phone is on the same network",
+                device_name
+            ))
+        })
+    }
+
     /// Connect to a Neon gaze stream
     ///
     /// Returns a channel receiver that will emit gaze data samples, plus the
@@ -330,12 +354,7 @@ impl NeonLslManager {
         // Get the device info. Lock order: `discovered_devices` is never taken
         // while a task-registry lock is held (get_stats takes them the other
         // way round), so resolve everything from discovery BEFORE locking.
-        let device = self.get_device(device_name).await.ok_or_else(|| {
-            LslError::NeonDeviceNotFound(format!(
-                "Device not found: {}. Run discover_neon_devices() first.",
-                device_name
-            ))
-        })?;
+        let device = self.resolve_device(device_name).await?;
 
         if !device.has_gaze_stream {
             return Err(LslError::NeonStreamNotAvailable(format!(
@@ -512,12 +531,7 @@ impl NeonLslManager {
         );
 
         // Get the device info (before locking — see connect_gaze_stream)
-        let device = self.get_device(device_name).await.ok_or_else(|| {
-            LslError::NeonDeviceNotFound(format!(
-                "Device not found: {}. Run discover_neon_devices() first.",
-                device_name
-            ))
-        })?;
+        let device = self.resolve_device(device_name).await?;
 
         if !device.has_events_stream {
             return Err(LslError::NeonStreamNotAvailable(format!(
@@ -879,6 +893,38 @@ impl std::fmt::Debug for NeonLslManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh bridge process (nothing discovered yet) must still connect by
+    /// name: HyperStudy skips discovery when it already knows the phone name.
+    #[tokio::test]
+    async fn connect_gaze_without_prior_discovery_discovers_on_demand() {
+        use crate::devices::lsl::{inlet::InletManager, resolver::StreamResolver, sync::TimeSync};
+        let device = format!("UndiscoveredNeon{}", uuid::Uuid::new_v4().simple());
+        let info = lsl::StreamInfo::new(
+            &format!("{}_Neon Gaze", device),
+            "Gaze",
+            2,
+            200.,
+            lsl::ChannelFormat::Float32,
+            &device,
+        )
+        .unwrap();
+        let _outlet = lsl::StreamOutlet::new(&info, 0, 360).unwrap();
+        let time_sync = Arc::new(TimeSync::new(true));
+        let manager = NeonLslManager::new(
+            Arc::new(StreamResolver::new(3.0)),
+            Arc::new(InletManager::new(time_sync)),
+        );
+        assert!(manager.get_device(&device).await.is_none());
+        let (_rx, _task) = manager
+            .connect_gaze_stream(&device)
+            .await
+            .expect("connect should discover the stream itself");
+        manager.disconnect_gaze_stream(&device).await.ok();
+
+        let missing = manager.connect_gaze_stream("NoSuchNeonPhone").await;
+        assert!(matches!(missing, Err(LslError::NeonDeviceNotFound(_))));
+    }
 
     #[test]
     fn test_neon_gaze_data_basic() {
