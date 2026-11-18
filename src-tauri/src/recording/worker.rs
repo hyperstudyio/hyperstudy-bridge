@@ -82,6 +82,9 @@ fn commit(
     status.lock().unwrap().committed_samples = count;
     Ok(())
 }
+/// How long to look for a selected stream that does not answer before refusing to start.
+const STREAM_RESOLVE_TIMEOUT_S: f64 = 3.;
+
 pub fn record(
     request: RecordingRequest,
     path: &Path,
@@ -90,7 +93,6 @@ pub fn record(
     study: bool,
     ready: mpsc::Sender<()>,
 ) -> Result<()> {
-    let available = lsl::resolve_streams(1.)?;
     let mut inlets = Inlets(Vec::new());
     let mut specs = Vec::new();
     for uid in &request.stream_uids {
@@ -98,6 +100,10 @@ pub fn record(
             status.lock().unwrap().state = "cancelled".into();
             return Ok(());
         }
+        // Each stream by its exact UID, which returns as soon as the stream answers. A network-wide resolve waits
+        // out its whole timeout, and that fixed second was most of the time a study recording took to start (the
+        // participant saw it as a pause after device setup). The timeout only matters for a stream that is gone.
+        let available = lsl::resolve_byprop("uid", uid, 1, STREAM_RESOLVE_TIMEOUT_S)?;
         let info = available
             .iter()
             .find(|s| s.uid() == *uid)
