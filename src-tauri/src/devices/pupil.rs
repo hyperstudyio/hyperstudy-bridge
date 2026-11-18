@@ -674,19 +674,58 @@ impl PupilDevice {
         Ok(())
     }
 
+    /// The phone's hardware id and where its Time Echo service listens (the host Bridge connected to).
+    fn time_echo_endpoint(&self) -> Option<(String, u16, String)> {
+        let phone = &self.neon_status.as_ref()?.phone;
+        let host = crate::recording::clock::time_echo_host(&self.base_url)?;
+        (phone.time_echo_port != 0 && !phone.device_id.is_empty())
+            .then(|| (host, phone.time_echo_port, phone.device_id.clone()))
+    }
+
+    /// Map a timestamp on this computer's clock onto the phone's (see `neon_clock`). Without a recent
+    /// measurement, takes a short Time Echo burst first, so the first event after connecting is corrected too.
+    async fn correct_for_phone_clock(
+        &self,
+        timestamp_ns: i64,
+    ) -> crate::devices::neon_clock::Correction {
+        let clocks = crate::devices::neon_clock::global();
+        let endpoint = self.time_echo_endpoint();
+        if let Some((host, port, id)) = &endpoint {
+            if clocks.estimate(id).is_none() {
+                let samples = crate::recording::clock::neon_time_echo(host, *port, id, 4).await;
+                clocks.record(id, &samples);
+            }
+        }
+        clocks.correct(
+            endpoint.as_ref().map(|(_, _, id)| id.as_str()),
+            timestamp_ns,
+        )
+    }
+
     /// Send an event annotation to the Neon Companion App.
     ///
-    /// Timestamps are in nanoseconds since Unix epoch. If `timestamp_ns` is None,
-    /// the Companion App uses its own clock.
+    /// Timestamps are in nanoseconds since Unix epoch on this computer's clock; the phone reads them on its own
+    /// clock, so they are moved onto it first (the returned correction says how, or why not). If `timestamp_ns` is
+    /// None, the Companion App stamps the event on arrival with its own clock and nothing needs correcting.
     pub async fn send_neon_event(
         &mut self,
         name: &str,
         timestamp_ns: Option<i64>,
-    ) -> Result<EventResponse, DeviceError> {
+    ) -> Result<
+        (
+            EventResponse,
+            Option<crate::devices::neon_clock::Correction>,
+        ),
+        DeviceError,
+    > {
+        let correction = match timestamp_ns {
+            Some(ns) => Some(self.correct_for_phone_clock(ns).await),
+            None => None,
+        };
         let url = format!("{}/event", self.base_url);
         let body = EventRequest {
             name: name.to_string(),
-            timestamp: timestamp_ns,
+            timestamp: correction.as_ref().map(|c| c.sent_ns).or(timestamp_ns),
         };
 
         let resp = self
@@ -740,14 +779,34 @@ impl PupilDevice {
             }
         }
 
-        info!(
-            device = "pupil",
-            event = %event_resp.name,
-            recording_id = ?event_resp.recording_id,
-            timestamp = event_resp.timestamp,
-            "Neon event sent"
-        );
-        Ok(event_resp)
+        match &correction {
+            Some(c) if c.applied => info!(
+                device = "pupil",
+                event = %event_resp.name,
+                recording_id = ?event_resp.recording_id,
+                original_ns = c.original_ns,
+                sent_ns = c.sent_ns,
+                offset_ms = c.estimate.map(|e| e.offset_ms),
+                round_trip_ms = c.estimate.map(|e| e.round_trip_ms),
+                "Neon event sent, timestamp moved onto the phone's clock"
+            ),
+            Some(c) => warn!(
+                device = "pupil",
+                event = %event_resp.name,
+                recording_id = ?event_resp.recording_id,
+                timestamp = c.sent_ns,
+                reason = ?c.reason,
+                "Neon event sent with an uncorrected timestamp"
+            ),
+            None => info!(
+                device = "pupil",
+                event = %event_resp.name,
+                recording_id = ?event_resp.recording_id,
+                timestamp = event_resp.timestamp,
+                "Neon event sent, stamped by the phone on arrival"
+            ),
+        }
+        Ok((event_resp, correction))
     }
 
     /// Route a JSON command to the appropriate REST endpoint.
@@ -772,11 +831,12 @@ impl PupilDevice {
             }
             "event" => {
                 let name = cmd.name.unwrap_or_else(|| "unnamed".to_string());
-                let resp = self.send_neon_event(&name, cmd.timestamp).await?;
+                let (resp, correction) = self.send_neon_event(&name, cmd.timestamp).await?;
                 Ok(serde_json::json!({
                     "name": resp.name,
                     "recording_id": resp.recording_id,
                     "timestamp": resp.timestamp,
+                    "clock_correction": correction,
                 }))
             }
             "status" => {
@@ -1053,7 +1113,7 @@ impl Device for PupilDevice {
             .unwrap_or("unnamed");
         let timestamp = event.get("timestamp").and_then(|v| v.as_i64());
 
-        let resp = self.send_neon_event(name, timestamp).await?;
+        let (resp, correction) = self.send_neon_event(name, timestamp).await?;
         // Let the client see when the phone filed this event somewhere other than
         // the recording we started (or nowhere) — not just the log.
         let recording_mismatch =
@@ -1065,6 +1125,8 @@ impl Device for PupilDevice {
             "expected_recording_id": self.recording_id,
             "recording_mismatch": recording_mismatch,
             "timestamp": resp.timestamp,
+            // How the timestamp was moved onto the phone's clock, or why it was not.
+            "clock_correction": correction,
         }))
     }
 }
@@ -1458,6 +1520,160 @@ mod tests {
             }
         });
         addr
+    }
+
+    /// A stand-in phone whose clock runs `skew_ms` ahead: REST status (advertising its Time Echo port), the event
+    /// endpoint (recording each body it receives), and the Time Echo service.
+    async fn spawn_fake_phone(
+        device_id: &str,
+        skew_ms: i64,
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_port = echo.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = echo.accept().await {
+                tokio::spawn(async move {
+                    let mut request = [0u8; 8];
+                    while sock.read_exact(&mut request).await.is_ok() {
+                        let phone =
+                            (crate::recording::clock::unix_seconds() * 1000.) as i64 + skew_ms;
+                        let mut reply = request.to_vec();
+                        reply.extend_from_slice(&(phone as u64).to_be_bytes());
+                        if sock.write_all(&reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let mut status = status_json(device_id, "Neon Companion");
+        status["result"][0]["data"]["time_echo_port"] = serde_json::json!(echo_port);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = events.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let status = status.to_string();
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    // Read the whole request: headers, then Content-Length bytes of body.
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (head, body) = loop {
+                        let n = sock.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buf).to_string();
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let head = text[..end].to_string();
+                            let length = head
+                                .lines()
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                                })
+                                .unwrap_or(0);
+                            if buf.len() >= end + 4 + length {
+                                break (
+                                    head,
+                                    String::from_utf8_lossy(&buf[end + 4..end + 4 + length])
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    };
+                    let reply = if head.starts_with("POST /api/event") {
+                        let event: serde_json::Value = serde_json::from_str(&body).unwrap();
+                        let timestamp = event["timestamp"].as_i64().unwrap_or(0);
+                        seen.lock().unwrap().push(event);
+                        serde_json::json!({"message": "ok", "result": {"recording_id": null, "timestamp": timestamp}}).to_string()
+                    } else {
+                        status
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        reply.len(),
+                        reply
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (addr, events)
+    }
+
+    /// HyperStudy's marker times are on this computer's clock; the phone reads them on its own. A phone 512 ms fast
+    /// must receive each marker 512 ms later, so it lands at the right moment in the phone's recording.
+    #[tokio::test]
+    async fn event_timestamps_are_moved_onto_the_phone_clock() {
+        let phone_id = format!("phone-{}", uuid::Uuid::new_v4());
+        let (addr, events) = spawn_fake_phone(&phone_id, 512).await;
+        let mut device = PupilDevice::new(addr.to_string());
+        device.connect().await.unwrap();
+
+        let sent = 1_794_959_010_000_000_000_i64;
+        let reply = device
+            .send_event(serde_json::json!({"name": "state_transition:1", "timestamp": sent}))
+            .await
+            .unwrap();
+
+        let received = events.lock().unwrap()[0]["timestamp"].as_i64().unwrap();
+        let shift_ms = (received - sent) as f64 / 1e6;
+        // Loopback round trips are well under a millisecond; whole-ms echo rounding leaves about one.
+        assert!((shift_ms - 512.).abs() < 2., "shifted by {shift_ms} ms");
+        let correction = &reply["clock_correction"];
+        assert_eq!(correction["applied"], true);
+        assert_eq!(correction["original_ns"], sent);
+        assert_eq!(correction["sent_ns"], received);
+        assert!(correction["estimate"]["round_trip_ms"].as_f64().unwrap() < 50.);
+
+        // An event without a timestamp is stamped by the phone itself: nothing to correct.
+        let reply = device
+            .send_event(serde_json::json!({"name": "no_time"}))
+            .await
+            .unwrap();
+        assert!(events.lock().unwrap()[1]
+            .get("timestamp")
+            .is_none_or(|t| t.is_null()));
+        assert!(reply["clock_correction"].is_null());
+    }
+
+    /// Against a real Neon Companion phone: the correction a marker would get, without sending one. Run with
+    /// `NEON_HOST=<phone ip> cargo test --lib real_neon_marker_correction -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "needs a Neon Companion phone on the network (NEON_HOST)"]
+    async fn real_neon_marker_correction() {
+        let host = std::env::var("NEON_HOST").expect("set NEON_HOST to the phone's IP");
+        let mut device = PupilDevice::new(format!("{host}:8080"));
+        device.connect().await.expect("phone connects");
+        let now_ns = (crate::recording::clock::unix_seconds() * 1e9) as i64;
+        let correction = device.correct_for_phone_clock(now_ns).await;
+        println!("{}", serde_json::to_string_pretty(&correction).unwrap());
+        assert!(correction.applied, "{correction:?}");
+    }
+
+    /// A phone whose Time Echo service does not answer still gets the event, unchanged, with the reason.
+    #[tokio::test]
+    async fn without_a_clock_measurement_the_event_still_goes_out_unchanged() {
+        let phone_id = format!("phone-{}", uuid::Uuid::new_v4());
+        // Status advertises no Time Echo port (an old Companion app).
+        let addr = spawn_status_server(status_json(&phone_id, "Neon Companion")).await;
+        let mut device = PupilDevice::new(addr.to_string());
+        device.connect().await.unwrap();
+        let sent = 1_794_959_010_000_000_000_i64;
+        let correction = device.correct_for_phone_clock(sent).await;
+        assert!(!correction.applied);
+        assert_eq!(correction.sent_ns, sent);
+        assert!(correction.reason.is_some());
     }
 
     fn status_json(device_id: &str, device_name: &str) -> serde_json::Value {

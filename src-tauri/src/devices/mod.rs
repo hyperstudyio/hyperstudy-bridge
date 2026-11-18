@@ -1,6 +1,7 @@
 pub mod kernel;
 pub mod lsl;
 pub mod mock;
+pub mod neon_clock;
 pub mod neon_discovery;
 pub mod pupil;
 pub mod ttl;
