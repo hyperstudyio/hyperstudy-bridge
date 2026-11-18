@@ -36,6 +36,7 @@ pub enum CommandAction {
     GetStudyRecording,
     StopStudyRecording,
     SendStudyMarker,
+    RecordStudyClockSamples,
     PrepareRecordingUpload,
     UploadStudyRecording,
     ListStudyRecordings,

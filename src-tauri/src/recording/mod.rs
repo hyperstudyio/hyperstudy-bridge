@@ -1,5 +1,6 @@
 //! Independent LSL acquisition with per-recording SQLite FULL WAL persistence.
 mod boundary;
+pub mod clock;
 mod store;
 pub mod study;
 pub mod upload;
@@ -156,6 +157,10 @@ enum WorkerCommand {
         marker: serde_json::Value,
         reply: mpsc::Sender<Result<f64, String>>,
     },
+    ClockSamples {
+        samples: Vec<clock::ClockSample>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
 }
 struct Active {
     stop: mpsc::Sender<WorkerCommand>,
@@ -192,6 +197,28 @@ pub(crate) fn validate_stream_uids(stream_uids: &[String]) -> Result<()> {
 impl RecordingManager {
     pub fn status(&self) -> RecordingStatus {
         self.status.lock().unwrap().clone()
+    }
+    /// Save raw clock exchanges with the active recording. Refused when nothing is recording.
+    pub fn record_clock_samples(&self, samples: Vec<clock::ClockSample>) -> Result<()> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+        let (tx, rx) = mpsc::channel();
+        {
+            let active = self.active.lock().unwrap();
+            ensure!(
+                self.status().state == "recording",
+                "Recording is not active"
+            );
+            active
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Recorder worker is unavailable"))?
+                .stop
+                .send(WorkerCommand::ClockSamples { samples, reply: tx })?;
+        }
+        rx.recv()
+            .map_err(|_| anyhow::anyhow!("Recorder did not acknowledge clock samples"))?
+            .map_err(anyhow::Error::msg)
     }
     pub fn start(&self, request: RecordingRequest) -> Result<RecordingStatus> {
         self.start_internal(request, false, None)

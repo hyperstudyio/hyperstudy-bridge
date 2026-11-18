@@ -906,3 +906,119 @@ fn the_operator_can_stop_a_study_recording_by_id() {
 fn live_owner() -> super::study::StudyOwner {
     std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
 }
+
+/// Every clock link is saved raw with the study recording: this computer's wall clock against its LSL clock
+/// (by the recorder itself), the browser's HyperStudy server pings, and a Neon phone's Time Echo exchanges. The
+/// file still uploads as the same format version, and only the recording's own study may add server pings.
+#[test]
+fn study_recording_saves_raw_clock_samples_for_every_link() {
+    use super::clock::{BrowserClockSample, ClockSample};
+    let name = format!("HyperStudy-clock-test-{}", uuid::Uuid::new_v4());
+    let info =
+        lsl::StreamInfo::new(&name, "Test", 1, 0., lsl::ChannelFormat::String, &name).unwrap();
+    let outlet = lsl::StreamOutlet::new(&info, 0, 60).unwrap();
+    let uid = outlet.info().unwrap().uid();
+    let manager = RecordingManager::default();
+    manager
+        .configure_study_directory(std::env::temp_dir().join(&name))
+        .unwrap();
+    let context = RecordingContext {
+        experiment_id: Some("e".into()),
+        room_id: Some("r".into()),
+        participant_id: Some("p".into()),
+        session_id: Some("s".into()),
+        label: None,
+    };
+    let started = manager
+        .start_study(
+            super::study::StudyStartRequest {
+                stream_uids: vec![uid],
+                context: context.clone(),
+            },
+            live_owner(),
+        )
+        .unwrap();
+    let id = started.recording_id.clone();
+    let t = 1_794_959_000_000.;
+    let ping = |offset: f64| BrowserClockSample {
+        t1_ms: t + offset,
+        t2_ms: t + offset + 20.,
+        t3_ms: t + offset + 21.,
+        t4_ms: t + offset + 40.,
+    };
+    let saved = manager
+        .study_clock_samples(
+            &id,
+            &context,
+            "api.hyperstudy.io",
+            &[ping(0.), ping(30_000.)],
+        )
+        .unwrap();
+    assert_eq!(saved["saved"], 2);
+    let mut wrong = context.clone();
+    wrong.participant_id = Some("someone-else".into());
+    assert!(manager
+        .study_clock_samples(&id, &wrong, "api.hyperstudy.io", &[ping(0.)])
+        .is_err());
+    manager
+        .record_clock_samples(vec![ClockSample {
+            link: super::clock::NEON_TIME_ECHO.into(),
+            peer: Some("phone-a".into()),
+            local_clock: "unix".into(),
+            t1: Some(1_794_959_000.),
+            t2: Some(1_794_959_000.512),
+            t3: Some(1_794_959_000.512),
+            t4: Some(1_794_959_000.004),
+            error: None,
+        }])
+        .unwrap();
+    manager
+        .stop_study(super::study::StudyScope {
+            recording_id: id.clone(),
+            context: context.clone(),
+            end_marker: None,
+        })
+        .unwrap();
+    // Nothing is recording now, so nothing more can be added.
+    assert!(manager
+        .study_clock_samples(&id, &context, "api.hyperstudy.io", &[ping(60_000.)])
+        .is_err());
+
+    let path = manager.study_path(&id).unwrap();
+    let db =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let count = |link: &str| -> i64 {
+        db.query_row(
+            "SELECT COUNT(*) FROM clock_samples WHERE link=? AND error IS NULL",
+            [link],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(count(super::clock::HOST_WALL_LSL) >= 1);
+    assert_eq!(count(super::clock::HYPERSTUDY_SERVER), 2);
+    assert_eq!(count(super::clock::NEON_TIME_ECHO), 1);
+    let (t1, t2, t3, t4, peer): (f64, f64, f64, f64, String) = db
+        .query_row(
+            "SELECT t1,t2,t3,t4,peer FROM clock_samples WHERE link=? ORDER BY id LIMIT 1",
+            [super::clock::HYPERSTUDY_SERVER],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(peer, "api.hyperstudy.io");
+    // Stored in seconds, exactly as sent: offset +0.5 ms, round trip 39 ms.
+    assert!((((t2 - t1) + (t3 - t4)) / 2. - 0.0005).abs() < 1e-6);
+    assert!((((t4 - t1) - (t3 - t2)) - 0.039).abs() < 1e-6);
+    let (wall_t1, wall, wall_t4): (f64, f64, f64) = db
+        .query_row(
+            "SELECT t1,t2,t4 FROM clock_samples WHERE link=? ORDER BY id LIMIT 1",
+            [super::clock::HOST_WALL_LSL],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert!(wall_t1 <= wall_t4 && wall > 1.7e9);
+    drop(db);
+    // Same format version: the uploaded file is still accepted.
+    super::upload::manifest(&path, &id).unwrap();
+}

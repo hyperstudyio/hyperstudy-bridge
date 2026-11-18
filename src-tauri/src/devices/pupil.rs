@@ -952,6 +952,9 @@ impl Device for PupilDevice {
             metadata["battery_state"] = serde_json::json!(status.phone.battery_state);
             metadata["memory_state"] = serde_json::json!(status.phone.memory_state);
             metadata["sensor_count"] = serde_json::json!(status.sensors.len());
+            // Where the phone's Time Echo service listens; the recorder measures the phone's clock through it.
+            metadata["phone_ip"] = serde_json::json!(status.phone.ip);
+            metadata["time_echo_port"] = serde_json::json!(status.phone.time_echo_port);
         }
 
         DeviceInfo {
@@ -1484,5 +1487,9 @@ mod tests {
             .await
             .expect("unpinned connect accepts any phone");
         assert_eq!(device.get_info().metadata["device_id"], "any-phone");
+        // The recorder reaches the phone's Time Echo service from these.
+        let info = device.get_info().metadata;
+        assert!(info["phone_ip"].is_string());
+        assert!(info["time_echo_port"].is_u64());
     }
 }

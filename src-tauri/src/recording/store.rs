@@ -57,7 +57,12 @@ impl Store {
                 timestamps BLOB NOT NULL, received BLOB NOT NULL, data BLOB NOT NULL,
                 UNIQUE(stream_id, first_sequence));
             CREATE TABLE clock_observations (stream_id INTEGER NOT NULL REFERENCES streams(id),
-                observed_lsl REAL NOT NULL, remote_lsl REAL, correction REAL, uncertainty REAL, error TEXT);")?;
+                observed_lsl REAL NOT NULL, remote_lsl REAL, correction REAL, uncertainty REAL, error TEXT);
+            -- Raw clock exchanges for every link (see recording/clock.rs). Added without a user_version change:
+            -- readers that do not know the table ignore it.
+            CREATE TABLE clock_samples (id INTEGER PRIMARY KEY, link TEXT NOT NULL, peer TEXT,
+                local_clock TEXT NOT NULL, t1 REAL, t2 REAL, t3 REAL, t4 REAL, observed_lsl REAL NOT NULL,
+                error TEXT);")?;
         db.pragma_update(None, "application_id", APPLICATION_ID)?;
         db.execute(
             "INSERT INTO recording(id,state,context_json,started_utc) VALUES(1,'recording',?,?)",
