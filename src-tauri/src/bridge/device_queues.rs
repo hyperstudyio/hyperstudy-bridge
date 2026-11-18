@@ -360,6 +360,107 @@ mod tests {
         assert_nothing_done(&mut rx).await;
     }
 
+    /// TTL pulses must never wait behind Kernel or Pupil work, and the queue
+    /// hop itself must cost microseconds, not milliseconds — the <1 ms
+    /// command-to-pulse budget is measured on the device, so the bridge's
+    /// share has to be negligible.
+    #[tokio::test]
+    async fn ttl_pulses_are_not_delayed_by_stalled_kernel_and_pupil_work() {
+        let (done, mut rx) = mpsc::unbounded_channel::<(String, std::time::Instant)>();
+        let gate = Arc::new(Notify::new());
+        let handler: CommandHandler = {
+            let gate = gate.clone();
+            Arc::new(move |c: QueuedCommand| {
+                let done = done.clone();
+                let gate = gate.clone();
+                Box::pin(async move {
+                    if c.device != "ttl" {
+                        // Kernel / Pupil handlers are parked (e.g. a Kernel TCP
+                        // connect timing out, a Neon status probe hanging).
+                        gate.notified().await;
+                    }
+                    let _ = done.send((c.id.unwrap_or_default(), std::time::Instant::now()));
+                })
+            })
+        };
+        let mut q = DeviceQueues::new(Arc::new(AtomicBool::new(false)), handler);
+        q.dispatch(cmd("kernel", CommandAction::SendEvent, "k0"));
+        q.dispatch(cmd("kernel", CommandAction::SendEvent, "k1"));
+        q.dispatch(cmd("pupil", CommandAction::SendEvent, "p0"));
+        assert_nothing_done_typed(&mut rx).await;
+
+        // 200 pulses while both other devices are stalled.
+        let mut hops = Vec::new();
+        for i in 0..200 {
+            let sent = std::time::Instant::now();
+            assert!(matches!(
+                q.dispatch(cmd("ttl", CommandAction::SendPulse, &format!("t{i}"))),
+                Dispatch::Queued
+            ));
+            let (id, started) = timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("pulse did not run")
+                .expect("channel closed");
+            assert_eq!(
+                id,
+                format!("t{i}"),
+                "pulses run in order and are not blocked"
+            );
+            hops.push(started.duration_since(sent));
+        }
+        hops.sort();
+        let median = hops[hops.len() / 2];
+        let p99 = hops[hops.len() * 99 / 100];
+        eprintln!(
+            "queue hop dispatch->handler: median {:?}, p99 {:?}, max {:?}",
+            median,
+            p99,
+            hops.last().unwrap()
+        );
+        // The ordering/isolation asserts above are the guarantee. The timing
+        // numbers are logged for local inspection and only enforced when asked
+        // (shared CI runners and ptrace-based coverage inflate them).
+        if std::env::var_os("BRIDGE_TIMING_ASSERTS").is_some() {
+            assert!(
+                median < Duration::from_micros(500),
+                "median hop {:?}",
+                median
+            );
+            assert!(p99 < Duration::from_millis(5), "p99 hop {:?}", p99);
+        }
+
+        // Kernel and Pupil are still parked, untouched by the pulses.
+        assert_nothing_done_typed(&mut rx).await;
+        let mut released = Vec::new();
+        for _ in 0..3 {
+            gate.notify_one(); // one permit per parked command (k1 parks after k0)
+            released.push(next_done_typed(&mut rx).await);
+        }
+        released.sort();
+        assert_eq!(released, vec!["k0", "k1", "p0"]);
+    }
+
+    async fn next_done_typed(
+        rx: &mut mpsc::UnboundedReceiver<(String, std::time::Instant)>,
+    ) -> String {
+        timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("command did not complete in time")
+            .expect("channel closed")
+            .0
+    }
+
+    async fn assert_nothing_done_typed(
+        rx: &mut mpsc::UnboundedReceiver<(String, std::time::Instant)>,
+    ) {
+        assert!(
+            timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .is_err(),
+            "a command completed that should still be blocked"
+        );
+    }
+
     #[tokio::test]
     async fn a_panicking_command_does_not_wedge_the_device_queue() {
         let (done, mut rx) = mpsc::unbounded_channel::<String>();
