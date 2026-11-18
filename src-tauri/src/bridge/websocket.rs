@@ -2068,6 +2068,7 @@ async fn handle_device_command(
         | CommandAction::GetStudyRecording
         | CommandAction::StopStudyRecording
         | CommandAction::SendStudyMarker
+        | CommandAction::RecordStudyClockSamples
         | CommandAction::PrepareRecordingUpload
         | CommandAction::ListStudyRecordings => {
             let manager = state.recording.clone();
@@ -2098,6 +2099,18 @@ async fn handle_device_command(
                                 &id,
                                 &serde_json::from_value(field("context")?)?,
                                 field("marker")?,
+                            )
+                        }
+                        CommandAction::RecordStudyClockSamples => {
+                            let id: String = serde_json::from_value(field("recording_id")?)?;
+                            let peer: String = serde_json::from_value(field("peer")?)?;
+                            let samples: Vec<crate::recording::clock::BrowserClockSample> =
+                                serde_json::from_value(field("samples")?)?;
+                            manager.study_clock_samples(
+                                &id,
+                                &serde_json::from_value(field("context")?)?,
+                                &peer,
+                                &samples,
                             )
                         }
                         CommandAction::PrepareRecordingUpload => {

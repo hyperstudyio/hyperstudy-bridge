@@ -400,6 +400,37 @@ impl RecordingManager {
             .map_err(anyhow::Error::msg)?;
         Ok(json!({ "recording_id": id, "marker_lsl_timestamp": timestamp }))
     }
+    /// Save the browser's HyperStudy server clock-sync exchanges with the study recording it owns.
+    pub fn study_clock_samples(
+        &self,
+        id: &str,
+        context: &RecordingContext,
+        peer: &str,
+        samples: &[super::clock::BrowserClockSample],
+    ) -> Result<Value> {
+        validate_context(context)?;
+        let samples = super::clock::from_browser(peer, samples)?;
+        let count = samples.len();
+        // Held until the worker has the samples (like study_marker), so this study's recording cannot be swapped
+        // for another between the identity check and the send.
+        let registry = self.study.lock().unwrap();
+        let session = registry
+            .sessions
+            .get(id)
+            .context("Unknown study recording")?;
+        ensure!(
+            same_context(&session.context, context),
+            "Recording context does not match"
+        );
+        let path = session
+            .recording
+            .path
+            .clone()
+            .context("Recording is not active")?;
+        self.record_clock_samples_into(Some(&path), samples)?;
+        drop(registry);
+        Ok(json!({ "recording_id": id, "saved": count }))
+    }
     pub fn study_path(&self, id: &str) -> Result<PathBuf> {
         let mut registry = self.study.lock().unwrap();
         registry.refresh(&self.status())?;

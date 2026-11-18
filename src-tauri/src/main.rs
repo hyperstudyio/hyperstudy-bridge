@@ -158,6 +158,9 @@ async fn main() {
                 }
             });
 
+            // While a study recording runs, save each connected Neon phone's clock against this computer's.
+            tokio::spawn(hyperstudy_bridge::recording::clock::sample_neon_phones(state.clone()));
+
             // Start USB device monitoring for TTL disconnect detection
             let state_for_usb = state.clone();
             tokio::spawn(async move {

@@ -149,6 +149,11 @@ pub fn record(
                             .map_err(|e| e.to_string());
                     let _ = reply.send(result);
                 }
+                WorkerCommand::ClockSamples { samples, reply } => {
+                    let result =
+                        super::clock::insert(&store.db, &samples).map_err(|e| format!("{e:#}"));
+                    let _ = reply.send(result);
+                }
             }
         }
         for (id, inlet) in inlets.iter().enumerate() {
@@ -207,6 +212,8 @@ pub fn record(
                     }
                 }
             }
+            // This computer's wall clock against its LSL clock: the browser and the FRENZ helper stamp in wall time.
+            super::clock::insert(&store.db, &[super::clock::host_wall_lsl()])?;
             clocks = Instant::now() + Duration::from_secs(5);
         }
         // Interruptible acquisition polling cadence; no synchronization sleeps.
@@ -215,6 +222,11 @@ pub fn record(
             Ok(WorkerCommand::Marker { marker, reply }) => {
                 let result = write_marker(&mut store, &mut pending, &status, marker_index, marker)
                     .map_err(|e| e.to_string());
+                let _ = reply.send(result);
+            }
+            Ok(WorkerCommand::ClockSamples { samples, reply }) => {
+                let result =
+                    super::clock::insert(&store.db, &samples).map_err(|e| format!("{e:#}"));
                 let _ = reply.send(result);
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
