@@ -239,22 +239,24 @@ pub async fn connected_neon_phones(state: &crate::bridge::AppState) -> Vec<(Stri
     phones
 }
 
-/// Exchanges per burst, and how often a burst runs while a study recording is active.
+/// Exchanges per burst, and how often a burst runs while a phone is connected.
 const ECHO_BURST: usize = 8;
 const ECHO_INTERVAL: Duration = Duration::from_secs(10);
 
-/// While a study recording runs, measure every connected Neon phone's clock against this computer's and save the
-/// raw exchanges with the recording. Runs for the life of the app; does nothing between recordings.
+/// Measure every connected Neon phone's clock against this computer's: the live estimate that corrects event
+/// timestamps sent to the phone (`devices::neon_clock`), and, while a recording runs, raw exchanges saved with it.
+/// Runs for the life of the app; does nothing while no phone is connected.
 pub async fn sample_neon_phones(state: std::sync::Arc<crate::bridge::AppState>) {
     let mut tick = tokio::time::interval(ECHO_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        if state.recording.status().state != "recording" {
-            continue;
-        }
         for (host, port, id) in connected_neon_phones(&state).await {
             let samples = neon_time_echo(&host, port, &id, ECHO_BURST).await;
+            crate::devices::neon_clock::global().record(&id, &samples);
+            if state.recording.status().state != "recording" {
+                continue;
+            }
             let manager = state.recording.clone();
             // The recorder's channel is synchronous; a recording that just ended refuses the samples, which is fine.
             let result =
