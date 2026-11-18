@@ -193,6 +193,18 @@ async fn echo_once(stream: &mut tokio::net::TcpStream) -> Result<(u64, u64, f64)
     Ok((sent_ms, phone_ms, received))
 }
 
+/// The host Bridge's REST connection to a phone uses, from its base URL (`http://<host>:<port>/api`). Time Echo
+/// goes to this address, never to an IP the phone reports about itself: a device could name any host there, and
+/// with two phones answering to `neon.local` the resolved address is the one that is actually this station's.
+pub fn time_echo_host(base_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(base_url).ok()?;
+    let host = url
+        .host_str()?
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    (!host.is_empty()).then(|| host.to_string())
+}
+
 /// The Neon phones connected to this Bridge, as `(host, time echo port, hardware id)`.
 pub async fn connected_neon_phones(state: &crate::bridge::AppState) -> Vec<(String, u16, String)> {
     let devices: Vec<_> = state.devices.read().await.values().cloned().collect();
@@ -205,14 +217,14 @@ pub async fn connected_neon_phones(state: &crate::bridge::AppState) -> Vec<(Stri
             continue;
         }
         let meta = &info.metadata;
-        let host = meta["phone_ip"].as_str().or(meta["device_ip"].as_str());
+        let host = meta["base_url"].as_str().and_then(time_echo_host);
         let port = meta["time_echo_port"]
             .as_u64()
             .and_then(|p| u16::try_from(p).ok());
         let id = meta["device_id"].as_str();
         if let (Some(host), Some(port), Some(id)) = (host, port, id) {
-            if port != 0 && !host.is_empty() {
-                phones.push((host.to_string(), port, id.to_string()));
+            if port != 0 {
+                phones.push((host, port, id.to_string()));
             }
         }
     }
@@ -313,6 +325,23 @@ mod tests {
     }
 
     #[test]
+    fn time_echo_goes_to_the_address_bridge_connected_to() {
+        assert_eq!(
+            time_echo_host("http://192.168.50.244:8080/api").as_deref(),
+            Some("192.168.50.244")
+        );
+        assert_eq!(
+            time_echo_host("http://neon.local:8080/api").as_deref(),
+            Some("neon.local")
+        );
+        assert_eq!(
+            time_echo_host("http://[fe80::1]:8080/api").as_deref(),
+            Some("fe80::1")
+        );
+        assert_eq!(time_echo_host("not a url"), None);
+    }
+
+    #[test]
     fn host_wall_lsl_brackets_one_wall_read() {
         let s = host_wall_lsl();
         assert_eq!(s.link, HOST_WALL_LSL);
@@ -391,9 +420,13 @@ mod tests {
         device.connect().await.expect("phone connects");
         let meta = device.get_info().metadata;
         assert_eq!(meta["time_echo_port"].as_u64(), Some(u64::from(port)));
-        println!(
-            "phone_ip {} device_id {}",
-            meta["phone_ip"], meta["device_id"]
+        // The recorder pings the address Bridge connected to.
+        assert_eq!(
+            meta["base_url"]
+                .as_str()
+                .and_then(time_echo_host)
+                .as_deref(),
+            Some(host.as_str())
         );
         let samples = neon_time_echo(&host, port, "real-phone", 40).await;
         let mut exchanges: Vec<(f64, f64)> = samples

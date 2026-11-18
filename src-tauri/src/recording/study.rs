@@ -410,23 +410,25 @@ impl RecordingManager {
     ) -> Result<Value> {
         validate_context(context)?;
         let samples = super::clock::from_browser(peer, samples)?;
-        {
-            let registry = self.study.lock().unwrap();
-            let session = registry
-                .sessions
-                .get(id)
-                .context("Unknown study recording")?;
-            ensure!(
-                same_context(&session.context, context),
-                "Recording context does not match"
-            );
-            ensure!(
-                session.recording.path == self.status().path,
-                "Recording is not active"
-            );
-        }
         let count = samples.len();
-        self.record_clock_samples(samples)?;
+        // Held until the worker has the samples (like study_marker), so this study's recording cannot be swapped
+        // for another between the identity check and the send.
+        let registry = self.study.lock().unwrap();
+        let session = registry
+            .sessions
+            .get(id)
+            .context("Unknown study recording")?;
+        ensure!(
+            same_context(&session.context, context),
+            "Recording context does not match"
+        );
+        let path = session
+            .recording
+            .path
+            .clone()
+            .context("Recording is not active")?;
+        self.record_clock_samples_into(Some(&path), samples)?;
+        drop(registry);
         Ok(json!({ "recording_id": id, "saved": count }))
     }
     pub fn study_path(&self, id: &str) -> Result<PathBuf> {

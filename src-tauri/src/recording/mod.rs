@@ -200,16 +200,30 @@ impl RecordingManager {
     }
     /// Save raw clock exchanges with the active recording. Refused when nothing is recording.
     pub fn record_clock_samples(&self, samples: Vec<clock::ClockSample>) -> Result<()> {
+        self.record_clock_samples_into(None, samples)
+    }
+    /// As `record_clock_samples`, but only into the recording at `expected` when given. The check and the send
+    /// happen under one hold of the `active` lock, so a recording that stops and is replaced in between can never
+    /// receive another recording's samples.
+    pub(crate) fn record_clock_samples_into(
+        &self,
+        expected: Option<&std::path::Path>,
+        samples: Vec<clock::ClockSample>,
+    ) -> Result<()> {
         if samples.is_empty() {
             return Ok(());
         }
         let (tx, rx) = mpsc::channel();
         {
             let active = self.active.lock().unwrap();
-            ensure!(
-                self.status().state == "recording",
-                "Recording is not active"
-            );
+            let status = self.status();
+            ensure!(status.state == "recording", "Recording is not active");
+            if let Some(expected) = expected {
+                ensure!(
+                    status.path.as_deref() == Some(expected),
+                    "Recording is not active"
+                );
+            }
             active
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Recorder worker is unavailable"))?
