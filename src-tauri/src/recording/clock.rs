@@ -71,11 +71,19 @@ pub fn from_browser(peer: &str, samples: &[BrowserClockSample]) -> Result<Vec<Cl
     samples
         .iter()
         .map(|s| {
-            for value in [s.t1_ms, s.t2_ms, s.t3_ms, s.t4_ms] {
-                // Unix milliseconds between 2001 and 2286: rejects seconds, zeros and garbage, nothing plausible.
+            // Server times: Unix milliseconds between 2001 and 2286 (rejects seconds, zeros and garbage). Browser
+            // times are only required to be finite and non-negative: a browser clock that is wildly wrong (a dead
+            // RTC battery resetting it to 1970) is exactly what these samples exist to measure.
+            for value in [s.t2_ms, s.t3_ms] {
                 ensure!(
                     value.is_finite() && (1e12..1e13).contains(&value),
-                    "Clock samples must be Unix times in milliseconds"
+                    "Server clock times must be Unix times in milliseconds"
+                );
+            }
+            for value in [s.t1_ms, s.t4_ms] {
+                ensure!(
+                    value.is_finite() && (0. ..1e13).contains(&value),
+                    "Browser clock times must be finite, non-negative milliseconds"
                 );
             }
             Ok(ClockSample {
@@ -314,7 +322,10 @@ mod tests {
     #[test]
     fn browser_samples_reject_seconds_garbage_and_oversized_batches() {
         let t = 1_794_959_000_000.;
-        assert!(from_browser("server", &[browser(t / 1000., t, t, t)]).is_err());
+        assert!(from_browser("server", &[browser(t, t / 1000., t, t)]).is_err());
+        assert!(from_browser("server", &[browser(-1., t, t, t)]).is_err());
+        // A browser clock reset to 1970 is kept: it is what the samples are for.
+        assert!(from_browser("server", &[browser(1000., t, t + 1., 1040.)]).is_ok());
         assert!(from_browser("server", &[browser(f64::NAN, t, t, t)]).is_err());
         assert!(from_browser("server", &[]).is_err());
         assert!(from_browser("", &[browser(t, t, t, t)]).is_err());
