@@ -1022,3 +1022,51 @@ fn study_recording_saves_raw_clock_samples_for_every_link() {
     // Same format version: the uploaded file is still accepted.
     super::upload::manifest(&path, &id).unwrap();
 }
+
+/// A study recording must start promptly: the participant waits on it between device setup and the experiment. It
+/// used to resolve every LSL stream on the network with a fixed one-second wait before opening the selected ones.
+#[test]
+fn a_study_recording_starts_without_a_fixed_network_wait() {
+    let name = format!("HyperStudy-fast-start-{}", uuid::Uuid::new_v4());
+    let info =
+        lsl::StreamInfo::new(&name, "Test", 1, 0., lsl::ChannelFormat::String, &name).unwrap();
+    let outlet = lsl::StreamOutlet::new(&info, 0, 60).unwrap();
+    let uid = outlet.info().unwrap().uid();
+    let manager = RecordingManager::default();
+    manager
+        .configure_study_directory(std::env::temp_dir().join(&name))
+        .unwrap();
+    let context = RecordingContext {
+        experiment_id: Some("e".into()),
+        room_id: Some("r".into()),
+        participant_id: Some("p".into()),
+        session_id: Some("s".into()),
+        label: None,
+    };
+    // Let the outlet announce itself first, as a stream chosen during device setup already has.
+    lsl::resolve_byprop("uid", &uid, 1, 3.).unwrap();
+    let started = std::time::Instant::now();
+    let session = manager
+        .start_study(
+            super::study::StudyStartRequest {
+                stream_uids: vec![uid],
+                context: context.clone(),
+            },
+            live_owner(),
+        )
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(session.recording.state, "recording");
+    assert!(
+        elapsed < std::time::Duration::from_millis(800),
+        "starting took {elapsed:?}"
+    );
+    println!("study recording started in {elapsed:?}");
+    manager
+        .stop_study(super::study::StudyScope {
+            recording_id: session.recording_id,
+            context,
+            end_marker: None,
+        })
+        .unwrap();
+}
