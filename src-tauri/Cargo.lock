@@ -2191,7 +2191,7 @@ dependencies = [
 
 [[package]]
 name = "hyperstudy-bridge"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "async-trait",
