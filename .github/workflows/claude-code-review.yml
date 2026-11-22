@@ -1,51 +1,154 @@
 name: Claude Code Review
 
-# Automatic PR review by Claude. Requires the Claude GitHub App to be installed
-# on the repo and the CLAUDE_CODE_OAUTH_TOKEN repository secret to be set
-# (generated with `claude setup-token` — uses the Claude Max subscription).
+# Automatic PR review by Claude, posted as one PR comment.
+#
+# Auth: the CLAUDE_CODE_OAUTH_TOKEN repository secret, made with
+# `claude setup-token` (bills to the Claude subscription, not an API key).
+# The action and the posting step use this workflow's GITHUB_TOKEN, so no
+# OIDC exchange with the Claude GitHub App is needed.
+#
+# This repo is public. Pull requests from forks are skipped: they get no
+# secrets on `pull_request`, and their content is untrusted.
+#
+# Secrets: claude-code-action writes the workflow token into the remote URL in
+# .git/config and passes both tokens in Claude's environment. So Claude gets NO
+# shell: an allowed `git diff` or `gh pr comment` can read any file
+# (`git diff --no-index /proc/self/environ ...`, `--body-file`), which prefix
+# rules cannot reliably stop. Instead:
+#   1. a plain step writes the diff, stats and commit list to .review/;
+#   2. Claude may only Read/Grep/Glob and write one file, claude-review.md.
+#      Bash and web access are denied outright, and so are reads of every
+#      place a token exists in this job: /proc and /dev/fd (environments and
+#      command lines), .git (the action's authenticated remote), the runner's
+#      temp folder and ~/.claude. Read rules also apply to Grep and Glob;
+#   3. a plain step posts that file as the comment, and refuses if it holds
+#      either token or anything shaped like a GitHub or Anthropic token. The
+#      comment is the only way anything leaves the job.
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
 
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   claude-review:
-    # Skip draft PRs and bot-authored PRs (release/readme automation)
-    if: github.event.pull_request.draft == false && !endsWith(github.event.pull_request.user.login, '[bot]')
+    # Skip drafts, bot-authored PRs (release/readme automation, dependabot) and
+    # PRs from forks.
+    if: >-
+      github.event.pull_request.draft == false &&
+      !endsWith(github.event.pull_request.user.login, '[bot]') &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     permissions:
       contents: read
       pull-requests: write
       issues: write
-      id-token: write
 
     steps:
+      # Full history so the PR diff can be computed with git (large PRs exceed
+      # the 20k-line limit of GitHub's diff API).
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare review inputs
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          mkdir -p .review
+          base="origin/${BASE_REF}"
+          git diff --stat=200 "$base...HEAD" > .review/diff-stat.txt
+          git diff --name-status "$base...HEAD" > .review/files.txt
+          git log --no-merges --format='%h %s' "$base...HEAD" > .review/commits.txt
+          git diff "$base...HEAD" > .review/diff.patch
+          wc -l .review/*
 
       - name: Run Claude Code Review
+        # Leaves time for the posting step, which posts whatever was written.
+        timeout-minutes: 30
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
+            Review this pull request for the Hyperstudy Device Bridge (Tauri 2
+            desktop app: Rust backend in src-tauri/, Svelte 5 frontend in src/,
+            Python FRENZ helper in python/frenz-bridge/).
 
-            Review this pull request for the HyperStudy Bridge (Tauri + Rust backend,
-            Svelte 5 frontend). Read CLAUDE.md for project conventions first.
+            Read the project conventions first. ./CLAUDE.md here is the base
+            branch's copy; if this PR changes it, its copy is at
+            .claude-pr/CLAUDE.md. Prefer the PR's copy.
+
+            You have no shell. The PR is prepared in .review/: diff-stat.txt
+            (lines changed per file), files.txt (added, modified, deleted),
+            commits.txt (one line per commit) and diff.patch (the full diff;
+            if it is large, use Grep on it to find a file's hunk, then Read
+            with an offset). The working tree is the PR, so read whole files
+            for context. You cannot run the tests.
 
             Focus on:
-            - Correctness bugs, race conditions, and lock-held-across-await in the
-              Tokio device code (src-tauri/src/devices, src-tauri/src/bridge)
-            - Timing/synchronization behavior for research hardware (TTL, Kernel
-              Flow2, Pupil Neon, LSL): anything that could delay, drop, or
-              misattribute an event marker
-            - Error handling that fails silently or hides device state from the user
-            - WebSocket protocol compatibility with the HyperStudy web client
-            - Svelte 5 runes usage and test coverage for changed code
+            - Correctness bugs, race conditions, and locks held across an await
+              in the Tokio device code (src-tauri/src/devices,
+              src-tauri/src/bridge). Release builds abort on panic, so any
+              panic or unwrap on a fallible path kills the app.
+            - Timing and synchronization for research hardware (TTL, Kernel
+              Flow2, Pupil Neon, FRENZ, LSL): anything that could delay, drop,
+              or misattribute an event marker or a recorded sample.
+            - Study recordings: anything that could lose, cut short or
+              mislabel a recording, or upload it anywhere but the pinned
+              bucket.
+            - Security: the WebSocket Origin allowlist, saved credentials
+              (values must never reach logs or errors; only allowlisted keys),
+              Tauri capabilities and commands exposed to the page.
+            - Error handling that fails silently or hides device state from
+              the user.
+            - WebSocket protocol compatibility with the Hyperstudy web client.
+            - Svelte 5 runes usage, and tests for changed behaviour (bug fixes
+              need a test that fails before the fix).
 
-            Use `gh pr comment` with your Bash tool to leave a single review
-            comment. Be concise: lead with blocking issues, then suggestions.
-            If the PR looks good, say so briefly.
-          claude_args: '--allowed-tools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr checks:*)"'
+            Write the review as Markdown to ./claude-review.md; a later step
+            posts it as the PR comment, so do not try to post it yourself.
+            Create the file early and update it as you go: if you run out of
+            time, whatever is in it is posted. Be concise: lead with blocking
+            issues (file:line, the concrete failure, why it matters), then
+            suggestions, then which areas you read and which you skipped. Do
+            not report style nits. If the PR looks good, say so briefly.
+          claude_args: >-
+            --permission-mode default
+            --allowed-tools "Read,Grep,Glob,Edit(./claude-review.md)"
+            --disallowed-tools "Bash,WebFetch,WebSearch,Read(//proc/**),Read(//dev/**),Read(./.git/**),Read(//home/runner/work/_temp/**),Read(~/.claude/**)"
+
+      - name: Post the review
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLAUDE_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ ! -s claude-review.md ]; then
+            echo "::error::Claude wrote no review (claude-review.md is missing or empty)."
+            exit 1
+          fi
+          # Last line of defence: never post a token. Checks the two real
+          # values, then common token shapes. The file is not printed.
+          for secret in "$GH_TOKEN" "$CLAUDE_TOKEN"; do
+            if [ -n "$secret" ] && grep -qF -- "$secret" claude-review.md; then
+              echo "::error::The review contains a token from this job. Not posting it."
+              exit 1
+            fi
+          done
+          if grep -qE 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|x-access-token:' claude-review.md; then
+            echo "::error::The review contains something shaped like a token. Not posting it."
+            exit 1
+          fi
+          # GitHub caps a comment at 65,536 characters.
+          head -c 60000 claude-review.md > .review/comment.md
+          if [ "$(wc -c < claude-review.md)" -gt 60000 ]; then
+            printf '\n\n_(Review truncated to fit a GitHub comment.)_\n' >> .review/comment.md
+          fi
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file .review/comment.md
