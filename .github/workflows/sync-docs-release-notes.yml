@@ -37,7 +37,7 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Checkout hyperstudy-docs
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: hyperstudyio/hyperstudy-docs
           token: ${{ secrets.DOCS_REPO_TOKEN }}
