@@ -7,6 +7,8 @@
   import '@xyflow/svelte/dist/style.css';
   import { open as chooseFolder } from '@tauri-apps/plugin-dialog';
   import PipelineNode from './PipelineNode.svelte';
+  import PipelineEdge from './PipelineEdge.svelte';
+  import FitView from './FitView.svelte';
   import SettingField from './SettingField.svelte';
   import { BLOCKS, STREAMS, palette, defaults } from '../../pipelines/blocks.js';
   import {
@@ -14,10 +16,14 @@
     fromConfig,
     starter,
     canConnect,
+    whyNot,
+    gives,
     freshId,
     cleanId,
   } from '../../pipelines/graph.js';
   import { FORMATS } from '../../pipelines/fields.js';
+  import { RECIPES } from '../../pipelines/recipes.js';
+  import { tidy } from '../../pipelines/layout.js';
   import {
     checkPipeline,
     previewPipeline,
@@ -32,6 +38,7 @@
   let { isOpen = $bindable(false), connected = false, onUse = null } = $props();
 
   const nodeTypes = { block: PipelineNode };
+  const edgeTypes = { wire: PipelineEdge };
   const HUES = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181'];
 
   let graph = $state(starter());
@@ -46,6 +53,8 @@
   let chart = $state(null);
   let flowNodes = $state([]);
   let flowEdges = $state([]);
+  let direction = $state('TB');
+  let warning = $state('');
 
   const groups = palette();
   const selectedNode = $derived(graph.nodes.find(n => n.id === selected) ?? null);
@@ -65,15 +74,27 @@
         faulty: n.id === faulty,
         output: graph.outputs.includes(n.id),
         summary: summarise(n),
+        direction,
         onToggleOutput: toggleOutput,
+        onRemove: id => removeNodes([id]),
       },
     }));
-    flowEdges = graph.edges.map(e => ({
-      id: e.id,
-      source: e.source,
-      target: e.target,
-      animated: previewing,
-    }));
+    flowEdges = graph.edges.map(e => {
+      const from = graph.nodes.find(n => n.id === e.source);
+      return {
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        type: 'wire',
+        markerEnd: { type: 'arrowclosed', width: 16, height: 16 },
+        data: {
+          carries: from ? gives(from) : 'signal',
+          animated: previewing,
+          label: `${e.source} to ${e.target}`,
+          onRemove: removeEdge,
+        },
+      };
+    });
   });
 
   function summarise(node) {
@@ -164,7 +185,37 @@
       ? graph.outputs.filter(o => o !== id)
       : [...graph.outputs, id];
   }
+  function removeEdge(id) {
+    graph.edges = graph.edges.filter(e => e.id !== id);
+  }
+  // A wire dropped where it is refused says why, instead of silently vanishing.
+  function connectEnd(_event, state) {
+    if (state?.isValid !== false || !state.fromNode || !state.toNode) return;
+    const fromSource = state.fromHandle?.type !== 'target';
+    const source = fromSource ? state.fromNode.id : state.toNode.id;
+    const target = fromSource ? state.toNode.id : state.fromNode.id;
+    warning = whyNot(graph.nodes, graph.edges, source, target) ?? '';
+  }
+  function arrange(next = direction) {
+    direction = next;
+    const at = tidy(graph.nodes, graph.edges, direction);
+    graph.nodes = graph.nodes.map(n => ({ ...n, position: at.get(n.id) ?? n.position }));
+    fit();
+  }
+  let fitNonce = $state(0);
+  function fit() {
+    fitNonce += 1;
+  }
+  function startFrom(recipe) {
+    graph = recipe.graph();
+    name = recipe.id;
+    selected = null;
+    warning = '';
+    message = `Started from ${recipe.name}: change it and save it under your own name.`;
+    arrange();
+  }
   function connect(connection) {
+    warning = '';
     if (canConnect(graph.nodes, graph.edges, connection.source, connection.target)) {
       graph.edges = [
         ...graph.edges,
@@ -313,6 +364,7 @@
   }
   function load(entry) {
     graph = fromConfig(entry.config);
+    fit();
     name = entry.name;
     selected = null;
     message = `Opened ${entry.name}.`;
@@ -430,6 +482,10 @@
             >
           {/each}
         {/each}
+        <h3>Start from</h3>
+        {#each RECIPES as recipe (recipe.id)}
+          <button title={recipe.about} onclick={() => startFrom(recipe)}>{recipe.name}</button>
+        {/each}
         <h3>Saved</h3>
         {#each saved as entry (entry.name)}
           <div class="saved">
@@ -452,10 +508,33 @@
       </aside>
 
       <div class="canvas">
+        <div class="toolbar">
+          <button onclick={() => arrange()} title="Lay the graph out again">Tidy</button>
+          <div class="toggle" role="group" aria-label="Direction">
+            <button
+              class:on={direction === 'TB'}
+              aria-pressed={direction === 'TB'}
+              onclick={() => arrange('TB')}>↓ Down</button
+            >
+            <button
+              class:on={direction === 'LR'}
+              aria-pressed={direction === 'LR'}
+              onclick={() => arrange('LR')}>→ Across</button
+            >
+          </div>
+          <span class="legend"><i class="signal"></i>signal <i class="features"></i>features</span>
+        </div>
+        {#if warning}
+          <p class="warning" role="alert">
+            {warning}
+            <button aria-label="Dismiss" onclick={() => (warning = '')}>×</button>
+          </p>
+        {/if}
         <SvelteFlow
           bind:nodes={flowNodes}
           bind:edges={flowEdges}
           {nodeTypes}
+          {edgeTypes}
           fitView
           fitViewOptions={{ maxZoom: 1, padding: 0.25 }}
           colorMode="dark"
@@ -463,13 +542,15 @@
           proOptions={{ hideAttribution: true }}
           isValidConnection={c => canConnect(graph.nodes, graph.edges, c.source, c.target)}
           onconnect={connect}
-          onnodeclick={({ node }) => (selected = node.id)}
-          onpaneclick={() => (selected = null)}
+          onconnectend={connectEnd}
+          onnodeclick={({ node }) => ((selected = node.id), (warning = ''))}
+          onpaneclick={() => ((selected = null), (warning = ''))}
           onnodedragstop={dragged}
           ondelete={deleted}
         >
           <Controls position="bottom-right" />
           <Background variant="dots" gap={20} />
+          <FitView nonce={fitNonce} />
         </SvelteFlow>
       </div>
 
@@ -499,8 +580,9 @@
           <h3>How to build</h3>
           <p class="quiet">
             Add a stream, then blocks: each new block is wired to the one selected. Drag from a
-            block's right edge to another's left edge to wire them. Mark the blocks whose values the
-            pipeline gives with ★. Select a block to change its settings; press Delete to remove it.
+            block's output dot to another's input dot to wire them; blue wires carry a signal, amber
+            ones features. Mark the blocks whose values the pipeline gives with ★. Select a block to
+            change its settings; × removes a block or a wire. Tidy lays the graph out again.
           </p>
           {#if check.ok}
             <h3>It gives</h3>
@@ -658,8 +740,86 @@
     border-color: var(--color-error);
     color: var(--color-error);
   }
+  .editor {
+    --wire-signal: #3987e5;
+    --wire-features: #c98500;
+  }
   .canvas {
+    position: relative;
+    display: flex;
+    flex-direction: column;
     min-height: 0;
+  }
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--color-border);
+    font-size: 0.75rem;
+  }
+  .toolbar button {
+    padding: 0.2rem 0.55rem;
+    font-size: 0.75rem;
+  }
+  .toggle {
+    display: flex;
+  }
+  .toggle button:first-child {
+    border-radius: 6px 0 0 6px;
+  }
+  .toggle button:last-child {
+    border-left: none;
+    border-radius: 0 6px 6px 0;
+  }
+  .toggle .on {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+  .legend {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-left: auto;
+    color: var(--color-text-secondary);
+  }
+  .legend i {
+    display: inline-block;
+    width: 14px;
+    height: 3px;
+    margin-left: 0.4rem;
+    border-radius: 2px;
+  }
+  .legend .signal {
+    background: var(--wire-signal);
+  }
+  .legend .features {
+    background: var(--wire-features);
+  }
+  .warning {
+    position: absolute;
+    top: 2.6rem;
+    left: 50%;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+    padding: 0.35rem 0.4rem 0.35rem 0.75rem;
+    border: 1px solid var(--color-warning);
+    border-radius: 6px;
+    background: var(--color-surface-elevated);
+    color: var(--color-text-primary);
+    font-size: 0.78rem;
+    transform: translateX(-50%);
+  }
+  .warning button {
+    padding: 0 0.35rem;
+    border: none;
+    background: none;
+  }
+  .canvas :global(.svelte-flow) {
+    flex: 1;
   }
   .canvas :global(.svelte-flow) {
     background: var(--color-surface);

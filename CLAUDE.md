@@ -68,6 +68,8 @@ HyperStudy Bridge is a unified, high-performance desktop application that serves
   `<app data>/pipelines/<name>/`. Saved pipelines run with the band as `saved:<name>` in the FRENZ models setting and
   export as a folder with a model card. The block list in `blocks.js` mirrors openfrenz's blocks table; blocks
   needing stored numbers are left out.
+  The canvas follows HyperStudy's agent cognition editor (dagre Tidy, wires coloured by what they carry, refusals
+  explained via `whyNot`); `recipes.js` holds starting pipelines, each checked against openfrenz.
 - **Tests**: `src-tauri/tests/frenz_native.rs` replays a synthetic recording; its `real_band` test (ignored by default)
   connects to a band named in `FRENZ_BAND`.
 

@@ -106,3 +106,43 @@ describe('pipeline graphs', () => {
     }
   });
 });
+
+import { whyNot } from '../graph.js';
+import { RECIPES } from '../recipes.js';
+
+describe('connections and recipes', () => {
+  it('says why a connection is refused', () => {
+    const { nodes, edges } = starter();
+    expect(whyNot(nodes, [], 'power', 'clean')).toMatch(
+      /Filter reads a signal, and power gives features/
+    );
+    expect(whyNot(nodes, edges, 'eeg', 'clean')).toMatch(/reads one input/);
+    expect(whyNot(nodes, edges, 'clean', 'power')).toMatch(/already connected/);
+    expect(whyNot(nodes, [], 'front', 'eeg')).toMatch(/Streams come from the band/);
+    expect(whyNot(nodes, [], 'clean', 'power')).toBeNull();
+  });
+
+  it('turns every recipe into a config', () => {
+    for (const recipe of RECIPES) {
+      const config = toConfig(recipe.graph(), recipe.id);
+      expect(config.outputs.length).toBeGreaterThan(0);
+    }
+    const twoStreams = toConfig(RECIPES.find(r => r.id === 'heart-head').graph());
+    expect(twoStreams.step).toEqual({ stream: 'ppg', samples: 125 });
+    expect(twoStreams.inputs).toEqual({ accel: { samples: 250 } });
+  });
+});
+
+import { tidy, NODE_H } from '../layout.js';
+
+describe('tidying', () => {
+  it('puts every block after the ones it reads', () => {
+    const graph = RECIPES.find(r => r.id === 'theta-alpha').graph();
+    const down = tidy(graph.nodes, graph.edges, 'TB');
+    for (const e of graph.edges)
+      expect(down.get(e.target).y).toBeGreaterThanOrEqual(down.get(e.source).y + NODE_H);
+    const across = tidy(graph.nodes, graph.edges, 'LR');
+    for (const e of graph.edges)
+      expect(across.get(e.target).x).toBeGreaterThan(across.get(e.source).x);
+  });
+});

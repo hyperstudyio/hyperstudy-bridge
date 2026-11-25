@@ -1,6 +1,7 @@
 <script>
-  // One node of the pipeline graph: a stream the pipeline reads, or a block. Inputs on the left, output on the
-  // right; the star marks the blocks whose values the pipeline gives.
+  // One node of the pipeline graph: a stream the pipeline reads, or a block. Input at the top (or left), output at
+  // the bottom (or right); the star marks the blocks whose values the pipeline gives, × removes the node. The
+  // border's colour says what it gives: blue for a signal, amber for features.
   import { Handle, Position } from '@xyflow/svelte';
   import { BLOCKS, STREAMS } from '../../pipelines/blocks.js';
 
@@ -10,6 +11,7 @@
   const block = $derived(BLOCKS[data.op]);
   const title = $derived(isStream ? STREAMS[data.stream]?.label : (block?.label ?? data.op));
   const kind = $derived(isStream ? 'signal' : block?.gives);
+  const across = $derived(data.direction === 'LR');
 </script>
 
 <div
@@ -18,9 +20,10 @@
   class:selected={data.selected}
   class:faulty={data.faulty}
   class:output={data.output}
+  class:features={kind === 'features'}
 >
   {#if !isStream}
-    <Handle type="target" position={Position.Top} />
+    <Handle type="target" position={across ? Position.Left : Position.Top} />
   {/if}
   <div class="top">
     <span class="title">{title}</span>
@@ -37,13 +40,22 @@
         }}>★</button
       >
     {/if}
+    <button
+      class="drop nodrag"
+      title="Remove"
+      aria-label="Remove {id}"
+      onclick={event => {
+        event.stopPropagation();
+        data.onRemove?.(id);
+      }}>×</button
+    >
   </div>
   <div class="meta">
     <span class="id">{id}</span>
     <span class="kind">{kind}</span>
   </div>
   {#if data.summary}<div class="summary">{data.summary}</div>{/if}
-  <Handle type="source" position={Position.Bottom} />
+  <Handle type="source" position={across ? Position.Right : Position.Bottom} />
 </div>
 
 <style>
@@ -57,8 +69,15 @@
     color: var(--color-text-primary);
     font-size: 0.78rem;
   }
+  .node {
+    border-top: 3px solid var(--wire-signal);
+  }
+  .node.features {
+    border-top-color: var(--wire-features);
+  }
   .node.stream {
     border-style: dashed;
+    border-top-style: solid;
   }
   .node.selected {
     border-color: var(--color-primary);
@@ -74,7 +93,26 @@
     gap: 0.4rem;
   }
   .title {
+    flex: 1;
     font-weight: 600;
+  }
+  .drop {
+    padding: 0 0.15rem;
+    border: none;
+    background: none;
+    color: var(--color-text-disabled);
+    font-size: 0.95rem;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 150ms ease;
+  }
+  .node:hover .drop,
+  .node.selected .drop {
+    opacity: 1;
+  }
+  .drop:hover {
+    color: var(--color-error);
   }
   .star {
     padding: 0 0.15rem;

@@ -45,16 +45,33 @@ export function gives(node) {
   return node.kind === 'stream' ? 'signal' : BLOCKS[node.op]?.gives;
 }
 
-/** Whether `source` may feed `target`: what one gives is what the other reads, and one input unless it takes many. */
-export function canConnect(nodes, edges, source, target) {
+/**
+ * Why `source` may not feed `target`, in words; null when it may. The same rule as `canConnect`, which the canvas
+ * uses while dragging.
+ */
+export function whyNot(nodes, edges, source, target) {
   const from = nodes.find(n => n.id === source);
   const to = nodes.find(n => n.id === target);
-  if (!from || !to || to.kind === 'stream' || source === target) return false;
+  if (!from || !to) return 'Connect two blocks.';
+  if (source === target) return 'A block cannot read its own output.';
+  if (to.kind === 'stream') return 'Streams come from the band; nothing feeds them.';
   const block = BLOCKS[to.op];
-  if (!block || gives(from) !== block.reads) return false;
+  if (gives(from) !== block.reads) {
+    return `${block.label} reads ${block.reads === 'signal' ? 'a signal' : 'features'}, and ${from.id} gives ${
+      gives(from) === 'signal' ? 'a signal' : 'features'
+    }.`;
+  }
   const existing = edges.filter(e => e.target === target);
-  if (existing.some(e => e.source === source)) return false;
-  return block.many || existing.length === 0;
+  if (existing.some(e => e.source === source)) return 'They are already connected.';
+  if (!block.many && existing.length)
+    return `${block.label} reads one input; remove its wire first.`;
+  if (!ordered(nodes, [...edges, { source, target }])) return 'That would make a loop.';
+  return null;
+}
+
+/** Whether `source` may feed `target`: what one gives is what the other reads, and one input unless it takes many. */
+export function canConnect(nodes, edges, source, target) {
+  return whyNot(nodes, edges, source, target) === null;
 }
 
 /**
