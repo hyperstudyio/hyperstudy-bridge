@@ -60,7 +60,9 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
+    "@dagrejs/dagre": "3.0.0",
     "@tauri-apps/api": "^2.12.4",
-    "@tauri-apps/plugin-dialog": "^2.6.0"
+    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@xyflow/svelte": "1.5.2"
   }
 }

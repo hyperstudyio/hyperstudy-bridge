@@ -15,6 +15,7 @@
   import { listen } from '@tauri-apps/api/event';
   import DeviceConfigModal from './DeviceConfigModal.svelte';
   import FrenzLivePanel from './FrenzLivePanel.svelte';
+  import PipelineEditor from './pipelines/PipelineEditor.svelte';
 
   let { device, onConfigUpdate = () => {}, onRemove = () => {} } = $props();
 
@@ -52,6 +53,18 @@
   );
   let unlistenFrenzNative = null;
   let showLivePanel = $state(false);
+  let showPipelines = $state(false);
+
+  // A saved pipeline chosen in the editor joins the models run with the band from the next connection.
+  function usePipeline(name) {
+    const models = (device.config?.models || '')
+      .split(/[\s,]+/)
+      .map(m => m.trim())
+      .filter(Boolean);
+    const entry = `saved:${name}`;
+    if (!models.includes(entry))
+      onConfigUpdate(device.id, { ...device.config, models: [...models, entry].join(', ') });
+  }
 
   let frenzConnecting = $state(false);
   let frenzDisconnecting = $state(false);
@@ -722,12 +735,20 @@
         Live signals
       </button>
     {/if}
+    {#if frenzOpenfrenz}
+      <button class="action-btn pulse-btn" onclick={() => (showPipelines = true)}>Pipelines</button>
+    {/if}
     <button class="action-btn config-btn" onclick={configureDevice}> Configure </button>
   </div>
 </div>
 
 {#if device.id === 'frenz'}
   <FrenzLivePanel bind:isOpen={showLivePanel} device={frenzDeviceId || ''} />
+  <PipelineEditor
+    bind:isOpen={showPipelines}
+    connected={frenzNativeStatus.state === 'streaming'}
+    onUse={usePipeline}
+  />
 {/if}
 
 <DeviceConfigModal

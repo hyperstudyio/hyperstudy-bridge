@@ -156,6 +156,37 @@ async fn a_replayed_band_is_published_and_readable() {
     assert!(status.samples["FRENZT01_EEG"] > 500);
     assert!(status.samples["FRENZT01_BROW_EMG_openfrenz"] > 5);
 
+    // A pipeline from the editor runs on the band, is drawn as `preview`, and is not published.
+    let streams_before = native.status().streams.len();
+    let names = native
+        .preview(&serde_json::json!({
+            "step": { "stream": "eeg", "samples": 25 },
+            "nodes": [{ "name": "s", "op": "summary", "in": "eeg", "stats": ["mean"] }],
+            "outputs": ["s"]
+        }))
+        .await
+        .unwrap();
+    assert_eq!(names.len(), 4);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let preview = native
+        .recent(5.0)
+        .await
+        .into_iter()
+        .find(|t| t.name == "preview")
+        .expect("no preview trace");
+    assert!(
+        preview.t.len() > 3,
+        "the preview gave {} steps",
+        preview.t.len()
+    );
+    assert_eq!(native.status().streams.len(), streams_before);
+    assert!(native
+        .preview(&serde_json::json!({ "nodes": [] }))
+        .await
+        .is_err());
+    native.stop_preview().await;
+    assert!(native.recent(5.0).await.iter().all(|t| t.name != "preview"));
+
     native.stop().await;
     assert_eq!(native.status().state, NativeState::Stopped);
     assert!(native.stats().is_none());

@@ -412,8 +412,19 @@ pub async fn start_frenz_native(
     );
     // Read here, not passed from the window, so the token never crosses to the web view. Only needed for
     // private models; a store that cannot be read just means none.
-    let models = models.unwrap_or_default();
-    let token = if models.is_empty() {
+    // Pipelines saved in the editor are named `saved:<name>` and run from Bridge's data folder.
+    let data = app_handle.path().app_data_dir().ok();
+    let models: Vec<String> = models
+        .unwrap_or_default()
+        .into_iter()
+        .map(|source| match (source.strip_prefix("saved:"), &data) {
+            (Some(name), Some(data)) => crate::pipelines::path(data, name)
+                .map(|dir| dir.to_string_lossy().to_string())
+                .unwrap_or(source),
+            _ => source,
+        })
+        .collect();
+    let token = if models.iter().all(|m| std::path::Path::new(m).is_dir()) {
         None
     } else {
         secrets
@@ -432,6 +443,73 @@ pub async fn start_frenz_native(
             Err(e) => CommandResult::error(e),
         },
     )
+}
+
+// Pipeline editor
+
+fn data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| format!("No data folder: {e}"))
+}
+
+/// Whether openfrenz accepts a pipeline, what it gives, and what is wrong.
+#[tauri::command]
+pub async fn check_pipeline(config: serde_json::Value) -> Result<crate::pipelines::Check, ()> {
+    Ok(crate::pipelines::check(&config))
+}
+
+/// Runs a pipeline on the band connected through openfrenz, drawn as `preview` and not published.
+#[tauri::command]
+pub async fn preview_pipeline(
+    config: serde_json::Value,
+    state: State<'_, Arc<AppState>>,
+) -> Result<CommandResult<Vec<String>>, ()> {
+    Ok(match state.frenz_native.preview(&config).await {
+        Ok(names) => CommandResult::success(names),
+        Err(e) => CommandResult::error(e),
+    })
+}
+
+#[tauri::command]
+pub async fn stop_pipeline_preview(state: State<'_, Arc<AppState>>) -> Result<(), ()> {
+    state.frenz_native.stop_preview().await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn list_pipelines(app_handle: AppHandle) -> Result<Vec<crate::pipelines::Saved>, String> {
+    Ok(crate::pipelines::list(&data_dir(&app_handle)?))
+}
+
+/// Saves a pipeline under `name`, after openfrenz has accepted it.
+#[tauri::command]
+pub async fn save_pipeline(
+    name: String,
+    config: serde_json::Value,
+    app_handle: AppHandle,
+) -> Result<crate::pipelines::Check, String> {
+    crate::pipelines::save(&data_dir(&app_handle)?, &name, &config)
+}
+
+#[tauri::command]
+pub async fn delete_pipeline(name: String, app_handle: AppHandle) -> Result<(), String> {
+    crate::pipelines::delete(&data_dir(&app_handle)?, &name)
+}
+
+/// Copies a saved pipeline, with a short model card, into `destination/<name>/`; returns that folder.
+#[tauri::command]
+pub async fn export_pipeline(
+    name: String,
+    destination: String,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    crate::pipelines::export(
+        &data_dir(&app_handle)?,
+        &name,
+        std::path::Path::new(&destination),
+    )
+    .map(|dir| dir.to_string_lossy().to_string())
 }
 
 #[tauri::command]

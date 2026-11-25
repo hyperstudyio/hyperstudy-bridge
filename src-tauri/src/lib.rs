@@ -3,6 +3,7 @@ pub mod commands;
 pub mod devices;
 pub mod logging;
 pub mod open_files;
+pub mod pipelines;
 pub mod secrets;
 pub mod storage;
 pub mod updates;

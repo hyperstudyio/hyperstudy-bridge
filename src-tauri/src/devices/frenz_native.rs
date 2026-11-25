@@ -245,6 +245,8 @@ struct Shared {
     output_names: StdMutex<BTreeMap<String, Vec<String>>>,
     /// The models running, in order: the name they are drawn under and their LSL suffix.
     models: StdMutex<Vec<(String, String)>>,
+    /// The editor's pipeline under trial: its output names and recent outputs.
+    preview: StdMutex<Option<(Vec<String>, Outputs)>>,
     app: Option<AppHandle>,
 }
 
@@ -284,8 +286,12 @@ impl Shared {
 
 struct Session {
     band: Option<Band>,
+    /// Whether the band retries a lost link (false for a replay).
+    reconnects: bool,
     streams: Arc<Streams>,
     tasks: Vec<JoinHandle<()>>,
+    /// The pipeline being tried in the editor, if any: drawn, never published.
+    preview: Option<JoinHandle<()>>,
     lsl: mpsc::Sender<ToLsl>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -311,6 +317,7 @@ impl FrenzNative {
                 outputs: StdMutex::new(BTreeMap::new()),
                 output_names: StdMutex::new(BTreeMap::new()),
                 models: StdMutex::new(Vec::new()),
+                preview: StdMutex::new(None),
                 app: None,
             })),
         }
@@ -407,6 +414,7 @@ impl FrenzNative {
             outputs: StdMutex::new(BTreeMap::new()),
             output_names: StdMutex::new(BTreeMap::new()),
             models: StdMutex::new(Vec::new()),
+            preview: StdMutex::new(None),
             app,
         });
         if let Ok(mut current) = self.shared.lock() {
@@ -487,7 +495,7 @@ impl FrenzNative {
         let Some(mut session) = self.session.lock().await.take() else {
             return;
         };
-        for task in session.tasks.drain(..) {
+        for task in session.tasks.drain(..).chain(session.preview.take()) {
             task.abort();
         }
         let _ = session.lsl.send(ToLsl::Close);
@@ -502,6 +510,53 @@ impl FrenzNative {
         }
         self.shared().update(|s| *s = NativeStatus::stopped());
         info!(device = "frenz", "openfrenz disconnected");
+    }
+
+    /// Runs `config` on the connected band for the pipeline editor, replacing any pipeline already under trial.
+    /// Its outputs are drawn as the trace `preview` and never published. Returns their names.
+    pub async fn preview(&self, config: &serde_json::Value) -> Result<Vec<String>, String> {
+        let pipeline = Pipeline::from_config(config).map_err(|e| e.to_string())?;
+        let names = pipeline.spec().outputs.clone();
+        let mut session = self.session.lock().await;
+        let Some(session) = session.as_mut() else {
+            return Err("Connect the band through openfrenz to try a pipeline on it.".into());
+        };
+        let Some(band) = session.band.as_ref() else {
+            return Err("The band is not connected.".into());
+        };
+        let mut live = Live::new(pipeline, band, session.reconnects).map_err(|e| e.to_string())?;
+        if let Some(old) = session.preview.take() {
+            old.abort();
+        }
+        let shared = self.shared();
+        if let Ok(mut preview) = shared.preview.lock() {
+            *preview = Some((names.clone(), VecDeque::new()));
+        }
+        session.preview = Some(tokio::spawn(async move {
+            while let Ok(Some(output)) = live.next().await {
+                if let Ok(mut preview) = shared.preview.lock() {
+                    if let Some((_, kept)) = preview.as_mut() {
+                        kept.push_back((output.t, output.values));
+                        while kept.len() > KEEP_OUTPUTS {
+                            kept.pop_front();
+                        }
+                    }
+                }
+            }
+        }));
+        Ok(names)
+    }
+
+    /// Stops the pipeline under trial.
+    pub async fn stop_preview(&self) {
+        if let Some(session) = self.session.lock().await.as_mut() {
+            if let Some(task) = session.preview.take() {
+                task.abort();
+            }
+        }
+        if let Ok(mut preview) = self.shared().preview.lock() {
+            *preview = None;
+        }
     }
 
     /// The last `seconds` of every published stream and model output, for drawing.
@@ -536,6 +591,25 @@ impl FrenzNative {
         let shared = self.shared();
         let since = unix_now() - seconds;
         let running = shared.models.lock().map(|m| m.clone()).unwrap_or_default();
+        if let Ok(preview) = shared.preview.lock() {
+            if let Some((channels, kept)) = preview.as_ref() {
+                let recent: Vec<&(f64, Vec<f64>)> =
+                    kept.iter().filter(|(t, _)| *t >= since).collect();
+                traces.push(Trace {
+                    name: "preview".to_owned(),
+                    channels: channels.clone(),
+                    t: recent.iter().map(|(t, _)| *t).collect(),
+                    values: (0..channels.len())
+                        .map(|c| {
+                            recent
+                                .iter()
+                                .map(|(_, v)| v.get(c).copied().unwrap_or(f64::NAN))
+                                .collect()
+                        })
+                        .collect(),
+                });
+            }
+        }
         if let (Ok(outputs), Ok(names)) = (shared.outputs.lock(), shared.output_names.lock()) {
             for (model, _) in &running {
                 let (Some(kept), Some(channels)) = (outputs.get(model), names.get(model)) else {
@@ -825,8 +899,10 @@ async fn open(
     info!(device = "frenz", "openfrenz connected to {device}");
     Ok(Session {
         band: Some(band),
+        reconnects,
         streams: buffers,
         tasks,
+        preview: None,
         lsl,
         thread: Some(thread),
     })

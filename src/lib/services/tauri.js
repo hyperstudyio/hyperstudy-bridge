@@ -236,3 +236,43 @@ export const tauriService = {
   // App info
   getAppInfo,
 };
+
+// Pipeline editor
+
+/** Whether openfrenz accepts a pipeline config: { ok, outputs, inputs, error, node }. */
+export function checkPipeline(config) {
+  return frenzNative('check_pipeline', { config }, e => ({
+    ok: false,
+    outputs: [],
+    inputs: [],
+    error: String(e),
+  }));
+}
+
+/** Runs a pipeline on the band connected through openfrenz; drawn as the trace `preview`, never published. */
+export function previewPipeline(config) {
+  return frenzNative('preview_pipeline', { config }, e => ({ success: false, error: String(e) }));
+}
+
+export function stopPipelinePreview() {
+  return frenzNative('stop_pipeline_preview', {}, () => null);
+}
+
+/** Saved pipelines, newest first: [{ name, version, outputs, saved_at, config }]. */
+export function listPipelines() {
+  return frenzNative('list_pipelines', {}, () => []);
+}
+
+/** Saves a pipeline under `name` (openfrenz checks it first). Throws with openfrenz's message when refused. */
+export function savePipeline(name, config) {
+  return invoke('save_pipeline', { name, config });
+}
+
+export function deletePipeline(name) {
+  return invoke('delete_pipeline', { name });
+}
+
+/** Copies a saved pipeline, with a model card, into `destination/<name>/`; returns that folder. */
+export function exportPipeline(name, destination) {
+  return invoke('export_pipeline', { name, destination });
+}

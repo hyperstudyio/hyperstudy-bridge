@@ -56,8 +56,8 @@ dashmap = "6"
 uuid = { version = "1", features = ["v4"] }
 
 # FRENZ without the vendor SDK helper: the band's Bluetooth client and the signal models (src/devices/frenz_native.rs).
-frenz = { git = "https://github.com/ljchang/openfrenz.git", rev = "118f0e9ac5552bbd665fa5e58f4c765627b50b7f" }
-frenz-model = { git = "https://github.com/ljchang/openfrenz.git", rev = "118f0e9ac5552bbd665fa5e58f4c765627b50b7f", features = ["hub"] }
+frenz = { git = "https://github.com/ljchang/openfrenz.git", rev = "1cc95011b7683fd0fb1773e1426480286182e6ff" }
+frenz-model = { git = "https://github.com/ljchang/openfrenz.git", rev = "1cc95011b7683fd0fb1773e1426480286182e6ff", features = ["hub"] }
 
 # Database
 # One SQLite library for the whole app: study recordings (recording/) and the log database (storage/).
