@@ -1,6 +1,14 @@
 <script>
   import { invoke } from '@tauri-apps/api/core';
-  let { value = '', onSelect = () => {}, disabled = false, id = 'frenzDeviceId' } = $props();
+  import { scanFrenzNative } from '../services/tauri.js';
+  // `openfrenz`: Bridge scans by itself; otherwise the SDK helper does.
+  let {
+    value = '',
+    onSelect = () => {},
+    disabled = false,
+    id = 'frenzDeviceId',
+    openfrenz = false,
+  } = $props();
   let bands = $state([]);
   let scanning = $state(false);
   let searched = $state(false);
@@ -10,9 +18,15 @@
     error = '';
     bands = [];
     try {
-      bands = await invoke('scan_frenz_devices');
+      if (openfrenz) {
+        const result = await scanFrenzNative();
+        if (!result.success) throw new Error(result.error || 'The scan failed.');
+        bands = result.data;
+      } else {
+        bands = await invoke('scan_frenz_devices');
+      }
     } catch (e) {
-      error = String(e);
+      error = e?.message || String(e);
     } finally {
       scanning = false;
       searched = true;
@@ -32,7 +46,7 @@
       acquisition software, then scan again.
     </p>
   {/if}
-  {#each bands as band (band.address)}
+  {#each bands as band, index (band.address ?? `${band.name}-${index}`)}
     <button
       type="button"
       disabled={disabled || !band.selectable}

@@ -55,6 +55,10 @@ chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 uuid = { version = "1", features = ["v4"] }
 
+# FRENZ without the vendor SDK helper: the band's Bluetooth client and the signal models (src/devices/frenz_native.rs).
+frenz = { git = "https://github.com/ljchang/openfrenz.git", rev = "ded0438cbd09eb2e2c21170bf1539ee0dd480e13" }
+frenz-model = { git = "https://github.com/ljchang/openfrenz.git", rev = "ded0438cbd09eb2e2c21170bf1539ee0dd480e13" }
+
 # Database
 # One SQLite library for the whole app: study recordings (recording/) and the log database (storage/).
 # fallible_uint keeps u64 column reads (recording/upload.rs), which rusqlite 0.36+ puts behind this feature.

@@ -724,6 +724,19 @@ async fn handle_device_command(
 
             // FRENZ: orchestrated connect via FrenzLslManager (not the Device trait)
             if device_id == "frenz" {
+                // Through openfrenz the band is already connected and publishing: there is nothing to open.
+                if state.frenz_native.active() {
+                    send_response(
+                        tx,
+                        BridgeResponse::status(
+                            device_id,
+                            crate::devices::DeviceStatus::Connected,
+                            id,
+                        ),
+                    )
+                    .await;
+                    return;
+                }
                 let selected_streams = map_frenz_config_to_suffixes(&config);
 
                 // Discover FRENZ devices on the LSL network
@@ -1124,6 +1137,7 @@ async fn handle_device_command(
             // FRENZ: disconnect all LSL streams and stop the bridge process
             if device_id == "frenz" {
                 info!("FRENZ disconnect: disconnecting all streams and stopping bridge");
+                state.frenz_native.stop().await;
                 let (streams, process) = tokio::join!(
                     state.frenz_manager.disconnect_all(),
                     state.frenz_process.stop()
@@ -1466,7 +1480,10 @@ async fn handle_device_command(
         CommandAction::Status => {
             // FRENZ: return LSL manager stats
             if device_id == "frenz" {
-                let stats = state.frenz_manager.get_stats().await;
+                let stats = match state.frenz_native.stats() {
+                    Some(stats) => stats,
+                    None => state.frenz_manager.get_stats().await,
+                };
 
                 send_response(
                     tx,

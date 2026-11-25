@@ -33,6 +33,8 @@ pub struct AppState {
     pub frenz_manager: Arc<FrenzLslManager>,
     /// FRENZ Python bridge process manager (PyApp lifecycle)
     pub frenz_process: Arc<FrenzProcessManager>,
+    /// FRENZ through openfrenz, without the SDK helper. Never active together with `frenz_process`.
+    pub frenz_native: Arc<crate::devices::frenz_native::FrenzNative>,
     /// The LSL inlets (streams Bridge receives) and outlets (streams it publishes) shared by the Neon and FRENZ
     /// managers, kept here so the LSL panel can list them.
     pub lsl_inlets: Arc<InletManager>,
@@ -262,6 +264,7 @@ impl AppState {
             neon_manager,
             frenz_manager,
             frenz_process,
+            frenz_native: Arc::new(crate::devices::frenz_native::FrenzNative::new()),
             lsl_inlets: inlet_manager,
             lsl_outlets: outlet_manager,
             recording: Arc::new(crate::recording::RecordingManager::default()),

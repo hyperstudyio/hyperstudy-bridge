@@ -8,6 +8,10 @@ vi.mock('../../services/tauri.js', () => ({
   sendTtlPulse: vi.fn(),
   listTtlDevices: vi.fn(),
   startFrenzBridge: vi.fn(),
+  startFrenzNative: vi.fn(),
+  getFrenzNativeStatus: vi.fn(async () => ({ state: 'stopped', streams: [], samples: {} })),
+  getFrenzNativeRecent: vi.fn(async () => []),
+  FRENZ_OPENFRENZ: 'openfrenz',
   checkFrenzBridgeAvailable: vi.fn(async () => true),
   getFrenzBridgeStatus: vi.fn(async () => ({
     state: 'streaming',
@@ -36,8 +40,9 @@ beforeEach(() => {
     streams: ['_EEG_raw'],
     sample_count: 10,
   });
-  listen.mockImplementation(async (_event, callback) => {
-    update = callback;
+  // The card also listens for the openfrenz connection's status; these tests drive the SDK helper's.
+  listen.mockImplementation(async (event, callback) => {
+    if (event === 'frenz_bridge_status') update = callback;
     return () => {};
   });
 });
@@ -89,4 +94,35 @@ it('reports processed clock jumps without treating repeated firmware seconds as 
     },
   });
   expect(await screen.findByText('Source timestamp discontinuities detected')).toBeInTheDocument();
+});
+
+it('connects through openfrenz without a product key and offers the live view', async () => {
+  const { startFrenzBridge, startFrenzNative, getFrenzNativeStatus } =
+    await import('../../services/tauri.js');
+  const { connectDevice } = await import('../../stores/websocket.svelte.js');
+  const streaming = {
+    state: 'streaming',
+    device: 'FRENZI85',
+    streams: ['FRENZI85_EEG', 'FRENZI85_EOG_openfrenz'],
+    samples: { FRENZI85_EEG: 1250, FRENZI85_EOG_openfrenz: 50 },
+  };
+  getFrenzNativeStatus.mockResolvedValue({ state: 'stopped', streams: [], samples: {} });
+  startFrenzNative.mockImplementation(async () => {
+    getFrenzNativeStatus.mockResolvedValue(streaming);
+    return { success: true };
+  });
+  render(DeviceCard, {
+    device: { ...device, status: 'disconnected', config: { source: 'openfrenz' } },
+  });
+  expect(await screen.findByText('openfrenz (experimental)')).toBeInTheDocument();
+  expect(screen.queryByText('Product Key:')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Live signals' })).not.toBeInTheDocument();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+  await waitFor(() => expect(startFrenzNative).toHaveBeenCalledWith('test-only'));
+  await waitFor(() => expect(connectDevice).toHaveBeenCalled());
+  expect(startFrenzBridge).not.toHaveBeenCalled();
+  expect(await screen.findByText('2 published')).toBeInTheDocument();
+  expect(screen.getByText('1,300')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Live signals' })).toBeInTheDocument();
 });

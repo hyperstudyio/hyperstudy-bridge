@@ -4,6 +4,7 @@
   import * as bridgeStore from '../stores/websocket.svelte.js';
 
   import FrenzDevicePicker from './FrenzDevicePicker.svelte';
+  import { FRENZ_OPENFRENZ } from '../services/tauri.js';
   import { untrack } from 'svelte';
 
   // Use Svelte 5 $props() rune
@@ -100,6 +101,13 @@
       },
     },
     frenz: {
+      source: {
+        label: 'Connection',
+        type: 'select',
+        options: ['SDK helper', FRENZ_OPENFRENZ],
+        default: 'SDK helper',
+        help: 'SDK helper: the Earable SDK, with its focus, sleep and posture streams (needs a product key). openfrenz: Bridge connects to the band itself and adds eye, brow, heart and head signals (experimental; no product key).',
+      },
       // Credentials (kept in the system credential store, not in regular config)
       frenzDeviceId: {
         label: 'FRENZ band',
@@ -156,6 +164,12 @@
       streamDelta: { label: 'Delta Power (5ch, 0.5Hz)', type: 'checkbox', default: true },
     },
   };
+
+  // Through openfrenz there is no product key and no choice of SDK streams.
+  let frenzOpenfrenz = $derived(device?.id === 'frenz' && formData.source === FRENZ_OPENFRENZ);
+  function sdkOnly(fieldName) {
+    return frenzOpenfrenz && fieldName !== 'source' && fieldName !== 'frenzDeviceId';
+  }
 
   // Initialize form data when device changes
   $effect(() => {
@@ -313,7 +327,7 @@
         newErrors.frenzDeviceId = 'Scan for FRENZ bands and select your band.';
         hasErrors = true;
       }
-      if (!secureFields.frenzProductKey?.trim()) {
+      if (!frenzOpenfrenz && !secureFields.frenzProductKey?.trim()) {
         newErrors.frenzProductKey = 'Enter your Earable product key.';
         hasErrors = true;
       }
@@ -376,7 +390,10 @@
       const secrets = {};
       for (const [key, fieldConfig] of Object.entries(config)) {
         // Pasted keys often carry a stray space or line break, which the vendor SDK rejects at connect time.
-        if (fieldConfig.secure) secrets[fieldConfig.secretKey] = secureFields[key]?.trim() || null;
+        // A setting hidden for the chosen connection is left as it was saved: choosing openfrenz must not
+        // erase the product key.
+        if (fieldConfig.secure && !sdkOnly(key))
+          secrets[fieldConfig.secretKey] = secureFields[key]?.trim() || null;
       }
       if (Object.keys(secrets).length) await setSecrets(secrets);
 
@@ -396,6 +413,14 @@
           processedConfig[key] = value;
         }
       });
+
+      // The connection is saved only when it is openfrenz, so settings saved for the SDK helper stay as they
+      // always were.
+      if (device.id === 'frenz' && processedConfig.source !== FRENZ_OPENFRENZ) {
+        // Saved settings are merged, so a band switched back from openfrenz has to say so.
+        if (device.config?.source) processedConfig.source = undefined;
+        else delete processedConfig.source;
+      }
 
       await onSave(device.id, processedConfig);
       isSubmitting = false;
@@ -461,14 +486,14 @@
             {#if deviceConfigs[device.id]}
               {#each Object.entries(deviceConfigs[device.id]) as [fieldName, fieldConfig]}
                 {#if device.id === 'frenz' && fieldName === 'streamEegRaw'}
-                  <div class="frenz-stream-actions">
+                  <div class="frenz-stream-actions" class:not-for-source={frenzOpenfrenz}>
                     <span>Sensor and model streams</span>
                     <button type="button" class="reveal-btn" onclick={enableAllFrenzStreams}
                       >Enable all</button
                     >
                   </div>
                 {/if}
-                <div class="form-group">
+                <div class="form-group" class:not-for-source={sdkOnly(fieldName)}>
                   <label for={fieldName} class="form-label">
                     {fieldConfig.label}
                     {#if fieldConfig.required}
@@ -482,6 +507,7 @@
                   {#if device.id === 'frenz' && fieldName === 'frenzDeviceId'}
                     <FrenzDevicePicker
                       id={fieldName}
+                      openfrenz={frenzOpenfrenz}
                       value={secureFields.frenzDeviceId || ''}
                       disabled={isLoading || isSubmitting}
                       onSelect={name => {
@@ -542,6 +568,7 @@
                         <option value={option}>{option}</option>
                       {/each}
                     </select>
+                    {#if fieldConfig.help}<p class="field-help">{fieldConfig.help}</p>{/if}
                   {:else if fieldConfig.type === 'checkbox'}
                     <label class="checkbox-wrapper">
                       <input
@@ -1007,6 +1034,17 @@
   .clear-btn:hover {
     background: var(--color-error);
     color: white;
+  }
+
+  .field-help {
+    margin: 0.4rem 0 0;
+    color: var(--color-text-secondary);
+    font-size: 0.85rem;
+  }
+
+  /* Settings that belong to the other FRENZ connection. */
+  .not-for-source {
+    display: none;
   }
 
   .frenz-stream-actions {
