@@ -40,7 +40,10 @@ it('preserves explicit choices and enables them all on request', async () => {
   expect(onSave).not.toHaveBeenCalled();
   await fireEvent.click(screen.getByText('Save Configuration'));
   await waitFor(() => expect(onSave).toHaveBeenCalled());
-  expect(Object.values(onSave.mock.calls[0][1]).every(value => value === true)).toBe(true);
+  const saved = onSave.mock.calls[0][1];
+  const streams = Object.keys(saved).filter(key => key.startsWith('stream'));
+  expect(streams.length).toBeGreaterThan(0);
+  expect(streams.every(key => saved[key] === true)).toBe(true);
 });
 beforeEach(() => {
   vi.clearAllMocks();
@@ -126,4 +129,37 @@ it('treats a whitespace-only product key as missing', async () => {
   await fireEvent.click(screen.getByText('Save Configuration'));
   expect(await screen.findByText('Enter your Earable product key.')).toBeInTheDocument();
   expect(setSecrets).not.toHaveBeenCalled();
+});
+
+it('asks for Hugging Face models and a token only for the openfrenz connection', async () => {
+  const onSave = vi.fn();
+  render(DeviceConfigModal, {
+    device: {
+      ...device,
+      config: { source: 'openfrenz', models: 'cosanlab/frenz-focus, bad model!' },
+    },
+    isOpen: true,
+    onSave,
+  });
+  await screen.findByText('Selected band: FRENZI85');
+  expect(screen.getByLabelText('Hugging Face models')).toBeVisible();
+  await fireEvent.click(screen.getByText('Save Configuration'));
+  expect(
+    await screen.findByText(/Write each model as owner\/name: bad, model!/)
+  ).toBeInTheDocument();
+  expect(onSave).not.toHaveBeenCalled();
+  await fireEvent.input(screen.getByLabelText('Hugging Face models'), {
+    target: { value: 'cosanlab/frenz-focus' },
+  });
+  await fireEvent.input(document.getElementById('huggingfaceToken'), {
+    target: { value: ' hf_test ' },
+  });
+  await fireEvent.click(screen.getByText('Save Configuration'));
+  await waitFor(() => expect(onSave).toHaveBeenCalled());
+  expect(onSave.mock.calls[0][1].models).toBe('cosanlab/frenz-focus');
+  expect(setSecrets).toHaveBeenCalledWith(
+    expect.objectContaining({ huggingface_token: 'hf_test' })
+  );
+  // No product key is asked for, and none is erased.
+  expect(setSecrets.mock.calls[0][0]).not.toHaveProperty('frenz_product_key');
 });

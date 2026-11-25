@@ -119,7 +119,7 @@ it('connects through openfrenz without a product key and offers the live view', 
   expect(screen.queryByRole('button', { name: 'Live signals' })).not.toBeInTheDocument();
 
   await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
-  await waitFor(() => expect(startFrenzNative).toHaveBeenCalledWith('test-only'));
+  await waitFor(() => expect(startFrenzNative).toHaveBeenCalledWith('test-only', []));
   await waitFor(() => expect(connectDevice).toHaveBeenCalled());
   expect(startFrenzBridge).not.toHaveBeenCalled();
   expect(await screen.findByText('2 published')).toBeInTheDocument();

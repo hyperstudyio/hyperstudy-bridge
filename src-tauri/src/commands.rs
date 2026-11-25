@@ -390,7 +390,9 @@ pub async fn scan_frenz_native(
 #[tauri::command]
 pub async fn start_frenz_native(
     device_id: String,
+    models: Option<Vec<String>>,
     state: State<'_, Arc<AppState>>,
+    secrets: State<'_, crate::secrets::SecretsState>,
     app_handle: AppHandle,
 ) -> Result<CommandResult<String>, ()> {
     use crate::devices::lsl::frenz_process::FrenzBridgeState;
@@ -408,8 +410,24 @@ pub async fn start_frenz_native(
         device = "frenz",
         "Connecting to {} through openfrenz", device_id
     );
+    // Read here, not passed from the window, so the token never crosses to the web view. Only needed for
+    // private models; a store that cannot be read just means none.
+    let models = models.unwrap_or_default();
+    let token = if models.is_empty() {
+        None
+    } else {
+        secrets
+            .get("huggingface_token".to_string())
+            .await
+            .ok()
+            .flatten()
+    };
     Ok(
-        match state.frenz_native.start(&device_id, Some(app_handle)).await {
+        match state
+            .frenz_native
+            .start(&device_id, &models, token, Some(app_handle))
+            .await
+        {
             Ok(()) => CommandResult::success("Connected through openfrenz".to_string()),
             Err(e) => CommandResult::error(e),
         },

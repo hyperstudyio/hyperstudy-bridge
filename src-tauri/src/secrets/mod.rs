@@ -1,4 +1,5 @@
-//! Saved device credentials (the FRENZ band ID and product key), kept in the operating system's credential store:
+//! Saved credentials (the FRENZ band ID and product key, and a Hugging Face token for private models), kept in the
+//! operating system's credential store:
 //! the macOS Keychain, the Windows Credential Manager, or the Secret Service (GNOME Keyring, KWallet) on Linux.
 //!
 //! Every entry has the service name [`SERVICE`] and the secret's key (for example `frenz_product_key`) as its account.
@@ -25,7 +26,8 @@ pub(crate) const SET_ASIDE_SUFFIX: &str = "from-old-vault";
 pub const SERVICE: &str = "io.hyperstudy.bridge";
 
 /// The secrets the app keeps. Anything else is refused.
-pub const SECRET_KEYS: [&str; 2] = ["frenz_device_id", "frenz_product_key"];
+///  reads private openfrenz models from Hugging Face; it is not tied to a device.
+pub const SECRET_KEYS: [&str; 3] = ["frenz_device_id", "frenz_product_key", "huggingface_token"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecretError {

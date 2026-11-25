@@ -1793,7 +1793,7 @@ dependencies = [
 [[package]]
 name = "frenz"
 version = "0.3.0"
-source = "git+https://github.com/ljchang/openfrenz.git?rev=ded0438cbd09eb2e2c21170bf1539ee0dd480e13#ded0438cbd09eb2e2c21170bf1539ee0dd480e13"
+source = "git+https://github.com/ljchang/openfrenz.git?rev=118f0e9ac5552bbd665fa5e58f4c765627b50b7f#118f0e9ac5552bbd665fa5e58f4c765627b50b7f"
 dependencies = [
  "btleplug",
  "frenz-proto",
@@ -1809,7 +1809,7 @@ dependencies = [
 [[package]]
 name = "frenz-export"
 version = "0.3.0"
-source = "git+https://github.com/ljchang/openfrenz.git?rev=ded0438cbd09eb2e2c21170bf1539ee0dd480e13#ded0438cbd09eb2e2c21170bf1539ee0dd480e13"
+source = "git+https://github.com/ljchang/openfrenz.git?rev=118f0e9ac5552bbd665fa5e58f4c765627b50b7f#118f0e9ac5552bbd665fa5e58f4c765627b50b7f"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1825,7 +1825,7 @@ dependencies = [
 [[package]]
 name = "frenz-model"
 version = "0.3.0"
-source = "git+https://github.com/ljchang/openfrenz.git?rev=ded0438cbd09eb2e2c21170bf1539ee0dd480e13#ded0438cbd09eb2e2c21170bf1539ee0dd480e13"
+source = "git+https://github.com/ljchang/openfrenz.git?rev=118f0e9ac5552bbd665fa5e58f4c765627b50b7f#118f0e9ac5552bbd665fa5e58f4c765627b50b7f"
 dependencies = [
  "frenz",
  "frenz-export",
@@ -1835,12 +1835,13 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "ureq",
 ]
 
 [[package]]
 name = "frenz-proto"
 version = "0.3.0"
-source = "git+https://github.com/ljchang/openfrenz.git?rev=ded0438cbd09eb2e2c21170bf1539ee0dd480e13#ded0438cbd09eb2e2c21170bf1539ee0dd480e13"
+source = "git+https://github.com/ljchang/openfrenz.git?rev=118f0e9ac5552bbd665fa5e58f4c765627b50b7f#118f0e9ac5552bbd665fa5e58f4c765627b50b7f"
 
 [[package]]
 name = "futures"
@@ -4829,6 +4830,7 @@ version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -6725,10 +6727,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ac5cecf619ca81f66a96482db09687c9f7465af65f4300a8c30cca05bd5a59d"
 dependencies = [
  "base64 0.23.1",
+ "flate2",
  "log",
  "percent-encoding",
+ "rustls",
+ "rustls-pki-types",
  "ureq-proto",
  "utf8-zero",
+ "webpki-roots",
 ]
 
 [[package]]

@@ -56,6 +56,11 @@ HyperStudy Bridge is a unified, high-performance desktop application that serves
   built-in models (`eog`, `brow-emg`, `heart`, `head`) and publishes everything as LSL outlets named `<band>_<STREAM>` with
   source id `frenz-<band>-<session uuid>_<STREAM>`, the pattern HyperStudy groups FRENZ streams by. The window draws them in
   `FrenzLivePanel.svelte`. Experimental; the SDK helper stays until openfrenz replaces it.
+- **Extra models**: the FRENZ `models` setting lists Hugging Face repositories (`owner/name`) run alongside the
+  built-in ones, published as `<band>_<NAME>_openfrenz` and drawn in the live view. Lab models are private in the
+  cosanlab Hugging Face org and shared by invitation; the token is `huggingface_token` in the credential store,
+  read by the backend (`start_frenz_native`), never passed from the window. A model that cannot be loaded is shown
+  on the card and left out.
 - **Tests**: `src-tauri/tests/frenz_native.rs` replays a synthetic recording; its `real_band` test (ignored by default)
   connects to a band named in `FRENZ_BAND`.
 
@@ -246,7 +251,8 @@ interface DeviceStatus {
 ## Security Considerations
 
 1. **Local Only**: Bridge only accepts connections from localhost
-2. **No Credentials**: No passwords or keys stored in code. Device secrets (the FRENZ band name and product key) live
+2. **No Credentials**: No passwords or keys stored in code. Device secrets (the FRENZ band name and product key, and a
+   Hugging Face token for private models) live
    in the OS credential store via the `keyring` crate (`src-tauri/src/secrets/`, frontend `src/lib/services/secrets.js`):
    service `io.hyperstudy.bridge`, account = the key name, an allowlist of keys, and values never logged. The service
    name is fixed, so installed and dev builds share the saved key. The old Stronghold `vault.hold` is migrated once

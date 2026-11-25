@@ -117,6 +117,23 @@
         secretKey: 'frenz_device_id',
         readOnly: false,
       },
+      models: {
+        label: 'Hugging Face models',
+        type: 'text',
+        placeholder: 'owner/name, e.g. cosanlab/frenz-focus',
+        default: '',
+        help: 'Run alongside the built-in models. Separate several with commas.',
+        openfrenzOnly: true,
+      },
+      huggingfaceToken: {
+        label: 'Hugging Face token',
+        type: 'password',
+        placeholder: 'hf_…',
+        secure: true,
+        secretKey: 'huggingface_token',
+        help: 'Only needed for private models. Use a read token from an account that has been invited to them.',
+        openfrenzOnly: true,
+      },
       frenzProductKey: {
         label: 'Product Key',
         type: 'password',
@@ -168,7 +185,24 @@
   // Through openfrenz there is no product key and no choice of SDK streams.
   let frenzOpenfrenz = $derived(device?.id === 'frenz' && formData.source === FRENZ_OPENFRENZ);
   function sdkOnly(fieldName) {
-    return frenzOpenfrenz && fieldName !== 'source' && fieldName !== 'frenzDeviceId';
+    const field = deviceConfigs[device?.id]?.[fieldName];
+    return (
+      frenzOpenfrenz &&
+      fieldName !== 'source' &&
+      fieldName !== 'frenzDeviceId' &&
+      !field?.openfrenzOnly
+    );
+  }
+  // Settings that only the openfrenz connection uses, hidden otherwise.
+  function openfrenzOnly(fieldName) {
+    return !frenzOpenfrenz && Boolean(deviceConfigs[device?.id]?.[fieldName]?.openfrenzOnly);
+  }
+  /** The Hugging Face models listed in a `models` setting. */
+  function modelList(text) {
+    return (text || '')
+      .split(/[\s,]+/)
+      .map(m => m.trim())
+      .filter(Boolean);
   }
 
   // Initialize form data when device changes
@@ -327,6 +361,13 @@
         newErrors.frenzDeviceId = 'Scan for FRENZ bands and select your band.';
         hasErrors = true;
       }
+      const odd = frenzOpenfrenz
+        ? modelList(formData.models).filter(m => !/^[\w.-]+\/[\w.-]+(@[\w.-]+)?$/.test(m))
+        : [];
+      if (odd.length) {
+        newErrors.models = `Write each model as owner/name: ${odd.join(', ')}`;
+        hasErrors = true;
+      }
       if (!frenzOpenfrenz && !secureFields.frenzProductKey?.trim()) {
         newErrors.frenzProductKey = 'Enter your Earable product key.';
         hasErrors = true;
@@ -392,7 +433,7 @@
         // Pasted keys often carry a stray space or line break, which the vendor SDK rejects at connect time.
         // A setting hidden for the chosen connection is left as it was saved: choosing openfrenz must not
         // erase the product key.
-        if (fieldConfig.secure && !sdkOnly(key))
+        if (fieldConfig.secure && !sdkOnly(key) && !openfrenzOnly(key))
           secrets[fieldConfig.secretKey] = secureFields[key]?.trim() || null;
       }
       if (Object.keys(secrets).length) await setSecrets(secrets);
@@ -493,7 +534,10 @@
                     >
                   </div>
                 {/if}
-                <div class="form-group" class:not-for-source={sdkOnly(fieldName)}>
+                <div
+                  class="form-group"
+                  class:not-for-source={sdkOnly(fieldName) || openfrenzOnly(fieldName)}
+                >
                   <label for={fieldName} class="form-label">
                     {fieldConfig.label}
                     {#if fieldConfig.required}
@@ -633,6 +677,9 @@
                     {/if}
                   {/if}
 
+                  {#if fieldConfig.help && fieldConfig.type !== 'select'}
+                    <p class="field-help">{fieldConfig.help}</p>
+                  {/if}
                   {#if errors[fieldName]}
                     <div class="form-error">{errors[fieldName]}</div>
                   {/if}

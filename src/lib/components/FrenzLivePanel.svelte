@@ -20,6 +20,7 @@
     hidden,
     place,
     dropIndex,
+    modelCharts,
   } from '../devices/frenzTraces.js';
 
   let { isOpen = $bindable(false), device = '' } = $props();
@@ -55,7 +56,19 @@
   }
   let layout = $state(loadLayout());
   let adding = $state('');
-  const removed = $derived(hidden(layout));
+  // Models from the configuration: each gets a chart when it first appears, unless removed in this view.
+  const running = $derived(modelCharts(traces));
+  const removed = $derived(hidden(layout, running));
+  let dismissed = new Set();
+  $effect(() => {
+    const fresh = running.filter(id => !layout.some(c => c.id === id) && !dismissed.has(id));
+    if (fresh.length) setLayout(fresh.reduce((l, id) => add(l, id), layout));
+  });
+  function info(id) {
+    if (CHART_INFO[id]) return CHART_INFO[id];
+    const name = id.replace(/^model:/, '');
+    return { title: name, note: 'model from the configuration' };
+  }
 
   // Dragging a chart by its grip: which chart, where it would land, and each chart's element to measure.
   let sections = $state({});
@@ -143,7 +156,15 @@
         pick('eeg-power', 'mean:power:30-45', 'gamma 30–45', HUES[4]),
       ],
     };
-    return lists[id].filter(Boolean);
+    if (id.startsWith('model:')) {
+      // Every output of the model on one shared scale, up to the five hues there are.
+      const trace = traces.find(t => t.name === id.slice('model:'.length));
+      return (trace?.channels ?? [])
+        .slice(0, HUES.length)
+        .map((c, k) => pick(trace.name, c, c, HUES[k]))
+        .filter(Boolean);
+    }
+    return (lists[id] ?? []).filter(Boolean);
   }
 
   function draw(id) {
@@ -360,7 +381,7 @@
 
       <div class="live-charts">
         {#each layout as chart, index (chart.id)}
-          {@const info = CHART_INFO[chart.id]}
+          {@const about = info(chart.id)}
           <section
             class="chart"
             class:tall={chart.id === 'eeg' || chart.id === 'power'}
@@ -372,7 +393,7 @@
             <div class="chart-head">
               <button
                 class="grip"
-                aria-label="Drag to move {info.title}; or use the up and down arrow keys"
+                aria-label="Drag to move {about.title}; or use the up and down arrow keys"
                 title="Drag to move"
                 onpointerdown={event => startDrag(event, chart.id)}
                 onpointermove={followDrag}
@@ -385,21 +406,24 @@
               <button
                 class="chart-toggle"
                 aria-expanded={!chart.collapsed}
-                aria-label="{chart.collapsed ? 'Expand' : 'Collapse'} {info.title}"
+                aria-label="{chart.collapsed ? 'Expand' : 'Collapse'} {about.title}"
                 onclick={() => setLayout(toggle(layout, chart.id))}
               >
                 <span class="chevron" class:closed={chart.collapsed} aria-hidden="true">▾</span>
-                <h3>{info.title} <span>{info.note}</span></h3>
+                <h3>{about.title} <span>{about.note}</span></h3>
               </button>
               <div class="chart-actions">
                 <button
-                  aria-label="Remove {info.title}"
-                  onclick={() => setLayout(remove(layout, chart.id))}>×</button
+                  aria-label="Remove {about.title}"
+                  onclick={() => {
+                    dismissed.add(chart.id);
+                    setLayout(remove(layout, chart.id));
+                  }}>×</button
                 >
               </div>
             </div>
             {#if !chart.collapsed}
-              <canvas bind:this={canvases[chart.id]} aria-label="{info.title}: {info.note}"
+              <canvas bind:this={canvases[chart.id]} aria-label="{about.title}: {about.note}"
               ></canvas>
             {/if}
           </section>
@@ -416,7 +440,7 @@
             >
               <option value="">Add a chart…</option>
               {#each removed as id (id)}
-                <option value={id}>{CHART_INFO[id].title}</option>
+                <option value={id}>{info(id).title}</option>
               {/each}
             </select>
           {/if}

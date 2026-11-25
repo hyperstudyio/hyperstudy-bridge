@@ -163,9 +163,13 @@ export function scanFrenzNative() {
   return frenzNative('scan_frenz_native', {}, e => ({ success: false, error: String(e) }));
 }
 
-/** @returns {Promise<{success: boolean, data?: string, error?: string}>} */
-export function startFrenzNative(deviceId) {
-  return frenzNative('start_frenz_native', { deviceId }, e => ({
+/**
+ * Connect through openfrenz. `models` are extra Hugging Face models (owner/name) to run; Bridge reads the token for
+ * private ones from the system credential store itself.
+ * @returns {Promise<{success: boolean, data?: string, error?: string}>}
+ */
+export function startFrenzNative(deviceId, models = []) {
+  return frenzNative('start_frenz_native', { deviceId, models }, e => ({
     success: false,
     error: String(e),
   }));
