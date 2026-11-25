@@ -395,20 +395,31 @@ pub async fn start_frenz_native(
 ) -> Result<CommandResult<String>, ()> {
     use crate::devices::lsl::frenz_process::FrenzBridgeState;
     let helper = state.frenz_process.get_status().await.state;
-    if !matches!(helper, FrenzBridgeState::Stopped | FrenzBridgeState::NotAvailable | FrenzBridgeState::Error) {
+    if !matches!(
+        helper,
+        FrenzBridgeState::Stopped | FrenzBridgeState::NotAvailable | FrenzBridgeState::Error
+    ) {
         return Ok(CommandResult::error(
-            "The SDK helper is using the band. Disconnect it before connecting through openfrenz.".to_string(),
+            "The SDK helper is using the band. Disconnect it before connecting through openfrenz."
+                .to_string(),
         ));
     }
-    info!(device = "frenz", "Connecting to {} through openfrenz", device_id);
-    Ok(match state.frenz_native.start(&device_id, Some(app_handle)).await {
-        Ok(()) => CommandResult::success("Connected through openfrenz".to_string()),
-        Err(e) => CommandResult::error(e),
-    })
+    info!(
+        device = "frenz",
+        "Connecting to {} through openfrenz", device_id
+    );
+    Ok(
+        match state.frenz_native.start(&device_id, Some(app_handle)).await {
+            Ok(()) => CommandResult::success("Connected through openfrenz".to_string()),
+            Err(e) => CommandResult::error(e),
+        },
+    )
 }
 
 #[tauri::command]
-pub async fn stop_frenz_native(state: State<'_, Arc<AppState>>) -> Result<CommandResult<String>, ()> {
+pub async fn stop_frenz_native(
+    state: State<'_, Arc<AppState>>,
+) -> Result<CommandResult<String>, ()> {
     state.frenz_native.stop().await;
     Ok(CommandResult::success("Disconnected".to_string()))
 }
