@@ -320,7 +320,11 @@
     frenzPhaseText = 'Connecting to the band…';
     try {
       if ((await getFrenzNativeStatus()).state !== 'streaming') {
-        const result = await startFrenzNative(frenzDeviceId);
+        const models = (device.config?.models || '')
+          .split(/[\s,]+/)
+          .map(m => m.trim())
+          .filter(Boolean);
+        const result = await startFrenzNative(frenzDeviceId, models);
         if (!result.success) throw new Error(result.error || 'Could not connect to the band');
       }
       await bridgeStore.connectDevice('frenz', { ...device.config, device_name: frenzDeviceId });
@@ -595,6 +599,12 @@
             <span class="value bridge-message">{frenzNativeStatus.message}</span>
           </div>
         {/if}
+        {#each frenzNativeStatus.model_errors || [] as problem (problem)}
+          <div class="config-row">
+            <span class="label">Model not loaded:</span>
+            <span class="value bridge-message" style:color="var(--color-warning)">{problem}</span>
+          </div>
+        {/each}
         {#if frenzNativeStatus.state === 'streaming'}
           <div class="config-row">
             <span class="label">Streams:</span>

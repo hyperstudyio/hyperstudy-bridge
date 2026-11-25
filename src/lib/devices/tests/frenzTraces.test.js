@@ -92,6 +92,7 @@ import {
   hidden,
   place,
   dropIndex,
+  modelCharts,
 } from '../frenzTraces.js';
 
 describe('live view layout', () => {
@@ -144,5 +145,17 @@ describe('live view layout', () => {
     expect(dropIndex([100, 200, 300], 50)).toBe(0);
     expect(dropIndex([100, 200, 300], 250)).toBe(2);
     expect(dropIndex([100, 200, 300], 400)).toBe(3);
+  });
+
+  it('gives each model from the configuration its own chart', () => {
+    const traces = [{ name: 'eeg' }, { name: 'eog' }, { name: 'focus' }, { name: 'focus-2' }];
+    const extra = modelCharts(traces);
+    expect(extra).toEqual(['model:focus', 'model:focus-2']);
+    let layout = add(defaultLayout(), 'model:focus');
+    expect(layout.at(-1).id).toBe('model:focus');
+    expect(hidden(layout, extra)).toEqual(['model:focus-2']);
+    expect(cleanLayout([{ id: 'model:focus' }, { id: 'model:../x' }])).toEqual([
+      { id: 'model:focus', collapsed: false },
+    ]);
   });
 });

@@ -17,24 +17,44 @@ async fn a_replayed_band_is_published_and_readable() {
     let native = FrenzNative::new();
     assert_eq!(native.status().state, NativeState::Stopped);
     assert!(native
-        .start_replay("bad name!", &recording, None)
+        .start_replay("bad name!", &recording, &[], None, None)
         .await
         .is_err());
 
+    // One extra model from a folder (as a Hugging Face model would be once fetched), and one that is not a model.
+    let extra = dir.join("rms-model");
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::write(
+        extra.join("config.json"),
+        r#"{"openfrenz_model": "pipeline", "name": "my level", "version": "1",
+            "step": {"stream": "eeg", "samples": 125},
+            "nodes": [{"name": "s", "op": "summary", "in": "eeg", "stats": ["sd"]}],
+            "outputs": ["s"]}"#,
+    )
+    .unwrap();
+    let models = vec![
+        extra.to_string_lossy().to_string(),
+        "./not/a model".to_owned(),
+    ];
     native
-        .start_replay("FRENZT01", &recording, None)
+        .start_replay("FRENZT01", &recording, &models, None, None)
         .await
         .unwrap();
     let status = native.status();
     assert_eq!(status.state, NativeState::Streaming);
-    assert_eq!(status.streams.len(), STREAMS.len() + MODELS.len());
+    assert_eq!(status.streams.len(), STREAMS.len() + MODELS.len() + 1);
+    assert!(status
+        .streams
+        .contains(&"FRENZT01_MY_LEVEL_openfrenz".to_owned()));
+    assert_eq!(status.model_errors.len(), 1, "{:?}", status.model_errors);
+    assert!(status.model_errors[0].starts_with("./not/a model:"));
     assert!(status.streams.contains(&"FRENZT01_EEG".to_owned()));
     assert!(status
         .streams
         .contains(&"FRENZT01_EOG_openfrenz".to_owned()));
     // One band, one connection.
     assert!(native
-        .start_replay("FRENZT01", &recording, None)
+        .start_replay("FRENZT01", &recording, &[], None, None)
         .await
         .is_err());
 
@@ -122,10 +142,16 @@ async fn a_replayed_band_is_published_and_readable() {
     assert_eq!(brow.channels, ["brow:log_sd"]);
     assert!(brow.t.len() > 5, "brow-emg gave {} steps", brow.t.len());
     let stats = native.stats().expect("no stats while streaming");
-    assert_eq!(stats["active_stream_count"], 12);
+    assert_eq!(stats["active_stream_count"], 13);
     assert_eq!(stats["devices"][0]["device_name"], "FRENZT01");
     assert_eq!(stats["devices"][0]["streams"][0]["suffix"], "_EEG");
     assert_eq!(stats["devices"][0]["streams"][0]["channel_count"], 4);
+    let mine = traces
+        .iter()
+        .find(|t| t.name == "my-level")
+        .expect("no output of the extra model");
+    assert_eq!(mine.channels.len(), 4);
+    assert!(mine.t.len() > 2);
     let status = native.status();
     assert!(status.samples["FRENZT01_EEG"] > 500);
     assert!(status.samples["FRENZT01_BROW_EMG_openfrenz"] > 5);
@@ -148,7 +174,7 @@ async fn real_band() {
     let bands = native.scan().await.unwrap();
     println!("scan: {bands:?}");
     let started = std::time::Instant::now();
-    native.start(&name, None).await.unwrap();
+    native.start(&name, &[], None, None).await.unwrap();
     println!("connected in {:.1} s", started.elapsed().as_secs_f64());
     for _ in 0..8 {
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -184,6 +210,86 @@ async fn real_band() {
     assert!(
         status.samples[&format!("{name}_EEG")] > 4000,
         "too few EEG samples"
+    );
+    native.stop().await;
+}
+
+/// A private Hugging Face model on a replayed recording:
+/// `FRENZ_REPLAY=rec.sqlite FRENZ_MODELS=owner/name HF_TOKEN=... cargo test --test frenz_native hub_model -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn hub_model_on_a_replay() {
+    let recording = std::env::var("FRENZ_REPLAY").expect("set FRENZ_REPLAY to a .sqlite recording");
+    let models: Vec<String> = std::env::var("FRENZ_MODELS")
+        .expect("set FRENZ_MODELS")
+        .split(',')
+        .map(str::to_owned)
+        .collect();
+    let token = std::env::var("HF_TOKEN").ok();
+    let native = FrenzNative::new();
+    // Without the token: the model is reported, and the rest runs.
+    native
+        .start_replay(
+            "FRENZT02",
+            std::path::Path::new(&recording),
+            &models,
+            Some("hf_not_valid".into()),
+            None,
+        )
+        .await
+        .unwrap();
+    println!("with a bad token: {:?}", native.status().model_errors);
+    assert_eq!(native.status().model_errors.len(), models.len());
+    native.stop().await;
+    native
+        .start_replay(
+            "FRENZT02",
+            std::path::Path::new(&recording),
+            &models,
+            token,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        native.status().model_errors.is_empty(),
+        "{:?}",
+        native.status().model_errors
+    );
+    tokio::time::sleep(Duration::from_secs(16)).await;
+    for trace in native.recent(30.0).await {
+        if ![
+            "eeg",
+            "accel",
+            "gyro",
+            "ppg",
+            "heart_rate",
+            "spo2",
+            "contact",
+            "battery",
+        ]
+        .contains(&trace.name.as_str())
+        {
+            println!(
+                "{:>10}: {} steps, last {:?}",
+                trace.name,
+                trace.t.len(),
+                trace
+                    .values
+                    .iter()
+                    .map(|c| c.last().copied())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    println!(
+        "published: {:?}",
+        native
+            .status()
+            .streams
+            .iter()
+            .filter(|s| s.contains("openfrenz"))
+            .collect::<Vec<_>>()
     );
     native.stop().await;
 }

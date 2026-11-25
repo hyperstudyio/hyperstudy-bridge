@@ -70,6 +70,8 @@ pub struct NativeStatus {
     pub streams: Vec<String>,
     /// Samples published so far, by LSL stream name.
     pub samples: BTreeMap<String, u64>,
+    /// Models asked for that could not be loaded, each with why; the rest run without them.
+    pub model_errors: Vec<String>,
 }
 
 impl NativeStatus {
@@ -80,6 +82,7 @@ impl NativeStatus {
             device: None,
             streams: Vec::new(),
             samples: BTreeMap::new(),
+            model_errors: Vec::new(),
         }
     }
 }
@@ -238,8 +241,10 @@ type Outputs = VecDeque<(f64, Vec<f64>)>;
 /// What is shared between the tasks of one connection and the commands that read it.
 struct Shared {
     status: StdMutex<NativeStatus>,
-    outputs: StdMutex<BTreeMap<&'static str, Outputs>>,
-    output_names: StdMutex<BTreeMap<&'static str, Vec<String>>>,
+    outputs: StdMutex<BTreeMap<String, Outputs>>,
+    output_names: StdMutex<BTreeMap<String, Vec<String>>>,
+    /// The models running, in order: the name they are drawn under and their LSL suffix.
+    models: StdMutex<Vec<(String, String)>>,
     app: Option<AppHandle>,
 }
 
@@ -305,6 +310,7 @@ impl FrenzNative {
                 status: StdMutex::new(NativeStatus::stopped()),
                 outputs: StdMutex::new(BTreeMap::new()),
                 output_names: StdMutex::new(BTreeMap::new()),
+                models: StdMutex::new(Vec::new()),
                 app: None,
             })),
         }
@@ -346,9 +352,17 @@ impl FrenzNative {
             .collect())
     }
 
-    /// Connects to the band called `device` and starts publishing.
-    pub async fn start(&self, device: &str, app: Option<AppHandle>) -> Result<(), String> {
-        self.start_with(device, app, None).await
+    /// Connects to the band called `device` and starts publishing, running openfrenz's built-in models and the
+    /// `extra` ones: Hugging Face repositories (`owner/name`, `owner/name@revision`) read with `token`, or
+    /// folders. An extra model that cannot be loaded is reported in the status and left out.
+    pub async fn start(
+        &self,
+        device: &str,
+        extra: &[String],
+        token: Option<String>,
+        app: Option<AppHandle>,
+    ) -> Result<(), String> {
+        self.start_with(device, extra, token, app, None).await
     }
 
     /// Plays a recording back as if it were the band `device`, at its recorded pace. For trying the app
@@ -357,14 +371,19 @@ impl FrenzNative {
         &self,
         device: &str,
         recording: &std::path::Path,
+        extra: &[String],
+        token: Option<String>,
         app: Option<AppHandle>,
     ) -> Result<(), String> {
-        self.start_with(device, app, Some(recording)).await
+        self.start_with(device, extra, token, app, Some(recording))
+            .await
     }
 
     async fn start_with(
         &self,
         device: &str,
+        extra: &[String],
+        token: Option<String>,
         app: Option<AppHandle>,
         replay: Option<&std::path::Path>,
     ) -> Result<(), String> {
@@ -387,13 +406,19 @@ impl FrenzNative {
             }),
             outputs: StdMutex::new(BTreeMap::new()),
             output_names: StdMutex::new(BTreeMap::new()),
+            models: StdMutex::new(Vec::new()),
             app,
         });
         if let Ok(mut current) = self.shared.lock() {
             *current = shared.clone();
         }
         shared.update(|_| {});
-        match open(device, replay, shared.clone()).await {
+        // Fetched before the band is connected: a download can take a while, and needs no band.
+        let (models, errors) = load_models(extra.to_vec(), token).await;
+        if !errors.is_empty() {
+            shared.update(|s| s.model_errors = errors);
+        }
+        match open(device, replay, models, shared.clone()).await {
             Ok(opened) => {
                 *session = Some(opened);
                 Ok(())
@@ -414,6 +439,7 @@ impl FrenzNative {
         }
         let shared = self.shared();
         let outputs = shared.output_names.lock().ok()?;
+        let running = shared.models.lock().ok()?.clone();
         let raw = STREAMS.iter().map(|(stream, suffix)| {
             let channels = streams::channels(stream).map_or(0, <[&str]>::len);
             (
@@ -423,9 +449,9 @@ impl FrenzNative {
                 "openfrenz",
             )
         });
-        let models = MODELS.iter().map(|(model, suffix)| {
+        let models = running.iter().map(|(model, suffix)| {
             (
-                *suffix,
+                suffix.as_str(),
                 outputs.get(model).map_or(0, Vec::len),
                 0.0,
                 "openfrenz model",
@@ -509,15 +535,16 @@ impl FrenzNative {
         }
         let shared = self.shared();
         let since = unix_now() - seconds;
+        let running = shared.models.lock().map(|m| m.clone()).unwrap_or_default();
         if let (Ok(outputs), Ok(names)) = (shared.outputs.lock(), shared.output_names.lock()) {
-            for (model, _) in MODELS {
+            for (model, _) in &running {
                 let (Some(kept), Some(channels)) = (outputs.get(model), names.get(model)) else {
                     continue;
                 };
                 let recent: Vec<&(f64, Vec<f64>)> =
                     kept.iter().filter(|(t, _)| *t >= since).collect();
                 traces.push(Trace {
-                    name: model.to_owned(),
+                    name: model.clone(),
                     channels: channels.clone(),
                     t: recent.iter().map(|(t, _)| *t).collect(),
                     values: (0..channels.len())
@@ -535,10 +562,113 @@ impl FrenzNative {
     }
 }
 
+/// A model to run: the name it is drawn under, its LSL suffix, the model, and where it came from.
+struct Loaded {
+    name: String,
+    suffix: String,
+    pipeline: Pipeline,
+    source: String,
+}
+
+/// A model source the configuration may name: a Hugging Face repository (`owner/name`,
+/// `owner/name@revision`) or an existing folder.
+fn plausible_source(source: &str) -> bool {
+    let plain = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    let (repo, revision) = source.split_once('@').unwrap_or((source, "main"));
+    let repository = matches!(repo.split('/').collect::<Vec<_>>()[..], [owner, name] if plain(owner) && plain(name))
+        && plain(revision);
+    repository || std::path::Path::new(source).is_dir()
+}
+
+/// The built-in models, then the `extra` ones, each with a distinct name and suffix. Extra models that cannot
+/// be loaded are left out, with why.
+async fn load_models(extra: Vec<String>, token: Option<String>) -> (Vec<Loaded>, Vec<String>) {
+    tokio::task::spawn_blocking(move || {
+        let mut loaded: Vec<Loaded> = Vec::new();
+        let mut errors = Vec::new();
+        for (model, suffix) in MODELS {
+            match frenz_model::resolve(model).and_then(|dir| Pipeline::from_dir(&dir)) {
+                Ok(pipeline) => loaded.push(Loaded {
+                    name: model.to_owned(),
+                    suffix: suffix.to_owned(),
+                    source: format!("model {model} {}", pipeline.spec().version),
+                    pipeline,
+                }),
+                Err(e) => errors.push(format!("{model}: {e}")),
+            }
+        }
+        for source in extra.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if !plausible_source(source) {
+                errors.push(format!(
+                    "{source}: not a Hugging Face repository (owner/name) or a folder"
+                ));
+                continue;
+            }
+            let pipeline = frenz_model::resolve_with(source, token.as_deref()).and_then(|dir| {
+                let fingerprint = frenz_model::fingerprint_dir(&dir)?;
+                Pipeline::from_dir(&dir).map(|p| (p, fingerprint))
+            });
+            let (pipeline, fingerprint) = match pipeline {
+                Ok(found) => found,
+                Err(e) => {
+                    warn!(device = "frenz", "model {source} not loaded: {e}");
+                    errors.push(format!("{source}: {e}"));
+                    continue;
+                }
+            };
+            // Named after the model, made unique; the suffix is the name in capitals.
+            let base: String = pipeline
+                .spec()
+                .name
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            let base = if base.is_empty() {
+                "model".to_owned()
+            } else {
+                base
+            };
+            let mut name = base.clone();
+            let mut n = 2;
+            while loaded.iter().any(|l| l.name == name) {
+                name = format!("{base}-{n}");
+                n += 1;
+            }
+            let suffix = format!("_{}_openfrenz", name.to_ascii_uppercase().replace('-', "_"));
+            loaded.push(Loaded {
+                source: format!(
+                    "model {source} {} (files {fingerprint})",
+                    pipeline.spec().version
+                ),
+                name,
+                suffix,
+                pipeline,
+            });
+        }
+        (loaded, errors)
+    })
+    .await
+    .unwrap_or_else(|e| (Vec::new(), vec![format!("loading models failed: {e}")]))
+}
+
 /// Opens the band, the outlets and the tasks that feed them.
 async fn open(
     device: &str,
     replay: Option<&std::path::Path>,
+    models: Vec<Loaded>,
     shared: Arc<Shared>,
 ) -> Result<Session, String> {
     let band = match replay {
@@ -580,16 +710,21 @@ async fn open(
     let mut tasks = Vec::new();
 
     // Models first: on a replay each must subscribe before the recording starts to play.
-    for (model, suffix) in MODELS {
-        let pipeline = frenz_model::resolve(model)
-            .and_then(|dir| Pipeline::from_dir(&dir))
-            .map_err(|e| format!("{model}: {e}"))?;
+    for Loaded {
+        name: model,
+        suffix,
+        pipeline,
+        source,
+    } in models
+    {
         let names = pipeline.spec().outputs.clone();
-        let source = format!("model {model} {}", pipeline.spec().version);
-        let name = open_outlet(suffix, names.clone(), 0.0, source)?;
+        let name = open_outlet(&suffix, names.clone(), 0.0, source)?;
         published.push(name.clone());
         if let Ok(mut all) = shared.output_names.lock() {
-            all.insert(model, names);
+            all.insert(model.clone(), names);
+        }
+        if let Ok(mut running) = shared.models.lock() {
+            running.push((model.clone(), suffix.clone()));
         }
         let mut live =
             Live::new(pipeline, &band, reconnects).map_err(|e| format!("{model}: {e}"))?;
@@ -600,14 +735,14 @@ async fn open(
                     Ok(Some(output)) => {
                         shared.count(&name, 1);
                         if let Ok(mut all) = shared.outputs.lock() {
-                            let kept = all.entry(model).or_default();
+                            let kept = all.entry(model.clone()).or_default();
                             kept.push_back((output.t, output.values.clone()));
                             while kept.len() > KEEP_OUTPUTS {
                                 kept.pop_front();
                             }
                         }
                         let _ = lsl.send(ToLsl::Push {
-                            suffix: suffix.to_owned(),
+                            suffix: suffix.clone(),
                             stamps: vec![output.t],
                             rows: vec![output.values],
                         });

@@ -83,6 +83,34 @@ export function contactLabel(state) {
 /** Charts the live view can show, in their default order. */
 export const CHARTS = ['eeg', 'power', 'eyes', 'brow', 'head', 'pulse'];
 
+/** Traces that are the band's own streams or the built-in models; anything else is a model from the configuration. */
+const BUILT_IN_TRACES = new Set([
+  'eeg',
+  'accel',
+  'gyro',
+  'ppg',
+  'heart_rate',
+  'spo2',
+  'contact',
+  'battery',
+  'eog',
+  'brow-emg',
+  'heart',
+  'head',
+  'eeg-power',
+]);
+
+/** The chart for a model added in the configuration. */
+export const modelChart = name => `model:${name}`;
+
+/** Charts for the models from the configuration that are running: one per trace that is not built in. */
+export function modelCharts(traces) {
+  return traces.filter(t => !BUILT_IN_TRACES.has(t.name)).map(t => modelChart(t.name));
+}
+
+const knownChart = id =>
+  CHARTS.includes(id) || (typeof id === 'string' && /^model:[\w.-]+$/.test(id));
+
 /** The default layout: every chart shown, none collapsed. */
 export function defaultLayout() {
   return CHARTS.map(id => ({ id, collapsed: false }));
@@ -94,7 +122,7 @@ export function cleanLayout(saved) {
   const seen = new Set();
   const out = [];
   for (const entry of saved) {
-    if (!entry || !CHARTS.includes(entry.id) || seen.has(entry.id)) continue;
+    if (!entry || !knownChart(entry.id) || seen.has(entry.id)) continue;
     seen.add(entry.id);
     out.push({ id: entry.id, collapsed: Boolean(entry.collapsed) });
   }
@@ -118,7 +146,7 @@ export function remove(layout, id) {
 
 /** The layout with chart `id` added at the end, if it is not shown already. */
 export function add(layout, id) {
-  return !CHARTS.includes(id) || layout.some(c => c.id === id)
+  return !knownChart(id) || layout.some(c => c.id === id)
     ? layout
     : [...layout, { id, collapsed: false }];
 }
@@ -128,9 +156,9 @@ export function toggle(layout, id) {
   return layout.map(c => (c.id === id ? { ...c, collapsed: !c.collapsed } : c));
 }
 
-/** Charts not in the layout, in their default order. */
-export function hidden(layout) {
-  return CHARTS.filter(id => !layout.some(c => c.id === id));
+/** Charts not in the layout, in their default order: the standard ones, then `extra` (charts of running models). */
+export function hidden(layout, extra = []) {
+  return [...CHARTS, ...extra].filter(id => !layout.some(c => c.id === id));
 }
 
 /** The layout with chart `id` moved to position `index` (counted in the layout without it). */
