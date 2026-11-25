@@ -132,3 +132,20 @@ export function toggle(layout, id) {
 export function hidden(layout) {
   return CHARTS.filter(id => !layout.some(c => c.id === id));
 }
+
+/** The layout with chart `id` moved to position `index` (counted in the layout without it). */
+export function place(layout, id, index) {
+  const chart = layout.find(c => c.id === id);
+  if (!chart) return layout;
+  const rest = layout.filter(c => c.id !== id);
+  const at = Math.max(0, Math.min(rest.length, index));
+  return [...rest.slice(0, at), chart, ...rest.slice(at)];
+}
+
+/**
+ * Where a chart dragged to height `y` lands: the number of other charts whose middle is above `y`.
+ * `middles` are the vertical middles of the charts other than the dragged one, top to bottom.
+ */
+export function dropIndex(middles, y) {
+  return middles.filter(m => m < y).length;
+}

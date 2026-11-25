@@ -18,6 +18,8 @@
     add,
     toggle,
     hidden,
+    place,
+    dropIndex,
   } from '../devices/frenzTraces.js';
 
   let { isOpen = $bindable(false), device = '' } = $props();
@@ -54,6 +56,44 @@
   let layout = $state(loadLayout());
   let adding = $state('');
   const removed = $derived(hidden(layout));
+
+  // Dragging a chart by its grip: which chart, where it would land, and each chart's element to measure.
+  let sections = $state({});
+  let dragging = $state(null);
+  let landing = $state(null);
+
+  function landingAt(y) {
+    const middles = layout
+      .filter(c => c.id !== dragging)
+      .map(c => sections[c.id]?.getBoundingClientRect())
+      .filter(Boolean)
+      .map(r => r.top + r.height / 2);
+    return dropIndex(middles, y);
+  }
+  function startDrag(event, id) {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    dragging = id;
+    landing = landingAt(event.clientY);
+  }
+  function followDrag(event) {
+    if (dragging) landing = landingAt(event.clientY);
+  }
+  function endDrag() {
+    if (dragging && landing !== null) setLayout(place(layout, dragging, landing));
+    dragging = null;
+    landing = null;
+  }
+  function gripKey(event, id) {
+    const by = { ArrowUp: -1, ArrowDown: 1 }[event.key];
+    if (!by) return;
+    event.preventDefault();
+    setLayout(move(layout, id, by));
+  }
+  // Where the drop line is drawn: before this chart, or after the last one.
+  const others = $derived(layout.filter(c => c.id !== dragging));
+  const lineBefore = $derived(dragging && landing !== null ? (others[landing]?.id ?? null) : null);
+  const lineAfterLast = $derived(dragging && landing !== null && landing >= others.length);
 
   function setLayout(next) {
     layout = next;
@@ -321,8 +361,27 @@
       <div class="live-charts">
         {#each layout as chart, index (chart.id)}
           {@const info = CHART_INFO[chart.id]}
-          <section class="chart" class:tall={chart.id === 'eeg' || chart.id === 'power'}>
+          <section
+            class="chart"
+            class:tall={chart.id === 'eeg' || chart.id === 'power'}
+            class:dragged={dragging === chart.id}
+            class:drop-before={lineBefore === chart.id}
+            class:drop-after={lineAfterLast && index === layout.length - 1}
+            bind:this={sections[chart.id]}
+          >
             <div class="chart-head">
+              <button
+                class="grip"
+                aria-label="Drag to move {info.title}; or use the up and down arrow keys"
+                title="Drag to move"
+                onpointerdown={event => startDrag(event, chart.id)}
+                onpointermove={followDrag}
+                onpointerup={endDrag}
+                onpointercancel={() => ((dragging = null), (landing = null))}
+                onkeydown={event => gripKey(event, chart.id)}
+              >
+                <span aria-hidden="true">⠿</span>
+              </button>
               <button
                 class="chart-toggle"
                 aria-expanded={!chart.collapsed}
@@ -333,16 +392,6 @@
                 <h3>{info.title} <span>{info.note}</span></h3>
               </button>
               <div class="chart-actions">
-                <button
-                  aria-label="Move {info.title} up"
-                  disabled={index === 0}
-                  onclick={() => setLayout(move(layout, chart.id, -1))}>↑</button
-                >
-                <button
-                  aria-label="Move {info.title} down"
-                  disabled={index === layout.length - 1}
-                  onclick={() => setLayout(move(layout, chart.id, 1))}>↓</button
-                >
                 <button
                   aria-label="Remove {info.title}"
                   onclick={() => setLayout(remove(layout, chart.id))}>×</button
@@ -487,8 +536,33 @@
   .chart-head {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 0.5rem;
+  }
+  .grip {
+    padding: 0 0.2rem;
+    border: none;
+    background: none;
+    color: var(--color-text-secondary);
+    font-size: 1rem;
+    line-height: 1;
+    cursor: grab;
+    touch-action: none;
+  }
+  .grip:active {
+    cursor: grabbing;
+  }
+  .chart {
+    border-top: 2px solid transparent;
+    border-bottom: 2px solid transparent;
+  }
+  .chart.dragged {
+    opacity: 0.45;
+  }
+  .chart.drop-before {
+    border-top-color: var(--color-primary);
+  }
+  .chart.drop-after {
+    border-bottom-color: var(--color-primary);
   }
   .chart-toggle {
     display: flex;
@@ -511,6 +585,7 @@
   }
   .chart-actions {
     display: flex;
+    margin-left: auto;
     gap: 0.25rem;
   }
   .chart-actions button,

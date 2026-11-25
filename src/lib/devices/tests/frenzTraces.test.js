@@ -90,6 +90,8 @@ import {
   add,
   toggle,
   hidden,
+  place,
+  dropIndex,
 } from '../frenzTraces.js';
 
 describe('live view layout', () => {
@@ -123,5 +125,24 @@ describe('live view layout', () => {
       { id: 'head', collapsed: true },
       { id: 'eeg', collapsed: false },
     ]);
+  });
+
+  it('places a dragged chart where it is dropped', () => {
+    const ids = l => l.map(c => c.id);
+    const layout = defaultLayout();
+    expect(ids(place(layout, 'pulse', 0))).toEqual([
+      'pulse',
+      'eeg',
+      'power',
+      'eyes',
+      'brow',
+      'head',
+    ]);
+    expect(ids(place(layout, 'eeg', 2))).toEqual(['power', 'eyes', 'eeg', 'brow', 'head', 'pulse']);
+    expect(ids(place(layout, 'eeg', 99)).at(-1)).toBe('eeg');
+    expect(place(layout, 'nonsense', 0)).toBe(layout);
+    expect(dropIndex([100, 200, 300], 50)).toBe(0);
+    expect(dropIndex([100, 200, 300], 250)).toBe(2);
+    expect(dropIndex([100, 200, 300], 400)).toBe(3);
   });
 });
