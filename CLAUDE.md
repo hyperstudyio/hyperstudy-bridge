@@ -48,6 +48,17 @@ HyperStudy Bridge is a unified, high-performance desktop application that serves
 - **Connection**: LSL network protocol, using the `lsl` crate
 - **Used by**: Neon gaze (above), the FRENZ brainband (a Python sidecar publishes its streams over LSL; `devices/lsl/frenz.rs`, `devices/lsl/frenz_process.rs`), and study recordings of LSL streams (`recording/`)
 
+### 4a. FRENZ connection: SDK helper or openfrenz
+- **Setting**: FRENZ `source` in the device configuration. Absent means the SDK helper (the default); `openfrenz` selects
+  the native connection. The two must never hold the band together; the start commands refuse while the other is active.
+- **SDK helper**: the Python sidecar above, with the vendor's derived streams (focus, sleep stage, posture), product key needed.
+- **openfrenz** (`devices/frenz_native.rs`): Bridge connects over Bluetooth with the `frenz` crate, runs openfrenz's
+  built-in models (`eog`, `brow-emg`, `heart`, `head`) and publishes everything as LSL outlets named `<band>_<STREAM>` with
+  source id `frenz-<band>-<session uuid>_<STREAM>`, the pattern HyperStudy groups FRENZ streams by. The window draws them in
+  `FrenzLivePanel.svelte`. Experimental; the SDK helper stays until openfrenz replaces it.
+- **Tests**: `src-tauri/tests/frenz_native.rs` replays a synthetic recording; its `real_band` test (ignored by default)
+  connects to a band named in `FRENZ_BAND`.
+
 ### 5. EyeLink 1000 Plus Eye Tracker
 - **Connection**: Ethernet TCP/IP (default: 100.1.1.1)
 - **Protocol**: eyelink_core C library via runtime FFI (libloading)
@@ -269,6 +280,7 @@ src-tauri/src/
 │   ├── kernel.rs           # Kernel Flow2 (tests in kernel_tests.rs)
 │   ├── pupil.rs            # Neon REST control
 │   ├── neon_discovery.rs   # Neon mDNS discovery
+│   ├── frenz_native.rs     # FRENZ through openfrenz (no SDK helper)
 │   ├── mock.rs             # Mock device
 │   ├── eyelink/            # EyeLink (behind the `eyelink` feature)
 │   └── lsl/                # LSL inlets/outlets, Neon gaze, FRENZ

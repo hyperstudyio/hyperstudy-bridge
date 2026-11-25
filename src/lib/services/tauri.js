@@ -144,6 +144,50 @@ export async function getFrenzBridgeStatus() {
   }
 }
 
+// FRENZ through openfrenz: Bridge connects to the band itself, without the SDK helper.
+
+/** The value of the FRENZ `source` setting that selects openfrenz. Anything else means the SDK helper. */
+export const FRENZ_OPENFRENZ = 'openfrenz';
+
+async function frenzNative(command, args, fallback) {
+  try {
+    return await invoke(command, args);
+  } catch (error) {
+    console.error(`${command} failed:`, error);
+    return fallback(error);
+  }
+}
+
+/** @returns {Promise<{success: boolean, data?: {name: string, rssi: number|null, selectable: boolean}[], error?: string}>} */
+export function scanFrenzNative() {
+  return frenzNative('scan_frenz_native', {}, e => ({ success: false, error: String(e) }));
+}
+
+/** @returns {Promise<{success: boolean, data?: string, error?: string}>} */
+export function startFrenzNative(deviceId) {
+  return frenzNative('start_frenz_native', { deviceId }, e => ({
+    success: false,
+    error: String(e),
+  }));
+}
+
+/** @returns {Promise<{state: string, message?: string, device?: string, streams: string[], samples: Record<string, number>}>} */
+export function getFrenzNativeStatus() {
+  return frenzNative('get_frenz_native_status', {}, () => ({
+    state: 'stopped',
+    streams: [],
+    samples: {},
+  }));
+}
+
+/**
+ * The last `seconds` of every stream and model output.
+ * @returns {Promise<{name: string, channels: string[], t: number[], values: number[][]}[]>}
+ */
+export function getFrenzNativeRecent(seconds) {
+  return frenzNative('get_frenz_native_recent', { seconds }, () => []);
+}
+
 /**
  * Check if the FRENZ bridge binary is available on this platform.
  * @returns {Promise<boolean>}

@@ -1,3 +1,4 @@
+pub mod frenz_native;
 pub mod kernel;
 pub mod lsl;
 pub mod mock;

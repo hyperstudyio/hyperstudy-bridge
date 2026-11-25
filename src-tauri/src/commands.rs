@@ -340,6 +340,11 @@ pub async fn start_frenz_bridge(
         "Starting FRENZ bridge for device: {}", device_id
     );
 
+    if state.frenz_native.active() {
+        return Ok(CommandResult::error(
+            "The band is connected through openfrenz. Disconnect it before starting the SDK helper.".to_string(),
+        ));
+    }
     match state
         .frenz_process
         .start(&device_id, &product_key, &app_handle)
@@ -365,6 +370,74 @@ pub async fn get_frenz_bridge_status(
 #[tauri::command]
 pub async fn check_frenz_bridge_available(app_handle: AppHandle) -> Result<bool, ()> {
     Ok(crate::devices::lsl::frenz_process::FrenzProcessManager::check_available(&app_handle))
+}
+
+// FRENZ through openfrenz (no SDK helper)
+
+/// Bands advertising nearby, found by Bridge itself.
+#[tauri::command]
+pub async fn scan_frenz_native(
+    state: State<'_, Arc<AppState>>,
+) -> Result<CommandResult<Vec<crate::devices::frenz_native::NativeBand>>, ()> {
+    Ok(match state.frenz_native.scan().await {
+        Ok(bands) => CommandResult::success(bands),
+        Err(e) => CommandResult::error(e),
+    })
+}
+
+/// Connects to a band through openfrenz and publishes its streams. Refused while the SDK helper runs: the band
+/// accepts one connection.
+#[tauri::command]
+pub async fn start_frenz_native(
+    device_id: String,
+    state: State<'_, Arc<AppState>>,
+    app_handle: AppHandle,
+) -> Result<CommandResult<String>, ()> {
+    use crate::devices::lsl::frenz_process::FrenzBridgeState;
+    let helper = state.frenz_process.get_status().await.state;
+    if !matches!(
+        helper,
+        FrenzBridgeState::Stopped | FrenzBridgeState::NotAvailable | FrenzBridgeState::Error
+    ) {
+        return Ok(CommandResult::error(
+            "The SDK helper is using the band. Disconnect it before connecting through openfrenz."
+                .to_string(),
+        ));
+    }
+    info!(
+        device = "frenz",
+        "Connecting to {} through openfrenz", device_id
+    );
+    Ok(
+        match state.frenz_native.start(&device_id, Some(app_handle)).await {
+            Ok(()) => CommandResult::success("Connected through openfrenz".to_string()),
+            Err(e) => CommandResult::error(e),
+        },
+    )
+}
+
+#[tauri::command]
+pub async fn stop_frenz_native(
+    state: State<'_, Arc<AppState>>,
+) -> Result<CommandResult<String>, ()> {
+    state.frenz_native.stop().await;
+    Ok(CommandResult::success("Disconnected".to_string()))
+}
+
+#[tauri::command]
+pub async fn get_frenz_native_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::devices::frenz_native::NativeStatus, ()> {
+    Ok(state.frenz_native.status())
+}
+
+/// The last `seconds` of every stream and model output, for the window to draw.
+#[tauri::command]
+pub async fn get_frenz_native_recent(
+    seconds: f64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<crate::devices::frenz_native::Trace>, ()> {
+    Ok(state.frenz_native.recent(seconds).await)
 }
 
 /// Application metadata from Cargo.toml

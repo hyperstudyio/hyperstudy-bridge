@@ -7,10 +7,14 @@
     startFrenzBridge,
     getFrenzBridgeStatus,
     checkFrenzBridgeAvailable,
+    startFrenzNative,
+    getFrenzNativeStatus,
+    FRENZ_OPENFRENZ,
   } from '../services/tauri.js';
   import { getSecret } from '../services/secrets.js';
   import { listen } from '@tauri-apps/api/event';
   import DeviceConfigModal from './DeviceConfigModal.svelte';
+  import FrenzLivePanel from './FrenzLivePanel.svelte';
 
   let { device, onConfigUpdate = () => {}, onRemove = () => {} } = $props();
 
@@ -40,6 +44,15 @@
   let unlistenFrenzStatus = null;
 
   // FRENZ unified connect progress
+  // FRENZ through openfrenz: Bridge holds the band itself, with no SDK helper and no product key.
+  let frenzOpenfrenz = $derived(device.id === 'frenz' && device.config?.source === FRENZ_OPENFRENZ);
+  let frenzNativeStatus = $state({ state: 'stopped', streams: [], samples: {} });
+  let frenzNativeSamples = $derived(
+    Object.values(frenzNativeStatus.samples || {}).reduce((sum, n) => sum + n, 0)
+  );
+  let unlistenFrenzNative = null;
+  let showLivePanel = $state(false);
+
   let frenzConnecting = $state(false);
   let frenzDisconnecting = $state(false);
   let frenzPhaseText = $state('');
@@ -65,6 +78,10 @@
       unlistenFrenzStatus();
       unlistenFrenzStatus = null;
     }
+    if (unlistenFrenzNative) {
+      unlistenFrenzNative();
+      unlistenFrenzNative = null;
+    }
   });
 
   async function loadFrenzBridgeInfo() {
@@ -77,6 +94,11 @@
     // Listen for real-time status updates
     unlistenFrenzStatus = await listen('frenz_bridge_status', event => {
       frenzBridgeStatus = event.payload;
+    });
+
+    frenzNativeStatus = await getFrenzNativeStatus();
+    unlistenFrenzNative = await listen('frenz_native_status', event => {
+      frenzNativeStatus = event.payload;
     });
   }
 
@@ -250,6 +272,7 @@
 
   // FRENZ orchestrated connect: start bridge → wait for streaming → connect LSL
   async function handleFrenzConnect() {
+    if (frenzOpenfrenz) return handleFrenzOpenfrenzConnect();
     if (!frenzDeviceId || !frenzKeyConfigured) {
       alert('Please configure FRENZ credentials first (use Configure button)');
       return;
@@ -279,6 +302,29 @@
       // Connect LSL streams via WebSocket
       frenzPhaseText = 'Connecting to data streams...';
       await bridgeStore.connectDevice('frenz', { ...device.config, device_name: frenzDeviceId });
+    } catch (error) {
+      alert(`Failed to connect: ${error.message || error}`);
+    } finally {
+      frenzConnecting = false;
+      frenzPhaseText = '';
+    }
+  }
+
+  // openfrenz: Bridge connects to the band, then reports FRENZ as connected like any other device.
+  async function handleFrenzOpenfrenzConnect() {
+    if (!frenzDeviceId) {
+      alert('Choose your FRENZ band first (use Configure).');
+      return;
+    }
+    frenzConnecting = true;
+    frenzPhaseText = 'Connecting to the band…';
+    try {
+      if ((await getFrenzNativeStatus()).state !== 'streaming') {
+        const result = await startFrenzNative(frenzDeviceId);
+        if (!result.success) throw new Error(result.error || 'Could not connect to the band');
+      }
+      await bridgeStore.connectDevice('frenz', { ...device.config, device_name: frenzDeviceId });
+      frenzNativeStatus = await getFrenzNativeStatus();
     } catch (error) {
       alert(`Failed to connect: ${error.message || error}`);
     } finally {
@@ -328,6 +374,8 @@
     try {
       await bridgeStore.disconnectDevice('frenz');
       frenzBridgeStatus = await getFrenzBridgeStatus();
+      frenzNativeStatus = await getFrenzNativeStatus();
+      showLivePanel = false;
     } catch (error) {
       alert(`Failed to disconnect: ${error.message || error}`);
     } finally {
@@ -527,64 +575,96 @@
         <span class="label">Device ID:</span>
         <span class="value">{frenzDeviceId || 'Not configured'}</span>
       </div>
-      <div class="config-row">
-        <span class="label">Product Key:</span>
-        <span class="value credential-status" class:configured={frenzKeyConfigured}>
-          {frenzKeyConfigured ? 'Configured' : 'Not configured'}
-        </span>
-      </div>
-      {#if frenzBridgeAvailable}
+      {#if frenzOpenfrenz}
         <div class="config-row">
-          <span class="label">Bridge:</span>
+          <span class="label">Connection:</span>
+          <span class="value">openfrenz (experimental)</span>
+        </div>
+        <div class="config-row">
+          <span class="label">Band:</span>
           <span
             class="value bridge-status"
-            style="color: {getFrenzBridgeStateColor(frenzBridgeStatus.state)}"
+            style="color: {getFrenzBridgeStateColor(frenzNativeStatus.state)}"
           >
-            {getFrenzBridgeStateLabel(frenzBridgeStatus.state)}
+            {getFrenzBridgeStateLabel(frenzNativeStatus.state)}
           </span>
         </div>
-        {#if frenzBridgeStatus.message}
+        {#if frenzNativeStatus.message}
           <div class="config-row">
             <span class="label"></span>
-            <span class="value bridge-message">{frenzBridgeStatus.message}</span>
+            <span class="value bridge-message">{frenzNativeStatus.message}</span>
           </div>
         {/if}
-        {#if frenzBridgeStatus.state === 'streaming'}
+        {#if frenzNativeStatus.state === 'streaming'}
           <div class="config-row">
             <span class="label">Streams:</span>
-            <span class="value">{frenzBridgeStatus.streams.length} active</span>
+            <span class="value">{frenzNativeStatus.streams.length} published</span>
           </div>
           <div class="config-row">
             <span class="label">Samples:</span>
-            <span class="value">{frenzBridgeStatus.sample_count.toLocaleString()}</span>
-          </div>
-          <div class="config-row">
-            <span class="label">Timestamp quality:</span>
-            <span
-              class="value"
-              style:color={frenzTimingAnomaly ? 'var(--color-warning)' : undefined}
-            >
-              {frenzTimingAnomaly
-                ? 'Source timestamp discontinuities detected'
-                : 'Acquisition alignment unverified'}
-            </span>
+            <span class="value">{frenzNativeSamples.toLocaleString()}</span>
           </div>
         {/if}
-      {:else if !frenzBridgeAvailable && frenzBridgeStatus.state !== 'stopped'}
+      {:else}
         <div class="config-row">
-          <span class="label">Bridge:</span>
-          <span class="value" style="color: var(--color-text-disabled)"
-            >Not available on this platform</span
-          >
+          <span class="label">Product Key:</span>
+          <span class="value credential-status" class:configured={frenzKeyConfigured}>
+            {frenzKeyConfigured ? 'Configured' : 'Not configured'}
+          </span>
+        </div>
+        {#if frenzBridgeAvailable}
+          <div class="config-row">
+            <span class="label">Bridge:</span>
+            <span
+              class="value bridge-status"
+              style="color: {getFrenzBridgeStateColor(frenzBridgeStatus.state)}"
+            >
+              {getFrenzBridgeStateLabel(frenzBridgeStatus.state)}
+            </span>
+          </div>
+          {#if frenzBridgeStatus.message}
+            <div class="config-row">
+              <span class="label"></span>
+              <span class="value bridge-message">{frenzBridgeStatus.message}</span>
+            </div>
+          {/if}
+          {#if frenzBridgeStatus.state === 'streaming'}
+            <div class="config-row">
+              <span class="label">Streams:</span>
+              <span class="value">{frenzBridgeStatus.streams.length} active</span>
+            </div>
+            <div class="config-row">
+              <span class="label">Samples:</span>
+              <span class="value">{frenzBridgeStatus.sample_count.toLocaleString()}</span>
+            </div>
+            <div class="config-row">
+              <span class="label">Timestamp quality:</span>
+              <span
+                class="value"
+                style:color={frenzTimingAnomaly ? 'var(--color-warning)' : undefined}
+              >
+                {frenzTimingAnomaly
+                  ? 'Source timestamp discontinuities detected'
+                  : 'Acquisition alignment unverified'}
+              </span>
+            </div>
+          {/if}
+        {:else if !frenzBridgeAvailable && frenzBridgeStatus.state !== 'stopped'}
+          <div class="config-row">
+            <span class="label">Bridge:</span>
+            <span class="value" style="color: var(--color-text-disabled)"
+              >Not available on this platform</span
+            >
+          </div>
+        {/if}
+        <div class="config-row">
+          <span class="label">LSL Streams:</span>
+          <span class="value">
+            {Object.entries(device.config || {}).filter(([k, v]) => k.startsWith('stream') && v)
+              .length} selected
+          </span>
         </div>
       {/if}
-      <div class="config-row">
-        <span class="label">LSL Streams:</span>
-        <span class="value">
-          {Object.entries(device.config || {}).filter(([k, v]) => k.startsWith('stream') && v)
-            .length} selected
-        </span>
-      </div>
     {/if}
   </div>
 
@@ -627,9 +707,18 @@
     {#if device.id === 'ttl' && device.status === 'connected'}
       <button class="action-btn pulse-btn" onclick={sendTestPulse}> Send Pulse </button>
     {/if}
+    {#if frenzOpenfrenz && frenzNativeStatus.state === 'streaming'}
+      <button class="action-btn pulse-btn" onclick={() => (showLivePanel = true)}>
+        Live signals
+      </button>
+    {/if}
     <button class="action-btn config-btn" onclick={configureDevice}> Configure </button>
   </div>
 </div>
+
+{#if device.id === 'frenz'}
+  <FrenzLivePanel bind:isOpen={showLivePanel} device={frenzDeviceId || ''} />
+{/if}
 
 <DeviceConfigModal
   bind:isOpen={showConfigModal}

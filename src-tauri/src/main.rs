@@ -33,6 +33,18 @@ fn stop_frenz_sidecar(state: &Arc<AppState>) {
     }
 }
 
+/// Disconnects a band held through openfrenz when Bridge exits, so the band stops streaming and can be connected
+/// to again. On a fresh thread for the same reason as stop_frenz_sidecar.
+fn disconnect_frenz_native_for_exit(state: &Arc<AppState>) {
+    let native = state.frenz_native.clone();
+    if std::thread::spawn(move || tauri::async_runtime::block_on(native.stop()))
+        .join()
+        .is_err()
+    {
+        error!("FRENZ openfrenz exit stop panicked");
+    }
+}
+
 /// Saves the log entries still buffered (up to 5 s / 100 of them), including the exit-time recording and helper
 /// lines. Runs on a fresh thread for the same reason as stop_frenz_sidecar.
 fn flush_logs_for_exit() {
@@ -311,6 +323,11 @@ async fn main() {
             start_frenz_bridge,
             get_frenz_bridge_status,
             check_frenz_bridge_available,
+            scan_frenz_native,
+            start_frenz_native,
+            stop_frenz_native,
+            get_frenz_native_status,
+            get_frenz_native_recent,
             secrets::get_secret,
             secrets::set_secrets
         ])
@@ -326,6 +343,7 @@ async fn main() {
                     _ => {}
                 }
                 stop_frenz_sidecar(&exit_state);
+                disconnect_frenz_native_for_exit(&exit_state);
                 flush_logs_for_exit();
             }
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
@@ -344,6 +362,7 @@ async fn main() {
                             _ => {}
                         }
                         stop_frenz_sidecar(&state);
+                        disconnect_frenz_native_for_exit(&state);
                         flush_logs_for_exit();
                         finished.store(2, Ordering::Release);
                         handle.exit(code.unwrap_or(0));
