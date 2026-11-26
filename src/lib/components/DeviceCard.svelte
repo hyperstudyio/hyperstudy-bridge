@@ -109,6 +109,25 @@
     return `${name} is back${copy ? `; ${copy} stays saved` : ''}.`;
   }
 
+  // A saved pipeline deleted: any model it stood in for is put back, now and in the configuration, and it leaves
+  // the FRENZ models. Returns what happened.
+  async function pipelineDeleted(name) {
+    const entry = `saved:${name}`;
+    const models = (device.config?.models || '')
+      .split(/[\s,]+/)
+      .map(m => m.trim())
+      .filter(Boolean);
+    if (models.includes(entry))
+      onConfigUpdate(device.id, {
+        ...device.config,
+        models: models.filter(m => m !== entry).join(', '),
+      });
+    const replaced = Object.keys(replacements).filter(model => replacements[model] === entry);
+    const said = [];
+    for (const model of replaced) said.push(await revertModel(model));
+    return said.join(' ');
+  }
+
   // What the pipeline editor opens next: a running model ({ kind: 'model', name }) or a new pipeline.
   let pipelineRequest = $state(null);
   function editModel(name) {
@@ -820,6 +839,7 @@
     onRevert={revertModel}
     connected={frenzNativeStatus.state === 'streaming'}
     onUse={usePipeline}
+    onDeleted={pipelineDeleted}
   />
 {/if}
 

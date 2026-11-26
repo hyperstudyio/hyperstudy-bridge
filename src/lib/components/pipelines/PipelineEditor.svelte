@@ -47,6 +47,7 @@
     onUse = null,
     standIns = {},
     onRevert = null,
+    onDeleted = null,
   } = $props();
 
   const nodeTypes = { block: PipelineNode };
@@ -498,7 +499,9 @@
     confirmDelete = null;
     try {
       await deletePipeline(entry.name);
-      message = `Deleted ${entry.name}.`;
+      // A copy standing in for a model: the model is put back, since there is no copy left to run.
+      const back = (await onDeleted?.(entry.name)) ?? '';
+      message = `Deleted ${entry.name}.${back ? ` ${back}` : ''}`;
     } catch (error) {
       message = String(error);
     }
