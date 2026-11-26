@@ -256,6 +256,8 @@
     const snapshot = $state.snapshot(graph);
     const label = name;
     clearTimeout(checkTimer);
+    // Nothing to show while the editor is closed; it checks again when opened.
+    if (!isOpen) return;
     checkTimer = setTimeout(async () => {
       try {
         config = toConfig(snapshot, label);

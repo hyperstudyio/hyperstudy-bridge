@@ -509,7 +509,9 @@
     </div>
     <div class="info-row">
       <span class="label">Connection:</span>
-      <span class="value">{device.connection}</span>
+      <span class="value"
+        >{device.id === 'frenz' && frenzOpenfrenz ? 'Bluetooth + LSL' : device.connection}</span
+      >
     </div>
     <div class="info-row">
       <span class="label">Status:</span>
@@ -594,7 +596,7 @@
       </div>
       {#if frenzOpenfrenz}
         <div class="config-row">
-          <span class="label">Connection:</span>
+          <span class="label">Source:</span>
           <span class="value">openfrenz (experimental)</span>
         </div>
         <div class="config-row">
@@ -874,13 +876,16 @@
     overflow: hidden;
   }
 
+  /* Wraps when a card has more buttons than fit on one row (FRENZ through openfrenz has four). */
   .device-actions {
     display: flex;
-    gap: 0.75rem;
+    flex-wrap: wrap;
+    gap: 0.6rem;
   }
 
   .action-btn {
-    flex: 1;
+    flex: 1 1 7rem;
+    white-space: nowrap;
     padding: 0.5rem;
     border: none;
     border-radius: 6px;
