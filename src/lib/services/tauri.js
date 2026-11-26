@@ -301,6 +301,11 @@ export function deletePipeline(name) {
   return invoke('delete_pipeline', { name });
 }
 
+/** Imports a pipeline from its folder or config.json, after openfrenz checks it; returns its saved name. */
+export function importPipeline(source) {
+  return invoke('import_pipeline', { source });
+}
+
 /** Copies a saved pipeline, with a model card, into `destination/<name>/`; returns that folder. */
 export function exportPipeline(name, destination) {
   return invoke('export_pipeline', { name, destination });

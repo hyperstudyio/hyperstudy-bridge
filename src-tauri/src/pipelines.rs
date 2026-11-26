@@ -337,6 +337,64 @@ pub fn export(data_dir: &Path, name: &str, destination: &Path) -> Result<PathBuf
     Ok(out)
 }
 
+/// Imports a pipeline: `source` is its folder or the `config.json` in it, as [`export`] writes it and openfrenz
+/// models are shared. openfrenz checks it, with its stored numbers if it has any (`model.safetensors` beside
+/// it); it is then saved under its folder's name, or that name with a number added if taken, never overwriting a
+/// saved pipeline. Returns the name it was saved under.
+pub fn import(data_dir: &Path, source: &Path) -> Result<String, String> {
+    let (folder, file) = if source.is_dir() {
+        (source.to_path_buf(), source.join("config.json"))
+    } else {
+        let folder = source
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or("Choose a pipeline's folder or its config.json.")?;
+        (folder, source.to_path_buf())
+    };
+    let text = std::fs::read_to_string(&file)
+        .map_err(|_| format!("{} has no config.json to import.", folder.display()))?;
+    let config: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{}: not a pipeline ({e}).", file.display()))?;
+    if config.get("openfrenz_model").and_then(Value::as_str) != Some(Pipeline::KIND) {
+        return Err(format!(
+            "{} is not an openfrenz pipeline (its openfrenz_model is not \"pipeline\").",
+            file.display()
+        ));
+    }
+    // Named after the file when it is not called config.json, otherwise after its folder.
+    let stem = file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| *s != "config")
+        .or_else(|| folder.file_name().and_then(|s| s.to_str()))
+        .unwrap_or("imported");
+    let base: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(56)
+        .collect();
+    let base = if base.trim_matches('-').is_empty() {
+        "imported".to_owned()
+    } else {
+        base
+    };
+    let mut name = base.clone();
+    let mut n = 2;
+    while root(data_dir).join(&name).exists() {
+        name = format!("{base}-{n}");
+        n += 1;
+    }
+    let origin = folder.join(WEIGHTS).is_file().then_some(folder.as_path());
+    save(data_dir, &name, &config, origin)?;
+    Ok(name)
+}
+
 /// A short model card for an exported or uploaded pipeline.
 pub fn readme(name: &str, dir: &Path) -> Result<String, String> {
     let config: Value = serde_json::from_str(
@@ -446,6 +504,25 @@ mod tests {
             !given.contains_key("ratio"),
             "a node openfrenz refuses has no names"
         );
+
+        // Imported back from its export: under a free name, never over the one saved, and refused when it is not
+        // a pipeline.
+        let again = import(&data, &exported).unwrap();
+        assert_eq!(again, "front-level-2");
+        assert_eq!(
+            import(&data, &exported.join("config.json")).unwrap(),
+            "front-level-3"
+        );
+        assert_eq!(list(&data).len(), 3);
+        let stray = out.join("not-a-pipeline");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join("config.json"), r#"{"name": "x"}"#).unwrap();
+        assert!(import(&data, &stray)
+            .unwrap_err()
+            .contains("not an openfrenz pipeline"));
+        assert!(import(&data, &out.join("nowhere")).is_err());
+        delete(&data, "front-level-2").unwrap();
+        delete(&data, "front-level-3").unwrap();
 
         delete(&data, "front-level").unwrap();
         assert!(list(&data).is_empty());

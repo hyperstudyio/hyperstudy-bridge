@@ -34,6 +34,7 @@
     exportPipeline,
     getFrenzNativeRecent,
     openFrenzModel,
+    importPipeline,
   } from '../../services/tauri.js';
 
   // `request`: what to open when the editor opens, set by the live view: a running model ({ kind: 'model', name })
@@ -503,6 +504,25 @@
     }
     await refreshSaved();
   }
+  // A pipeline from elsewhere: an export, or a model downloaded from Hugging Face. openfrenz checks it first.
+  async function importSaved() {
+    const file = await chooseFolder({
+      multiple: false,
+      directory: false,
+      title: 'Import a pipeline: choose its config.json',
+      filters: [{ name: 'openfrenz pipeline', extensions: ['json'] }],
+    });
+    if (!file) return;
+    try {
+      const imported = await importPipeline(file);
+      await refreshSaved();
+      const entry = saved.find(e => e.name === imported);
+      if (entry) load(entry);
+      message = `Imported as ${imported}.`;
+    } catch (error) {
+      message = String(error);
+    }
+  }
   async function exportSaved(entry) {
     const folder = await chooseFolder({ directory: true, title: 'Export the pipeline into…' });
     if (!folder) return;
@@ -623,7 +643,15 @@
         {#each RECIPES as recipe (recipe.id)}
           <button title={recipe.about} onclick={() => startFrom(recipe)}>{recipe.name}</button>
         {/each}
-        <h3>Saved</h3>
+        <div class="saved-head">
+          <h3>Saved</h3>
+          <button
+            class="import"
+            onclick={importSaved}
+            title="Import a pipeline from its config.json: an export, or a model from Hugging Face"
+            >Import…</button
+          >
+        </div>
         {#each saved as entry (entry.name)}
           <div class="saved">
             <button
@@ -884,6 +912,15 @@
     margin: 0.4rem 0 0.1rem;
     color: var(--color-text-primary);
     font-size: 0.8rem;
+  }
+  .saved-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .saved-head .import {
+    padding: 0.1rem 0.5rem;
+    font-size: 0.72rem;
   }
   .saved {
     display: flex;

@@ -80,6 +80,9 @@ HyperStudy Bridge is a unified, high-performance desktop application that serves
   (`{"brow-emg": "saved:brow-emg-edited"}`) so it does so at every connection. Revert (`revert_frenz_model`, on
   the chart and in the editor) puts the original back and drops the setting; the copy stays saved until deleted.
   A saved copy records what it replaces in `editor.replaces`.
+  Pipelines move as folders: Export writes `config.json` (plus `model.safetensors` if any) and a model card, the
+  same form openfrenz loads and Hugging Face hosts; Import (`import_pipeline`) takes such a folder or its
+  `config.json`, checks it with openfrenz and saves it under a free name.
 - **Tests**: `src-tauri/tests/frenz_native.rs` replays a synthetic recording; its `real_band` test (ignored by default)
   connects to a band named in `FRENZ_BAND`.
 

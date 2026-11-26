@@ -652,6 +652,13 @@ pub async fn delete_pipeline(name: String, app_handle: AppHandle) -> Result<(), 
     crate::pipelines::delete(&data_dir(&app_handle)?, &name)
 }
 
+/// Imports a pipeline from a folder or its config.json (as exported, or downloaded from Hugging Face), after
+/// openfrenz has checked it; returns the name it was saved under.
+#[tauri::command]
+pub async fn import_pipeline(source: String, app_handle: AppHandle) -> Result<String, String> {
+    crate::pipelines::import(&data_dir(&app_handle)?, std::path::Path::new(&source))
+}
+
 /// Copies a saved pipeline, with a short model card, into `destination/<name>/`; returns that folder.
 #[tauri::command]
 pub async fn export_pipeline(
