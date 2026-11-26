@@ -555,7 +555,10 @@
     localError
       ? { tone: 'bad', text: localError }
       : check.ok
-        ? { tone: 'good', text: `openfrenz accepts it: ${check.outputs.length} values each step` }
+        ? {
+            tone: 'good',
+            text: `openfrenz accepts it: ${check.outputs.length} ${check.outputs.length === 1 ? 'value' : 'values'} each step`,
+          }
         : check.error
           ? { tone: 'bad', text: check.error }
           : { tone: 'quiet', text: 'Checking…' }
