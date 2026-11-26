@@ -1,10 +1,17 @@
 <script>
   // One setting of a block. Text-like settings keep what is typed and pass on a value only when it reads cleanly,
-  // so a half-typed band never reaches openfrenz.
+  // so a half-typed band never reaches openfrenz. Settings that take names offer them: `options` are the names
+  // the block's input has (from openfrenz), for settings that pick from them; fixed choices come with the field.
   import { FORMATS } from '../../pipelines/fields.js';
   import { FILTERS, FILTER_FIELDS } from '../../pipelines/blocks.js';
+  import ChipPicker from './ChipPicker.svelte';
+  import PairPicker from './PairPicker.svelte';
+  import MixEditor from './MixEditor.svelte';
 
-  let { field, value, onchange } = $props();
+  let { field, value, onchange, options = null } = $props();
+
+  // The names to choose from, when known; otherwise the setting is typed.
+  const choices = $derived(field.options ?? (field.pick && options?.length ? options : null));
 
   const format = $derived(FORMATS[field.type]);
   let text = $state('');
@@ -60,6 +67,8 @@
     <label for="setting-{field.key}">{field.label}</label>
     {#if field.type === 'number'}
       <input
+        autocomplete="off"
+        data-1p-ignore
         id="setting-{field.key}"
         type="number"
         step="any"
@@ -76,8 +85,27 @@
             >{field.names?.[option] ?? option}</option
           >{/each}
       </select>
+    {:else if field.type === 'list' && choices}
+      <ChipPicker {value} options={choices} {onchange} label={field.label} />
+    {:else if field.type === 'pairs' && choices}
+      <PairPicker
+        {value}
+        options={choices}
+        {onchange}
+        label={field.label}
+        joiner={field.pick === 'measures' ? '/' : '↔'}
+      />
+    {:else if field.type === 'text' && choices}
+      <select id="setting-{field.key}" value={value ?? ''} onchange={e => onchange(e.target.value)}>
+        {#if value && !choices.includes(value)}<option {value}>{value} (not in input)</option>{/if}
+        {#each choices as name (name)}<option value={name}>{name}</option>{/each}
+      </select>
+    {:else if field.type === 'mix'}
+      <MixEditor {value} channels={options} {onchange} />
     {:else if field.type === 'text'}
       <input
+        autocomplete="off"
+        data-1p-ignore
         id="setting-{field.key}"
         type="text"
         value={value ?? ''}
@@ -110,6 +138,8 @@
                 <label class="inline" title={about.help ?? ''}>
                   {about.label}
                   <input
+                    autocomplete="off"
+                    data-1p-ignore
                     type="number"
                     step={about.whole ? 1 : 'any'}
                     value={step[key] ?? ''}
@@ -124,23 +154,15 @@
         <button class="add" onclick={addStep}>+ Filter</button>
       </div>
     {:else if format}
-      {#if field.type === 'mix'}
-        <textarea
-          id="setting-{field.key}"
-          rows="3"
-          value={text}
-          oninput={e => typed(e.target.value)}
-          onblur={() => (editing = false)}
-        ></textarea>
-      {:else}
-        <input
-          id="setting-{field.key}"
-          type="text"
-          value={text}
-          oninput={e => typed(e.target.value)}
-          onblur={() => (editing = false)}
-        />
-      {/if}
+      <input
+        autocomplete="off"
+        data-1p-ignore
+        id="setting-{field.key}"
+        type="text"
+        value={text}
+        oninput={e => typed(e.target.value)}
+        onblur={() => (editing = false)}
+      />
     {/if}
   {/if}
   {#if problem}<p class="problem" role="alert">{problem}</p>{/if}
@@ -163,8 +185,7 @@
     color: var(--color-text-primary);
   }
   input,
-  select,
-  textarea {
+  select {
     width: 100%;
     padding: 0.35rem 0.45rem;
     border: 1px solid var(--color-border);

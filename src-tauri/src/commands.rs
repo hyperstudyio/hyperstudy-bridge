@@ -527,13 +527,18 @@ pub async fn check_pipeline(
     app_handle: AppHandle,
 ) -> Result<crate::pipelines::Check, ()> {
     Ok(match origin_dir(origin.as_deref(), &state, &app_handle) {
-        Ok(dir) => crate::pipelines::check_with(&config, dir.as_deref()),
+        // What each block gives, for the editor to offer in its settings.
+        Ok(dir) => crate::pipelines::Check {
+            names: crate::pipelines::names(&config, dir.as_deref()),
+            ..crate::pipelines::check_with(&config, dir.as_deref())
+        },
         Err(e) => crate::pipelines::Check {
             ok: false,
             outputs: Vec::new(),
             inputs: Vec::new(),
             error: Some(e),
             node: None,
+            names: Default::default(),
         },
     })
 }

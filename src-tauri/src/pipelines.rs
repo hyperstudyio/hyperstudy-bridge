@@ -4,6 +4,7 @@
 //!
 //! A pipeline is checked by openfrenz before it is saved; a folder that does not hold one is never written.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use frenz_model::{Model, Pipeline, Take};
@@ -22,6 +23,9 @@ pub struct Check {
     pub error: Option<String>,
     /// The node the message is about, when it names one.
     pub node: Option<String>,
+    /// What each node gives, by node name: channel names for a signal, feature names for features. Filled by
+    /// [`names`] for the editor; nodes openfrenz cannot build are left out.
+    pub names: BTreeMap<String, Vec<String>>,
 }
 
 /// The file holding a model's stored numbers (trained weights, a calibration), when it has any.
@@ -71,6 +75,7 @@ pub fn check_with(config: &Value, origin: Option<&Path>) -> Check {
                     .collect(),
                 error: None,
                 node: None,
+                names: BTreeMap::new(),
             }
         }
         Err(error) => {
@@ -93,9 +98,85 @@ pub fn check_with(config: &Value, origin: Option<&Path>) -> Check {
                 inputs: Vec::new(),
                 error: Some(message),
                 node,
+                names: BTreeMap::new(),
             }
         }
     }
+}
+
+/// What each node of `config` gives, as openfrenz names it: for every node, the pipeline cut down to that node
+/// and what feeds it is built with that node as its output. A signal cannot be an output, so it is read through
+/// a summary of its mean, whose names are its channels with `:mean` added. A node that cannot be built (a wrong
+/// setting, a missing input) is left out, and so are the ones fed by it; the rest still get names, so the editor
+/// can offer them while a later block is being fixed.
+pub fn names(config: &Value, origin: Option<&Path>) -> BTreeMap<String, Vec<String>> {
+    let nodes: Vec<&Value> = config
+        .get("nodes")
+        .and_then(Value::as_array)
+        .map(|n| n.iter().collect())
+        .unwrap_or_default();
+    let name_of = |node: &Value| node.get("name").and_then(Value::as_str).map(str::to_owned);
+    let inputs_of = |node: &Value| -> Vec<String> {
+        match node.get("in") {
+            Some(Value::String(one)) => vec![one.clone()],
+            Some(Value::Array(many)) => many
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let mut found = BTreeMap::new();
+    for node in &nodes {
+        let Some(target) = name_of(node) else {
+            continue;
+        };
+        // The node and every node it reads from, directly or not, in the config's order.
+        let mut wanted = BTreeSet::from([target.clone()]);
+        let mut frontier = vec![(*node).clone()];
+        while let Some(current) = frontier.pop() {
+            for input in inputs_of(&current) {
+                if let Some(feeder) = nodes
+                    .iter()
+                    .find(|n| name_of(n).as_deref() == Some(input.as_str()))
+                {
+                    if wanted.insert(input) {
+                        frontier.push((*feeder).clone());
+                    }
+                }
+            }
+        }
+        let mut kept: Vec<Value> = nodes
+            .iter()
+            .filter(|n| name_of(n).is_some_and(|name| wanted.contains(&name)))
+            .map(|n| (*n).clone())
+            .collect();
+        let mut cut = config.clone();
+        cut["outputs"] = serde_json::json!([target]);
+        cut["nodes"] = Value::Array(kept.clone());
+        let given = match build(&cut, origin) {
+            Ok(pipeline) => Some(pipeline.spec().outputs.clone()),
+            Err(e) if e.to_string().contains("is not features") => {
+                const PROBE: &str = "__editor_names";
+                kept.push(serde_json::json!({ "name": PROBE, "op": "summary", "in": target, "stats": ["mean"] }));
+                cut["nodes"] = Value::Array(kept);
+                cut["outputs"] = serde_json::json!([PROBE]);
+                build(&cut, origin).ok().map(|pipeline| {
+                    pipeline
+                        .spec()
+                        .outputs
+                        .iter()
+                        .map(|n| n.strip_suffix(":mean").unwrap_or(n).to_owned())
+                        .collect()
+                })
+            }
+            Err(_) => None,
+        };
+        if let Some(given) = given {
+            found.insert(target, given);
+        }
+    }
+    found
 }
 
 /// A saved pipeline, as listed.
@@ -338,6 +419,33 @@ mod tests {
         refused["outputs"] = json!(["nowhere"]);
         assert!(save(&data, "refused", &refused, None).is_err());
         assert!(path(&data, "refused").is_err());
+
+        // Every node's names, signals included, even when a later node is wrong.
+        let mut chain = config();
+        chain["nodes"] = json!([
+            { "name": "pair", "op": "mix", "in": "eeg",
+              "channels": [{ "name": "brow", "weights": { "forehead_left": 1, "forehead_right": -1 } }] },
+            { "name": "front", "op": "select", "in": "eeg", "channels": ["forehead_left", "forehead_right"] },
+            { "name": "power", "op": "band_power", "in": "front", "bands": [[4, 8], [8, 13]] },
+            { "name": "ratio", "op": "ratios", "in": "power", "pairs": [["power:4-8", "power:nope"]] }
+        ]);
+        chain["outputs"] = json!(["ratio"]);
+        let given = names(&chain, None);
+        assert_eq!(given["pair"], ["brow"]);
+        assert_eq!(given["front"], ["forehead_left", "forehead_right"]);
+        assert_eq!(
+            given["power"],
+            [
+                "forehead_left:power:4-8",
+                "forehead_left:power:8-13",
+                "forehead_right:power:4-8",
+                "forehead_right:power:8-13"
+            ]
+        );
+        assert!(
+            !given.contains_key("ratio"),
+            "a node openfrenz refuses has no names"
+        );
 
         delete(&data, "front-level").unwrap();
         assert!(list(&data).is_empty());

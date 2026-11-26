@@ -21,7 +21,7 @@
     freshId,
     cleanId,
   } from '../../pipelines/graph.js';
-  import { FORMATS } from '../../pipelines/fields.js';
+  import { FORMATS, formula } from '../../pipelines/fields.js';
   import { RECIPES } from '../../pipelines/recipes.js';
   import { tidy } from '../../pipelines/layout.js';
   import {
@@ -73,6 +73,30 @@
 
   const groups = palette();
   const selectedNode = $derived(graph.nodes.find(n => n.id === selected) ?? null);
+
+  // What the selected block's input holds, as openfrenz names it: a stream's channels, or what each block feeding
+  // it gives. Settings that take names offer these.
+  const inputNames = $derived.by(() => {
+    if (!selectedNode) return [];
+    const names = graph.edges
+      .filter(e => e.target === selectedNode.id)
+      .map(e => graph.nodes.find(n => n.id === e.source))
+      .filter(Boolean)
+      .flatMap(n =>
+        n.kind === 'stream' ? STREAMS[n.stream].channels : (check.names?.[n.id] ?? [])
+      );
+    return [...new Set(names)];
+  });
+  const unique = list => [...new Set(list.filter(Boolean))];
+  function optionsFor(field) {
+    if (field.pick === 'channels') return inputNames;
+    // Features are named channel:measure, e.g. forehead_left:power:4-8.
+    if (field.pick === 'measures')
+      return unique(inputNames.map(n => n.split(':').slice(1).join(':')));
+    if (field.pick === 'prefixes') return unique(inputNames.map(n => n.split(':')[0]));
+    if (field.type === 'mix') return inputNames;
+    return null;
+  }
 
   // The graph as Svelte Flow draws it.
   $effect(() => {
@@ -134,6 +158,10 @@
         )
         .join(', ');
     }
+    if (node.op === 'mix')
+      return (node.settings?.channels ?? [])
+        .map(c => `${c.name} = ${formula.format(c.weights)}`)
+        .join('; ');
     const first = block?.settings.find(
       f => FORMATS[f.type] || f.type === 'number' || f.type === 'select'
     );
@@ -285,7 +313,8 @@
       } catch (error) {
         config = null;
         localError = error.message;
-        check = { ok: false, outputs: [], error: null, node: null };
+        // Names found before stay, so that settings keep offering them while the graph is incomplete.
+        check = { ok: false, outputs: [], error: null, node: null, names: check.names };
         return;
       }
       check = await checkPipeline(config, from);
@@ -497,7 +526,7 @@
       <h2 id="editor-title">Pipelines</h2>
       <label class="name">
         Name
-        <input bind:value={name} aria-label="Pipeline name" />
+        <input bind:value={name} aria-label="Pipeline name" autocomplete="off" data-1p-ignore />
       </label>
       <label>
         Step
@@ -656,11 +685,19 @@
           <h3>{block.label}</h3>
           <p class="quiet">{block.about}</p>
           <label for="node-id">Name</label>
-          <input id="node-id" value={selectedNode.id} onchange={e => rename(e.target.value)} />
+          <input
+            autocomplete="off"
+            data-1p-ignore
+            data-lpignore="true"
+            id="node-id"
+            value={selectedNode.id}
+            onchange={e => rename(e.target.value)}
+          />
           {#each block.settings as field (field.key)}
             <SettingField
               {field}
               value={selectedNode.settings?.[field.key]}
+              options={optionsFor(field)}
               onchange={v => setSetting(field.key, v)}
             />
           {/each}
@@ -791,7 +828,7 @@
   }
   .body {
     display: grid;
-    grid-template-columns: 190px 1fr 280px;
+    grid-template-columns: 190px 1fr 320px;
     flex: 1;
     min-height: 0;
   }

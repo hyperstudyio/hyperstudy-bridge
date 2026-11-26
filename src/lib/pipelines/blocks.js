@@ -52,7 +52,19 @@ const choice = (key, label, options, value, more = {}) => ({
   default: value,
   ...more,
 });
-const list = (key, label, value, help) => ({ key, label, type: 'list', default: value, help });
+const list = (key, label, value, help, more = {}) => ({
+  key,
+  label,
+  type: 'list',
+  default: value,
+  help,
+  ...more,
+});
+
+// Where a setting's choices come from (`pick`): the channels of the signal a block reads, the measures of the
+// features it reads (`power:4-8`, without the channel), or their channels (`forehead_left`). Names come from
+// openfrenz, which names what each block gives; `options` are fixed choices.
+const STATS = ['mean', 'sd', 'log_sd', 'range', 'largest_step'];
 
 /**
  * Each block: what it reads and gives (`signal`, `features`), whether it takes several inputs, its settings, and a
@@ -66,7 +78,11 @@ export const BLOCKS = {
     reads: 'signal',
     gives: 'signal',
     about: 'Keeps some channels, in the order given.',
-    settings: [list('channels', 'Channels', ['forehead_left', 'forehead_right'])],
+    settings: [
+      list('channels', 'Channels', ['forehead_left', 'forehead_right'], undefined, {
+        pick: 'channels',
+      }),
+    ],
   },
   mix: {
     group: 'Signal',
@@ -135,7 +151,7 @@ export const BLOCKS = {
       'Band-passes each channel, takes its amplitude envelope with the Hilbert transform, and gives its level and spread.',
     settings: [
       { key: 'band', label: 'Band (Hz)', type: 'band', default: [20, 58] },
-      list('stats', 'Statistics', ['mean', 'sd'], 'mean, sd'),
+      list('stats', 'Statistics', ['mean', 'sd'], undefined, { options: STATS }),
     ],
   },
   summary: {
@@ -144,9 +160,7 @@ export const BLOCKS = {
     reads: 'signal',
     gives: 'features',
     about: 'Level and spread of each channel over the step.',
-    settings: [
-      list('stats', 'Statistics', ['mean', 'sd'], 'mean, sd, log_sd, range, largest_step'),
-    ],
+    settings: [list('stats', 'Statistics', ['mean', 'sd'], undefined, { options: STATS })],
   },
   quality: {
     group: 'Features',
@@ -187,6 +201,7 @@ export const BLOCKS = {
         key: 'pairs',
         label: 'Channel pairs',
         type: 'pairs',
+        pick: 'channels',
         default: [['forehead_left', 'forehead_right']],
       },
       bands('bands', 'Bands (Hz)', [[8, 13]]),
@@ -224,7 +239,7 @@ export const BLOCKS = {
     gives: 'features',
     about: 'Heart rate and its variability from a pulse channel.',
     settings: [
-      { key: 'channel', label: 'Channel', type: 'text', default: 'tag3' },
+      { key: 'channel', label: 'Channel', type: 'text', pick: 'channels', default: 'tag3' },
       number('window_steps', 'Steps gathered', 6),
     ],
   },
@@ -271,6 +286,7 @@ export const BLOCKS = {
         key: 'pairs',
         label: 'Measure pairs',
         type: 'pairs',
+        pick: 'measures',
         default: [['power:4-8', 'power:8-13']],
       },
       flag('log', 'Natural logarithm'),
@@ -283,7 +299,7 @@ export const BLOCKS = {
     gives: 'features',
     about: 'Each measure averaged over channels.',
     settings: [
-      list('channels', 'Channels (all if empty)', []),
+      list('channels', 'Channels to average (all if none)', [], undefined, { pick: 'prefixes' }),
       { key: 'prefix', label: 'Name the averages', type: 'text', default: 'mean' },
     ],
   },
