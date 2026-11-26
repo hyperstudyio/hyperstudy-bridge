@@ -24,9 +24,38 @@ pub struct Check {
     pub node: Option<String>,
 }
 
+/// The file holding a model's stored numbers (trained weights, a calibration), when it has any.
+pub const WEIGHTS: &str = "model.safetensors";
+
+/// Builds the pipeline `config` describes. With `origin`, the folder of the model it was opened from, blocks
+/// that need stored numbers read them from that model's `model.safetensors`.
+pub fn build(config: &Value, origin: Option<&Path>) -> Result<Pipeline, frenz_model::Error> {
+    let Some(weights) = origin.map(|o| o.join(WEIGHTS)).filter(|w| w.is_file()) else {
+        return Pipeline::from_config(config);
+    };
+    // openfrenz reads stored numbers from a folder: a scratch one with this config and that model's numbers.
+    let scratch =
+        std::env::temp_dir().join(format!("hyperstudy-pipeline-{}", uuid::Uuid::new_v4()));
+    let built = (|| {
+        std::fs::create_dir_all(&scratch)?;
+        std::fs::write(scratch.join("config.json"), serde_json::to_vec(config)?)?;
+        if std::fs::hard_link(&weights, scratch.join(WEIGHTS)).is_err() {
+            std::fs::copy(&weights, scratch.join(WEIGHTS))?;
+        }
+        Pipeline::from_dir(&scratch)
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    built
+}
+
 /// Checks `config` as openfrenz would load it.
 pub fn check(config: &Value) -> Check {
-    match Pipeline::from_config(config) {
+    check_with(config, None)
+}
+
+/// [`check`], with stored numbers from the model in `origin` (see [`build`]).
+pub fn check_with(config: &Value, origin: Option<&Path>) -> Check {
+    match build(config, origin) {
         Ok(pipeline) => {
             let spec = pipeline.spec();
             Check {
@@ -103,6 +132,17 @@ fn folder(data_dir: &Path, name: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// Whether `dir` is a saved pipeline's folder; its name if so.
+pub fn saved_name(data_dir: &Path, dir: &Path) -> Option<String> {
+    let root = root(data_dir).canonicalize().ok()?;
+    let dir = dir.canonicalize().ok()?;
+    if dir.parent()? != root {
+        return None;
+    }
+    let name = dir.file_name()?.to_str()?.to_owned();
+    valid_name(&name).then_some(name)
+}
+
 /// The folder of the saved pipeline `name`, if there is one.
 pub fn path(data_dir: &Path, name: &str) -> Result<PathBuf, String> {
     let dir = folder(data_dir, name)?;
@@ -113,8 +153,14 @@ pub fn path(data_dir: &Path, name: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// Saves `config` as the pipeline `name`, after openfrenz has accepted it. Its `name` is set to `name`.
-pub fn save(data_dir: &Path, name: &str, config: &Value) -> Result<Check, String> {
+/// Saves `config` as the pipeline `name`, after openfrenz has accepted it. Its `name` is set to `name`. With
+/// `origin`, the model it was opened from, that model's stored numbers are saved with it.
+pub fn save(
+    data_dir: &Path,
+    name: &str,
+    config: &Value,
+    origin: Option<&Path>,
+) -> Result<Check, String> {
     let dir = folder(data_dir, name)?;
     let mut config = config.clone();
     if let Some(object) = config.as_object_mut() {
@@ -126,13 +172,23 @@ pub fn save(data_dir: &Path, name: &str, config: &Value) -> Result<Check, String
     } else {
         return Err("A pipeline is a JSON object.".into());
     }
-    let checked = check(&config);
+    let checked = check_with(&config, origin);
     if !checked.ok {
         return Err(checked
             .error
             .unwrap_or_else(|| "openfrenz refused it".into()));
     }
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    if let Some(weights) = origin.map(|o| o.join(WEIGHTS)).filter(|w| w.is_file()) {
+        let target = dir.join(WEIGHTS);
+        let same =
+            matches!((weights.canonicalize(), target.canonicalize()), (Ok(a), Ok(b)) if a == b);
+        if !same {
+            let partial = dir.join("model.safetensors.partial");
+            std::fs::copy(&weights, &partial).map_err(|e| e.to_string())?;
+            std::fs::rename(&partial, &target).map_err(|e| e.to_string())?;
+        }
+    }
     let text = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     // Written whole and then renamed, so that a crash never leaves half a file.
     let partial = dir.join("config.json.partial");
@@ -160,7 +216,7 @@ pub fn list(data_dir: &Path) -> Vec<Saved> {
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0.0, |d| d.as_secs_f64());
-            let checked = check(&config);
+            let checked = check_with(&config, Some(&entry.path()));
             Some(Saved {
                 version: config
                     .get("version")
@@ -193,6 +249,9 @@ pub fn export(data_dir: &Path, name: &str, destination: &Path) -> Result<PathBuf
     }
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     std::fs::copy(dir.join("config.json"), out.join("config.json")).map_err(|e| e.to_string())?;
+    if dir.join(WEIGHTS).is_file() {
+        std::fs::copy(dir.join(WEIGHTS), out.join(WEIGHTS)).map_err(|e| e.to_string())?;
+    }
     std::fs::write(out.join("README.md"), readme(name, &dir)?).map_err(|e| e.to_string())?;
     Ok(out)
 }
@@ -203,7 +262,7 @@ pub fn readme(name: &str, dir: &Path) -> Result<String, String> {
         &std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    let checked = check(&config);
+    let checked = check_with(&config, Some(dir));
     let outputs = checked
         .outputs
         .iter()
@@ -254,8 +313,8 @@ mod tests {
         assert_eq!(checked.node.as_deref(), Some("level"));
         assert!(checked.error.unwrap().starts_with("node level"));
 
-        assert!(save(&data, "bad name!", &config()).is_err());
-        let saved = save(&data, "front-level", &config()).unwrap();
+        assert!(save(&data, "bad name!", &config(), None).is_err());
+        let saved = save(&data, "front-level", &config(), None).unwrap();
         assert_eq!(saved.outputs, ["forehead_left:sd", "forehead_right:sd"]);
         assert_eq!(saved.inputs, [("eeg".to_owned(), 125)]);
         let listed = list(&data);
@@ -277,7 +336,7 @@ mod tests {
         // A pipeline openfrenz refuses is never written.
         let mut refused = config();
         refused["outputs"] = json!(["nowhere"]);
-        assert!(save(&data, "refused", &refused).is_err());
+        assert!(save(&data, "refused", &refused, None).is_err());
         assert!(path(&data, "refused").is_err());
 
         delete(&data, "front-level").unwrap();

@@ -239,9 +239,12 @@ export const tauriService = {
 
 // Pipeline editor
 
+// `origin` names the model a pipeline was opened from (`saved:<name>` or `model:<name>`), whose stored numbers
+// (trained weights, a calibration) it may use; null for a pipeline made in the editor.
+
 /** Whether openfrenz accepts a pipeline config: { ok, outputs, inputs, error, node }. */
-export function checkPipeline(config) {
-  return frenzNative('check_pipeline', { config }, e => ({
+export function checkPipeline(config, origin = null) {
+  return frenzNative('check_pipeline', { config, origin }, e => ({
     ok: false,
     outputs: [],
     inputs: [],
@@ -250,8 +253,21 @@ export function checkPipeline(config) {
 }
 
 /** Runs a pipeline on the band connected through openfrenz; drawn as the trace `preview`, never published. */
-export function previewPipeline(config) {
-  return frenzNative('preview_pipeline', { config }, e => ({ success: false, error: String(e) }));
+export function previewPipeline(config, origin = null) {
+  return frenzNative('preview_pipeline', { config, origin }, e => ({
+    success: false,
+    error: String(e),
+  }));
+}
+
+/** A model running with the band, to open in the editor: { name, config, origin, stored, saved }. */
+export function openFrenzModel(name) {
+  return invoke('open_frenz_model', { name });
+}
+
+/** Runs a saved pipeline with the band now, replacing a running copy: { success, data: name, error }. */
+export function runPipeline(name) {
+  return frenzNative('run_pipeline', { name }, e => ({ success: false, error: String(e) }));
 }
 
 export function stopPipelinePreview() {
@@ -264,8 +280,8 @@ export function listPipelines() {
 }
 
 /** Saves a pipeline under `name` (openfrenz checks it first). Throws with openfrenz's message when refused. */
-export function savePipeline(name, config) {
-  return invoke('save_pipeline', { name, config });
+export function savePipeline(name, config, origin = null) {
+  return invoke('save_pipeline', { name, config, origin });
 }
 
 export function deletePipeline(name) {

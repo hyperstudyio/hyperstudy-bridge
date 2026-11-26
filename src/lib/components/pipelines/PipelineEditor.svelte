@@ -33,15 +33,24 @@
     deletePipeline,
     exportPipeline,
     getFrenzNativeRecent,
+    openFrenzModel,
   } from '../../services/tauri.js';
 
-  let { isOpen = $bindable(false), connected = false, onUse = null } = $props();
+  // `request`: what to open when the editor opens, set by the live view: a running model ({ kind: 'model', name })
+  // or a new pipeline ({ kind: 'new' }); cleared once opened. `onUse(name)` puts a saved pipeline to use and
+  // returns what happened.
+  let {
+    isOpen = $bindable(false),
+    request = $bindable(null),
+    connected = false,
+    onUse = null,
+  } = $props();
 
   const nodeTypes = { block: PipelineNode };
   const edgeTypes = { wire: PipelineEdge };
   const HUES = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181'];
   // What a wire carries, as the nodes' outlines, chips and dots show it (also --wire-* in the styles below).
-  const WIRE = { signal: '#3987e5', features: '#c98500' };
+  const WIRE = { signal: '#3987e5', features: '#c98500', sequence: '#9b7be0' };
 
   let graph = $state(starter());
   let name = $state('my-pipeline');
@@ -56,6 +65,10 @@
   let flowNodes = $state([]);
   let flowEdges = $state([]);
   let direction = $state('TB');
+  // The model this pipeline was opened from (`saved:<name>` or `model:<name>`), whose stored numbers it uses;
+  // null for one made here. `stored`: whether there are any.
+  let origin = $state(null);
+  let stored = $state(false);
   let warning = $state('');
 
   const groups = palette();
@@ -76,6 +89,7 @@
         faulty: n.id === faulty,
         output: graph.outputs.includes(n.id),
         summary: summarise(n),
+        stored: Boolean(n.settings?.weights),
         direction,
         onToggleOutput: toggleOutput,
         onRemove: id => removeNodes([id]),
@@ -213,8 +227,13 @@
   function fit() {
     fitNonce += 1;
   }
+  function fresh(next) {
+    graph = next;
+    origin = null;
+    stored = false;
+  }
   function startFrom(recipe) {
-    graph = recipe.graph();
+    fresh(recipe.graph());
     name = recipe.id;
     selected = null;
     warning = '';
@@ -255,6 +274,7 @@
   $effect(() => {
     const snapshot = $state.snapshot(graph);
     const label = name;
+    const from = origin;
     clearTimeout(checkTimer);
     // Nothing to show while the editor is closed; it checks again when opened.
     if (!isOpen) return;
@@ -268,7 +288,7 @@
         check = { ok: false, outputs: [], error: null, node: null };
         return;
       }
-      check = await checkPipeline(config);
+      check = await checkPipeline(config, from);
       if (previewing && check.ok) startPreview();
     }, 300);
     return () => clearTimeout(checkTimer);
@@ -279,7 +299,7 @@
   let pollTimer = null;
   async function startPreview() {
     if (!config || !check.ok) return;
-    const result = await previewPipeline(config);
+    const result = await previewPipeline(config, origin);
     if (!result?.success) {
       message = result?.error ?? 'Could not run the pipeline on the band.';
       previewing = false;
@@ -361,23 +381,69 @@
     saved = await listPipelines();
   }
   async function save() {
-    if (!config) return;
+    if (!config) return false;
     try {
-      await savePipeline(cleanId(name), config);
+      await savePipeline(cleanId(name), config, origin);
       name = cleanId(name);
-      message = `Saved as ${name}. Add saved:${name} to the FRENZ models to run it with the band.`;
+      // Its stored numbers were saved with it: from now on they come from the saved copy.
+      if (stored) origin = `saved:${name}`;
+      message = `Saved as ${name}.${onUse ? ' Use runs it with the band.' : ''}`;
       await refreshSaved();
+      return true;
     } catch (error) {
       message = String(error);
+      return false;
     }
+  }
+  async function saveAndUse() {
+    if (!(await save())) return;
+    message = (await onUse(name)) ?? message;
+  }
+  async function useSaved(entry) {
+    message = (await onUse(entry.name)) ?? '';
   }
   function load(entry) {
     graph = fromConfig(entry.config);
+    origin = `saved:${entry.name}`;
+    stored = graph.nodes.some(n => BLOCKS[n.op]?.stored || n.settings?.weights);
     fit();
     name = entry.name;
     selected = null;
     message = `Opened ${entry.name}.`;
   }
+  // A model running with the band, opened from the live view.
+  async function openModel(model) {
+    try {
+      const opened = await openFrenzModel(model);
+      graph = fromConfig(opened.config);
+      origin = opened.origin;
+      stored = opened.stored;
+      // A saved pipeline is changed in place; any other model is saved as a copy, beside the original.
+      name = opened.saved ?? `${cleanId(opened.config.name ?? model)}-edited`;
+      selected = null;
+      warning = '';
+      if (!opened.config.editor) arrange();
+      else fit();
+      message = opened.saved
+        ? `Opened ${opened.saved}, running with the band. Save and Use to update it there.`
+        : `Opened ${model}, running with the band. Changes are saved as ${name}; Use runs it beside ${model}.`;
+    } catch (error) {
+      message = `Could not open ${model}: ${error}`;
+    }
+  }
+  $effect(() => {
+    if (!isOpen || !request) return;
+    const next = request;
+    request = null;
+    if (next.kind === 'model') openModel(next.name);
+    else {
+      fresh(starter());
+      name = 'my-signal';
+      selected = null;
+      message = 'A new signal: build it here, Try on band, then Use to run it with the band.';
+      fit();
+    }
+  });
   let confirmDelete = $state(null);
   async function removeSaved(entry) {
     if (confirmDelete !== entry.name) {
@@ -469,8 +535,18 @@
               : 'Connect the band through openfrenz first'}>Try on band</button
           >
         {/if}
-        <button class="primary" onclick={save} disabled={!check.ok}>Save</button>
-        <button onclick={() => ((graph = starter()), (name = 'my-pipeline'), (selected = null))}
+        <button onclick={save} disabled={!check.ok}>Save</button>
+        {#if onUse}
+          <button
+            class="primary"
+            onclick={saveAndUse}
+            disabled={!check.ok}
+            title={connected
+              ? 'Save it and run it with the band now, published and in the live view'
+              : 'Save it and run it with the band from the next connection'}>Use</button
+          >
+        {/if}
+        <button onclick={() => (fresh(starter()), (name = 'my-pipeline'), (selected = null))}
           >New</button
         >
         <button class="close" aria-label="Close pipelines" onclick={close}>×</button>
@@ -499,7 +575,7 @@
         {#each saved as entry (entry.name)}
           <div class="saved">
             <button class="open" onclick={() => load(entry)}>{entry.name}</button>
-            {#if onUse}<button title="Run it with the band" onclick={() => onUse(entry.name)}
+            {#if onUse}<button title="Run it with the band" onclick={() => useSaved(entry)}
                 >Use</button
               >{/if}
             <button title="Export as a folder" onclick={() => exportSaved(entry)}>⇩</button>
@@ -564,7 +640,18 @@
       </div>
 
       <aside class="inspector">
-        {#if selectedNode?.kind === 'block'}
+        {#if selectedNode?.kind === 'block' && (!BLOCKS[selectedNode.op] || BLOCKS[selectedNode.op].stored || selectedNode.settings?.weights)}
+          {@const block = BLOCKS[selectedNode.op]}
+          <h3>{block?.label ?? selectedNode.op}</h3>
+          {#if block}<p class="quiet">{block.about}</p>{/if}
+          <p class="quiet">
+            Uses numbers stored with the model it was opened from, so it is shown, not edited. Wires
+            around it can change; saving keeps its numbers.
+          </p>
+          <pre class="stored-settings">{JSON.stringify(selectedNode.settings, null, 2)}</pre>
+          <button class="remove" onclick={() => removeNodes([selectedNode.id])}>Remove block</button
+          >
+        {:else if selectedNode?.kind === 'block'}
           {@const block = BLOCKS[selectedNode.op]}
           <h3>{block.label}</h3>
           <p class="quiet">{block.about}</p>
@@ -754,6 +841,8 @@
     --wire-signal-text: #8dbdf5;
     --wire-features: #c98500;
     --wire-features-text: #f0bd55;
+    --wire-sequence: #9b7be0;
+    --wire-sequence-text: #c3b0f2;
   }
   .canvas {
     position: relative;
@@ -838,6 +927,17 @@
   .remove {
     border-color: var(--color-error);
     color: var(--color-error);
+  }
+  .stored-settings {
+    margin: 0;
+    padding: 0.5rem;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background: var(--color-surface-elevated);
+    color: var(--color-text-secondary);
+    font-size: 0.7rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   .outputs {
     margin: 0;

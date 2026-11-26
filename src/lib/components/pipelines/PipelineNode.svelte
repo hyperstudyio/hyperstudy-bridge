@@ -36,11 +36,15 @@
   >
     <Handle
       type="target"
-      class="dot {block?.reads}"
+      class="dot {[block?.reads].flat()[0]}"
       position={across ? Position.Left : Position.Top}
     />
     <div class="head">
       <span class="chip">{kind}</span>
+      {#if block?.stored || data.stored}<span
+          class="chip stored"
+          title="Uses numbers stored with the model">stored</span
+        >{/if}
       <button
         class="star nodrag"
         class:on={data.output}
@@ -127,6 +131,16 @@
   .card.features {
     --accent: var(--wire-features);
     --accent-text: var(--wire-features-text);
+  }
+  .card.sequence {
+    --accent: var(--wire-sequence);
+    --accent-text: var(--wire-sequence-text);
+  }
+  .chip.stored {
+    margin-right: 0;
+    background: none;
+    color: var(--color-text-secondary);
+    font-weight: 600;
   }
   .card.selected {
     border-color: var(--color-primary);
@@ -216,6 +230,9 @@
   }
   :global(.svelte-flow__handle.dot.features) {
     background: var(--wire-features);
+  }
+  :global(.svelte-flow__handle.dot.sequence) {
+    background: var(--wire-sequence);
   }
   :global(.svelte-flow__handle.dot:hover) {
     scale: 1.35;

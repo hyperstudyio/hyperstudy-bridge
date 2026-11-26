@@ -329,6 +329,8 @@ async fn main() {
             get_frenz_native_status,
             get_frenz_native_recent,
             check_pipeline,
+            open_frenz_model,
+            run_pipeline,
             preview_pipeline,
             stop_pipeline_preview,
             list_pipelines,

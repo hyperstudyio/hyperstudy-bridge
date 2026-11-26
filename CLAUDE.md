@@ -70,6 +70,11 @@ HyperStudy Bridge is a unified, high-performance desktop application that serves
   needing stored numbers are left out.
   The canvas follows HyperStudy's agent cognition editor (dagre Tidy, wires coloured by what they carry, refusals
   explained via `whyNot`); `recipes.js` holds starting pipelines, each checked against openfrenz.
+  From the live view, a model's chart opens its pipeline (`open_frenz_model`, by the name it runs under) and
+  "+ New signal" opens a new one. Use saves it, adds `saved:<name>` to the FRENZ models and, while streaming,
+  starts it at once (`run_pipeline`, `FrenzNative::run_model`), replacing a running copy. A model with stored
+  numbers (`model.safetensors`) keeps them: the window names its origin as `saved:<name>` or `model:<name>`, never
+  a path, and the backend checks, tries and saves with that model's numbers (`pipelines::build`).
 - **Tests**: `src-tauri/tests/frenz_native.rs` replays a synthetic recording; its `real_band` test (ignored by default)
   connects to a band named in `FRENZ_BAND`.
 

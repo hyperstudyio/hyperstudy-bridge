@@ -158,14 +158,13 @@ async fn a_replayed_band_is_published_and_readable() {
 
     // A pipeline from the editor runs on the band, is drawn as `preview`, and is not published.
     let streams_before = native.status().streams.len();
-    let names = native
-        .preview(&serde_json::json!({
-            "step": { "stream": "eeg", "samples": 25 },
-            "nodes": [{ "name": "s", "op": "summary", "in": "eeg", "stats": ["mean"] }],
-            "outputs": ["s"]
-        }))
-        .await
-        .unwrap();
+    let pipeline = frenz_model::Pipeline::from_config(&serde_json::json!({
+        "step": { "stream": "eeg", "samples": 25 },
+        "nodes": [{ "name": "s", "op": "summary", "in": "eeg", "stats": ["mean"] }],
+        "outputs": ["s"]
+    }))
+    .unwrap();
+    let names = native.preview(pipeline).await.unwrap();
     assert_eq!(names.len(), 4);
     tokio::time::sleep(Duration::from_secs(2)).await;
     let preview = native
@@ -180,12 +179,70 @@ async fn a_replayed_band_is_published_and_readable() {
         preview.t.len()
     );
     assert_eq!(native.status().streams.len(), streams_before);
-    assert!(native
-        .preview(&serde_json::json!({ "nodes": [] }))
-        .await
-        .is_err());
     native.stop_preview().await;
     assert!(native.recent(5.0).await.iter().all(|t| t.name != "preview"));
+
+    // The editor opens a running model from the folder it was loaded from.
+    assert_eq!(
+        native.model_dir("my-level").as_deref(),
+        Some(extra.as_path())
+    );
+    assert!(native
+        .model_dir("eog")
+        .unwrap()
+        .join("config.json")
+        .is_file());
+
+    // A pipeline started while connected is published and drawn like the others.
+    let second = dir.join("second");
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::write(
+        second.join("config.json"),
+        r#"{"openfrenz_model": "pipeline", "name": "second", "version": "1",
+            "step": {"stream": "eeg", "samples": 25},
+            "nodes": [{"name": "s", "op": "summary", "in": "eeg", "stats": ["mean"]}],
+            "outputs": ["s"]}"#,
+    )
+    .unwrap();
+    assert_eq!(native.run_model(second.clone()).await.unwrap(), "second");
+    let streams_now = native.status().streams.len();
+    assert_eq!(streams_now, streams_before + 1);
+    assert!(native
+        .status()
+        .streams
+        .contains(&"FRENZT01_SECOND_openfrenz".to_owned()));
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let drawn = native.recent(5.0).await;
+    let added = drawn
+        .iter()
+        .find(|t| t.name == "second")
+        .expect("no output of the model started while connected");
+    assert!(added.t.len() > 3, "it gave {} steps", added.t.len());
+
+    // Changed and run again, a model replaces its running copy: same name, same stream.
+    std::fs::write(
+        extra.join("config.json"),
+        r#"{"openfrenz_model": "pipeline", "name": "my level", "version": "2",
+            "step": {"stream": "eeg", "samples": 25},
+            "nodes": [{"name": "s", "op": "summary", "in": "eeg", "stats": ["mean"]}],
+            "outputs": ["s"]}"#,
+    )
+    .unwrap();
+    assert_eq!(native.run_model(extra.clone()).await.unwrap(), "my-level");
+    assert_eq!(native.status().streams.len(), streams_now);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let replaced = native.recent(5.0).await;
+    let mine = replaced
+        .iter()
+        .find(|t| t.name == "my-level")
+        .expect("the replaced model is not drawn");
+    assert!(
+        mine.channels.iter().all(|c| c.ends_with(":mean")),
+        "{:?}",
+        mine.channels
+    );
+    assert!(mine.t.len() > 3);
+    assert!(native.run_model(dir.join("missing")).await.is_err());
 
     native.stop().await;
     assert_eq!(native.status().state, NativeState::Stopped);

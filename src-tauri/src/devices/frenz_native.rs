@@ -13,6 +13,7 @@
 //! liblsl handles are not `Send`, so every outlet lives on one dedicated thread fed through a channel.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -121,6 +122,10 @@ enum ToLsl {
         stamps: Vec<f64>,
         rows: Vec<Vec<f64>>,
     },
+    /// Closes one stream's outlet: a model replaced while connected.
+    CloseOne {
+        suffix: String,
+    },
     Close,
 }
 
@@ -216,6 +221,9 @@ fn publish(device: String, session: String, commands: mpsc::Receiver<ToLsl>) {
                     }
                 }
             }
+            ToLsl::CloseOne { suffix } => {
+                outlets.remove(&suffix);
+            }
             ToLsl::Close => break,
         }
     }
@@ -245,6 +253,8 @@ struct Shared {
     output_names: StdMutex<BTreeMap<String, Vec<String>>>,
     /// The models running, in order: the name they are drawn under and their LSL suffix.
     models: StdMutex<Vec<(String, String)>>,
+    /// The folder each running model was loaded from, by name: what the pipeline editor opens.
+    dirs: StdMutex<BTreeMap<String, PathBuf>>,
     /// The editor's pipeline under trial: its output names and recent outputs.
     preview: StdMutex<Option<(Vec<String>, Outputs)>>,
     app: Option<AppHandle>,
@@ -290,6 +300,8 @@ struct Session {
     reconnects: bool,
     streams: Arc<Streams>,
     tasks: Vec<JoinHandle<()>>,
+    /// Each model's task, by the name it is drawn under, so that one can be replaced while connected.
+    models: BTreeMap<String, JoinHandle<()>>,
     /// The pipeline being tried in the editor, if any: drawn, never published.
     preview: Option<JoinHandle<()>>,
     lsl: mpsc::Sender<ToLsl>,
@@ -317,6 +329,7 @@ impl FrenzNative {
                 outputs: StdMutex::new(BTreeMap::new()),
                 output_names: StdMutex::new(BTreeMap::new()),
                 models: StdMutex::new(Vec::new()),
+                dirs: StdMutex::new(BTreeMap::new()),
                 preview: StdMutex::new(None),
                 app: None,
             })),
@@ -414,6 +427,7 @@ impl FrenzNative {
             outputs: StdMutex::new(BTreeMap::new()),
             output_names: StdMutex::new(BTreeMap::new()),
             models: StdMutex::new(Vec::new()),
+            dirs: StdMutex::new(BTreeMap::new()),
             preview: StdMutex::new(None),
             app,
         });
@@ -495,7 +509,13 @@ impl FrenzNative {
         let Some(mut session) = self.session.lock().await.take() else {
             return;
         };
-        for task in session.tasks.drain(..).chain(session.preview.take()) {
+        let models = std::mem::take(&mut session.models).into_values();
+        for task in session
+            .tasks
+            .drain(..)
+            .chain(models)
+            .chain(session.preview.take())
+        {
             task.abort();
         }
         let _ = session.lsl.send(ToLsl::Close);
@@ -512,10 +532,9 @@ impl FrenzNative {
         info!(device = "frenz", "openfrenz disconnected");
     }
 
-    /// Runs `config` on the connected band for the pipeline editor, replacing any pipeline already under trial.
+    /// Runs `pipeline` on the connected band for the pipeline editor, replacing any pipeline already under trial.
     /// Its outputs are drawn as the trace `preview` and never published. Returns their names.
-    pub async fn preview(&self, config: &serde_json::Value) -> Result<Vec<String>, String> {
-        let pipeline = Pipeline::from_config(config).map_err(|e| e.to_string())?;
+    pub async fn preview(&self, pipeline: Pipeline) -> Result<Vec<String>, String> {
         let names = pipeline.spec().outputs.clone();
         let mut session = self.session.lock().await;
         let Some(session) = session.as_mut() else {
@@ -557,6 +576,103 @@ impl FrenzNative {
         if let Ok(mut preview) = self.shared().preview.lock() {
             *preview = None;
         }
+    }
+
+    /// The folder the running model `name` was loaded from.
+    pub fn model_dir(&self, name: &str) -> Option<PathBuf> {
+        self.shared().dirs.lock().ok()?.get(name).cloned()
+    }
+
+    /// The folders of every running model.
+    pub fn model_dirs(&self) -> Vec<PathBuf> {
+        self.shared()
+            .dirs
+            .lock()
+            .map(|d| d.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Starts the model in `dir` on the connected band, published and drawn like the others. A model already
+    /// running from the same folder is replaced, keeping its name and stream. Returns the name it runs under.
+    pub async fn run_model(&self, dir: PathBuf) -> Result<String, String> {
+        let shared = self.shared();
+        let same = |a: &Path, b: &Path| {
+            a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+        };
+        let replacing = shared.dirs.lock().ok().and_then(|dirs| {
+            dirs.iter()
+                .find(|(_, d)| same(d, &dir))
+                .map(|(name, _)| name.clone())
+        });
+        let found = {
+            let dir = dir.clone();
+            tokio::task::spawn_blocking(move || {
+                let fingerprint = frenz_model::fingerprint_dir(&dir)?;
+                Pipeline::from_dir(&dir).map(|p| (p, fingerprint))
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?
+        };
+        let (pipeline, fingerprint) = found;
+        let mut session = self.session.lock().await;
+        let Some(session) = session.as_mut() else {
+            return Err("Connect the band through openfrenz to run a pipeline on it.".into());
+        };
+        let Some(band) = session.band.as_ref() else {
+            return Err("The band is not connected.".into());
+        };
+        let running = shared.models.lock().map(|m| m.clone()).unwrap_or_default();
+        let (name, suffix) = match &replacing {
+            Some(name) => {
+                let suffix = running
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, s)| s.clone())
+                    .unwrap_or_else(|| suffix_of(name));
+                (name.clone(), suffix)
+            }
+            None => {
+                let taken: Vec<String> = running.into_iter().map(|(n, _)| n).collect();
+                let name = unique_name(&pipeline.spec().name, &taken);
+                let suffix = suffix_of(&name);
+                (name, suffix)
+            }
+        };
+        if replacing.is_some() {
+            if let Some(task) = session.models.remove(&name) {
+                task.abort();
+            }
+            let _ = session.lsl.send(ToLsl::CloseOne {
+                suffix: suffix.clone(),
+            });
+            if let Ok(mut models) = shared.models.lock() {
+                models.retain(|(n, _)| n != &name);
+            }
+            if let Ok(mut outputs) = shared.outputs.lock() {
+                outputs.remove(&name);
+            }
+        }
+        let loaded = Loaded {
+            source: format!(
+                "model {} {} (files {fingerprint})",
+                dir.display(),
+                pipeline.spec().version
+            ),
+            name: name.clone(),
+            suffix,
+            pipeline,
+            dir,
+        };
+        let (stream, task) = start_model(loaded, band, session.reconnects, &session.lsl, &shared)?;
+        session.models.insert(name.clone(), task);
+        shared.update(|s| {
+            if !s.streams.contains(&stream) {
+                s.streams.push(stream);
+            }
+        });
+        info!(device = "frenz", "model {name} started while connected");
+        Ok(name)
     }
 
     /// The last `seconds` of every published stream and model output, for drawing.
@@ -642,6 +758,39 @@ struct Loaded {
     suffix: String,
     pipeline: Pipeline,
     source: String,
+    /// The folder it was loaded from.
+    dir: PathBuf,
+}
+
+/// `base` made into a model name (letters, digits and `-`), distinct from `taken`.
+fn unique_name(base: &str, taken: &[String]) -> String {
+    let base: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let base = if base.is_empty() {
+        "model".to_owned()
+    } else {
+        base
+    };
+    let mut name = base.clone();
+    let mut n = 2;
+    while taken.contains(&name) {
+        name = format!("{base}-{n}");
+        n += 1;
+    }
+    name
+}
+
+/// The LSL suffix of an extra model: its name in capitals.
+fn suffix_of(name: &str) -> String {
+    format!("_{}_openfrenz", name.to_ascii_uppercase().replace('-', "_"))
 }
 
 /// A model source the configuration may name: a Hugging Face repository (`owner/name`,
@@ -668,12 +817,15 @@ async fn load_models(extra: Vec<String>, token: Option<String>) -> (Vec<Loaded>,
         let mut loaded: Vec<Loaded> = Vec::new();
         let mut errors = Vec::new();
         for (model, suffix) in MODELS {
-            match frenz_model::resolve(model).and_then(|dir| Pipeline::from_dir(&dir)) {
-                Ok(pipeline) => loaded.push(Loaded {
+            match frenz_model::resolve(model)
+                .and_then(|dir| Pipeline::from_dir(&dir).map(|p| (p, dir)))
+            {
+                Ok((pipeline, dir)) => loaded.push(Loaded {
                     name: model.to_owned(),
                     suffix: suffix.to_owned(),
                     source: format!("model {model} {}", pipeline.spec().version),
                     pipeline,
+                    dir,
                 }),
                 Err(e) => errors.push(format!("{model}: {e}")),
             }
@@ -687,9 +839,9 @@ async fn load_models(extra: Vec<String>, token: Option<String>) -> (Vec<Loaded>,
             }
             let pipeline = frenz_model::resolve_with(source, token.as_deref()).and_then(|dir| {
                 let fingerprint = frenz_model::fingerprint_dir(&dir)?;
-                Pipeline::from_dir(&dir).map(|p| (p, fingerprint))
+                Pipeline::from_dir(&dir).map(|p| (p, fingerprint, dir))
             });
-            let (pipeline, fingerprint) = match pipeline {
+            let (pipeline, fingerprint, dir) = match pipeline {
                 Ok(found) => found,
                 Err(e) => {
                     warn!(device = "frenz", "model {source} not loaded: {e}");
@@ -698,30 +850,9 @@ async fn load_models(extra: Vec<String>, token: Option<String>) -> (Vec<Loaded>,
                 }
             };
             // Named after the model, made unique; the suffix is the name in capitals.
-            let base: String = pipeline
-                .spec()
-                .name
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '-' {
-                        c
-                    } else {
-                        '-'
-                    }
-                })
-                .collect();
-            let base = if base.is_empty() {
-                "model".to_owned()
-            } else {
-                base
-            };
-            let mut name = base.clone();
-            let mut n = 2;
-            while loaded.iter().any(|l| l.name == name) {
-                name = format!("{base}-{n}");
-                n += 1;
-            }
-            let suffix = format!("_{}_openfrenz", name.to_ascii_uppercase().replace('-', "_"));
+            let taken: Vec<String> = loaded.iter().map(|l| l.name.clone()).collect();
+            let name = unique_name(&pipeline.spec().name, &taken);
+            let suffix = suffix_of(&name);
             loaded.push(Loaded {
                 source: format!(
                     "model {source} {} (files {fingerprint})",
@@ -730,6 +861,7 @@ async fn load_models(extra: Vec<String>, token: Option<String>) -> (Vec<Loaded>,
                 name,
                 suffix,
                 pipeline,
+                dir,
             });
         }
         (loaded, errors)
@@ -761,74 +893,20 @@ async fn open(
             .spawn(move || publish(device, session_id, commands))
             .map_err(|e| format!("could not start the LSL thread: {e}"))?
     };
-    let open_outlet = |suffix: &str,
-                       channels: Vec<String>,
-                       rate_hz: f64,
-                       source: String|
-     -> Result<String, String> {
-        let (reply, answer) = mpsc::channel();
-        lsl.send(ToLsl::Open {
-            suffix: suffix.to_owned(),
-            channels,
-            rate_hz,
-            source,
-            reply,
-        })
-        .map_err(|_| "the LSL thread stopped".to_owned())?;
-        answer
-            .recv_timeout(Duration::from_secs(10))
-            .map_err(|_| "the LSL thread did not answer".to_owned())?
+    let open_outlet = |suffix: &str, channels: Vec<String>, rate_hz: f64, source: String| {
+        open_outlet(&lsl, suffix, channels, rate_hz, source)
     };
 
     let mut published = Vec::new();
     let mut tasks = Vec::new();
 
     // Models first: on a replay each must subscribe before the recording starts to play.
-    for Loaded {
-        name: model,
-        suffix,
-        pipeline,
-        source,
-    } in models
-    {
-        let names = pipeline.spec().outputs.clone();
-        let name = open_outlet(&suffix, names.clone(), 0.0, source)?;
-        published.push(name.clone());
-        if let Ok(mut all) = shared.output_names.lock() {
-            all.insert(model.clone(), names);
-        }
-        if let Ok(mut running) = shared.models.lock() {
-            running.push((model.clone(), suffix.clone()));
-        }
-        let mut live =
-            Live::new(pipeline, &band, reconnects).map_err(|e| format!("{model}: {e}"))?;
-        let (lsl, shared) = (lsl.clone(), shared.clone());
-        tasks.push(tokio::spawn(async move {
-            loop {
-                match live.next().await {
-                    Ok(Some(output)) => {
-                        shared.count(&name, 1);
-                        if let Ok(mut all) = shared.outputs.lock() {
-                            let kept = all.entry(model.clone()).or_default();
-                            kept.push_back((output.t, output.values.clone()));
-                            while kept.len() > KEEP_OUTPUTS {
-                                kept.pop_front();
-                            }
-                        }
-                        let _ = lsl.send(ToLsl::Push {
-                            suffix: suffix.clone(),
-                            stamps: vec![output.t],
-                            rows: vec![output.values],
-                        });
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        warn!(device = "frenz", "model {model} stopped: {e}");
-                        break;
-                    }
-                }
-            }
-        }));
+    let mut models_running = BTreeMap::new();
+    for loaded in models {
+        let model = loaded.name.clone();
+        let (name, task) = start_model(loaded, &band, reconnects, &lsl, &shared)?;
+        published.push(name);
+        models_running.insert(model, task);
     }
 
     // The band's own streams: one buffer that both the outlets and the window read.
@@ -902,8 +980,89 @@ async fn open(
         reconnects,
         streams: buffers,
         tasks,
+        models: models_running,
         preview: None,
         lsl,
         thread: Some(thread),
     })
+}
+
+/// Asks the publishing thread for an outlet; returns the stream's name.
+fn open_outlet(
+    lsl: &mpsc::Sender<ToLsl>,
+    suffix: &str,
+    channels: Vec<String>,
+    rate_hz: f64,
+    source: String,
+) -> Result<String, String> {
+    let (reply, answer) = mpsc::channel();
+    lsl.send(ToLsl::Open {
+        suffix: suffix.to_owned(),
+        channels,
+        rate_hz,
+        source,
+        reply,
+    })
+    .map_err(|_| "the LSL thread stopped".to_owned())?;
+    answer
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| "the LSL thread did not answer".to_owned())?
+}
+
+/// Opens a model's outlet and starts it on `band`: each output is kept for drawing and published. Returns the
+/// stream's name and the task.
+fn start_model(
+    loaded: Loaded,
+    band: &Band,
+    reconnects: bool,
+    lsl: &mpsc::Sender<ToLsl>,
+    shared: &Arc<Shared>,
+) -> Result<(String, JoinHandle<()>), String> {
+    let Loaded {
+        name: model,
+        suffix,
+        pipeline,
+        source,
+        dir,
+    } = loaded;
+    let names = pipeline.spec().outputs.clone();
+    let name = open_outlet(lsl, &suffix, names.clone(), 0.0, source)?;
+    if let Ok(mut all) = shared.output_names.lock() {
+        all.insert(model.clone(), names);
+    }
+    if let Ok(mut running) = shared.models.lock() {
+        running.push((model.clone(), suffix.clone()));
+    }
+    if let Ok(mut dirs) = shared.dirs.lock() {
+        dirs.insert(model.clone(), dir);
+    }
+    let mut live = Live::new(pipeline, band, reconnects).map_err(|e| format!("{model}: {e}"))?;
+    let (lsl, shared, stream) = (lsl.clone(), shared.clone(), name.clone());
+    let task = tokio::spawn(async move {
+        loop {
+            match live.next().await {
+                Ok(Some(output)) => {
+                    shared.count(&stream, 1);
+                    if let Ok(mut all) = shared.outputs.lock() {
+                        let kept = all.entry(model.clone()).or_default();
+                        kept.push_back((output.t, output.values.clone()));
+                        while kept.len() > KEEP_OUTPUTS {
+                            kept.pop_front();
+                        }
+                    }
+                    let _ = lsl.send(ToLsl::Push {
+                        suffix: suffix.clone(),
+                        stamps: vec![output.t],
+                        rows: vec![output.values],
+                    });
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    warn!(device = "frenz", "model {model} stopped: {e}");
+                    break;
+                }
+            }
+        }
+    });
+    Ok((name, task))
 }

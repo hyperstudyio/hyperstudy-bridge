@@ -9,6 +9,7 @@
     checkFrenzBridgeAvailable,
     startFrenzNative,
     getFrenzNativeStatus,
+    runPipeline,
     FRENZ_OPENFRENZ,
   } from '../services/tauri.js';
   import { getSecret } from '../services/secrets.js';
@@ -56,7 +57,9 @@
   let showPipelines = $state(false);
 
   // A saved pipeline chosen in the editor joins the models run with the band from the next connection.
-  function usePipeline(name) {
+  // A saved pipeline put to use: added to the FRENZ models, so it runs at every connection, and started now if
+  // the band is streaming (replacing a running copy). Returns what happened, for the editor to say.
+  async function usePipeline(name) {
     const models = (device.config?.models || '')
       .split(/[\s,]+/)
       .map(m => m.trim())
@@ -64,6 +67,23 @@
     const entry = `saved:${name}`;
     if (!models.includes(entry))
       onConfigUpdate(device.id, { ...device.config, models: [...models, entry].join(', ') });
+    if (frenzNativeStatus.state !== 'streaming')
+      return `${name} will run with the band from the next connection.`;
+    const result = await runPipeline(name);
+    return result?.success
+      ? `${name} is running with the band as ${result.data}, published and in the live view.`
+      : `Added to the FRENZ models, but it could not start now: ${result?.error ?? 'unknown error'}`;
+  }
+
+  // What the pipeline editor opens next: a running model ({ kind: 'model', name }) or a new pipeline.
+  let pipelineRequest = $state(null);
+  function editModel(name) {
+    pipelineRequest = { kind: 'model', name };
+    showPipelines = true;
+  }
+  function newSignal() {
+    pipelineRequest = { kind: 'new' };
+    showPipelines = true;
   }
 
   let frenzConnecting = $state(false);
@@ -745,9 +765,15 @@
 </div>
 
 {#if device.id === 'frenz'}
-  <FrenzLivePanel bind:isOpen={showLivePanel} device={frenzDeviceId || ''} />
+  <FrenzLivePanel
+    bind:isOpen={showLivePanel}
+    device={frenzDeviceId || ''}
+    onEdit={editModel}
+    onNew={newSignal}
+  />
   <PipelineEditor
     bind:isOpen={showPipelines}
+    bind:request={pipelineRequest}
     connected={frenzNativeStatus.state === 'streaming'}
     onUse={usePipeline}
   />

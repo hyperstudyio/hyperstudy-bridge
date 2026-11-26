@@ -453,20 +453,126 @@ fn data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         .map_err(|e| format!("No data folder: {e}"))
 }
 
+/// The folder of the model a pipeline was opened from, whose stored numbers it may use. The window names it,
+/// never by path: `saved:<name>` for a saved pipeline, `model:<name>` for a model running with the band.
+fn origin_dir(
+    origin: Option<&str>,
+    state: &AppState,
+    app: &AppHandle,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(origin) = origin.filter(|o| !o.is_empty()) else {
+        return Ok(None);
+    };
+    if let Some(name) = origin.strip_prefix("saved:") {
+        return crate::pipelines::path(&data_dir(app)?, name).map(Some);
+    }
+    if let Some(name) = origin.strip_prefix("model:") {
+        return state
+            .frenz_native
+            .model_dir(name)
+            .map(Some)
+            .ok_or_else(|| format!("{name} is no longer running."));
+    }
+    Err(format!("Unknown origin {origin}."))
+}
+
+/// A model running with the band, as the pipeline editor opens it.
+#[derive(Debug, Serialize)]
+pub struct OpenedModel {
+    /// The name it runs under.
+    pub name: String,
+    pub config: serde_json::Value,
+    /// Where its stored numbers come from, for checking, trying and saving (see `origin_dir`).
+    pub origin: String,
+    /// Whether it has stored numbers (trained weights, a calibration).
+    pub stored: bool,
+    /// The saved pipeline it is, if it is one: saving under this name changes it.
+    pub saved: Option<String>,
+}
+
+/// The pipeline of the model `name` running with the band, for the editor to show or change.
+#[tauri::command]
+pub async fn open_frenz_model(
+    name: String,
+    state: State<'_, Arc<AppState>>,
+    app_handle: AppHandle,
+) -> Result<OpenedModel, String> {
+    let dir = state
+        .frenz_native
+        .model_dir(&name)
+        .ok_or_else(|| format!("{name} is not running."))?;
+    let text = std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?;
+    let config: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let saved = data_dir(&app_handle)
+        .ok()
+        .and_then(|data| crate::pipelines::saved_name(&data, &dir));
+    Ok(OpenedModel {
+        origin: match &saved {
+            Some(saved) => format!("saved:{saved}"),
+            None => format!("model:{name}"),
+        },
+        stored: dir.join(crate::pipelines::WEIGHTS).is_file(),
+        name,
+        config,
+        saved,
+    })
+}
+
 /// Whether openfrenz accepts a pipeline, what it gives, and what is wrong.
 #[tauri::command]
-pub async fn check_pipeline(config: serde_json::Value) -> Result<crate::pipelines::Check, ()> {
-    Ok(crate::pipelines::check(&config))
+pub async fn check_pipeline(
+    config: serde_json::Value,
+    origin: Option<String>,
+    state: State<'_, Arc<AppState>>,
+    app_handle: AppHandle,
+) -> Result<crate::pipelines::Check, ()> {
+    Ok(match origin_dir(origin.as_deref(), &state, &app_handle) {
+        Ok(dir) => crate::pipelines::check_with(&config, dir.as_deref()),
+        Err(e) => crate::pipelines::Check {
+            ok: false,
+            outputs: Vec::new(),
+            inputs: Vec::new(),
+            error: Some(e),
+            node: None,
+        },
+    })
 }
 
 /// Runs a pipeline on the band connected through openfrenz, drawn as `preview` and not published.
 #[tauri::command]
 pub async fn preview_pipeline(
     config: serde_json::Value,
+    origin: Option<String>,
     state: State<'_, Arc<AppState>>,
+    app_handle: AppHandle,
 ) -> Result<CommandResult<Vec<String>>, ()> {
-    Ok(match state.frenz_native.preview(&config).await {
+    let pipeline = origin_dir(origin.as_deref(), &state, &app_handle).and_then(|dir| {
+        crate::pipelines::build(&config, dir.as_deref()).map_err(|e| e.to_string())
+    });
+    let pipeline = match pipeline {
+        Ok(pipeline) => pipeline,
+        Err(e) => return Ok(CommandResult::error(e)),
+    };
+    Ok(match state.frenz_native.preview(pipeline).await {
         Ok(names) => CommandResult::success(names),
+        Err(e) => CommandResult::error(e),
+    })
+}
+
+/// Runs the saved pipeline `name` with the band now, published and drawn like the other models; a running
+/// copy of it is replaced. Returns the name it runs under.
+#[tauri::command]
+pub async fn run_pipeline(
+    name: String,
+    state: State<'_, Arc<AppState>>,
+    app_handle: AppHandle,
+) -> Result<CommandResult<String>, ()> {
+    let dir = match data_dir(&app_handle).and_then(|data| crate::pipelines::path(&data, &name)) {
+        Ok(dir) => dir,
+        Err(e) => return Ok(CommandResult::error(e)),
+    };
+    Ok(match state.frenz_native.run_model(dir).await {
+        Ok(running) => CommandResult::success(running),
         Err(e) => CommandResult::error(e),
     })
 }
@@ -487,9 +593,12 @@ pub async fn list_pipelines(app_handle: AppHandle) -> Result<Vec<crate::pipeline
 pub async fn save_pipeline(
     name: String,
     config: serde_json::Value,
+    origin: Option<String>,
+    state: State<'_, Arc<AppState>>,
     app_handle: AppHandle,
 ) -> Result<crate::pipelines::Check, String> {
-    crate::pipelines::save(&data_dir(&app_handle)?, &name, &config)
+    let origin = origin_dir(origin.as_deref(), &state, &app_handle)?;
+    crate::pipelines::save(&data_dir(&app_handle)?, &name, &config, origin.as_deref())
 }
 
 #[tauri::command]

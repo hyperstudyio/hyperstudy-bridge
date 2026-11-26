@@ -3,7 +3,7 @@
 // A graph: { step: { stream, seconds }, nodes: [{ id, kind: 'stream' | 'block', stream?, op?, settings?, position }],
 //            edges: [{ id, source, target }], outputs: [node id] }.
 
-import { BLOCKS, STREAMS } from './blocks.js';
+import { BLOCKS, STREAMS, readsKind } from './blocks.js';
 
 /** A node id that openfrenz accepts as a node name: letters, digits, _ and -. */
 export function cleanId(text) {
@@ -56,10 +56,10 @@ export function whyNot(nodes, edges, source, target) {
   if (source === target) return 'A block cannot read its own output.';
   if (to.kind === 'stream') return 'Streams come from the band; nothing feeds them.';
   const block = BLOCKS[to.op];
-  if (gives(from) !== block.reads) {
-    return `${block.label} reads ${block.reads === 'signal' ? 'a signal' : 'features'}, and ${from.id} gives ${
-      gives(from) === 'signal' ? 'a signal' : 'features'
-    }.`;
+  if (!block) return `openfrenz's ${to.op} block is not known to this editor.`;
+  if (!readsKind(block, gives(from))) {
+    const kinds = [block.reads].flat().map(say).join(' or ');
+    return `${block.label} reads ${kinds}, and ${from.id} gives ${say(gives(from))}.`;
   }
   const existing = edges.filter(e => e.target === target);
   if (existing.some(e => e.source === source)) return 'They are already connected.';
@@ -68,6 +68,9 @@ export function whyNot(nodes, edges, source, target) {
   if (!ordered(nodes, [...edges, { source, target }])) return 'That would make a loop.';
   return null;
 }
+
+const say = kind =>
+  ({ signal: 'a signal', features: 'features', sequence: 'a sequence' })[kind] ?? kind;
 
 /** Whether `source` may feed `target`: what one gives is what the other reads, and one input unless it takes many. */
 export function canConnect(nodes, edges, source, target) {

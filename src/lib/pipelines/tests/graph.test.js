@@ -146,3 +146,31 @@ describe('tidying', () => {
       expect(across.get(e.target).x).toBeGreaterThan(across.get(e.source).x);
   });
 });
+
+describe('models with stored numbers', () => {
+  it('shows their blocks without offering them, and wires them by what they read', () => {
+    expect(Object.values(palette()).flat()).not.toContain('network');
+    const graph = fromConfig({
+      step: { stream: 'eeg', samples: 250 },
+      nodes: [
+        { name: 'p', op: 'band_power', in: 'eeg', bands: [[4, 8]] },
+        { name: 'z', op: 'normalize', in: 'p', weights: 'norm' },
+        { name: 'h', op: 'history', in: 'z', steps: 4 },
+        { name: 'net', op: 'network', in: 'h', layers: [] },
+      ],
+      outputs: ['net'],
+    });
+    expect(graph.nodes.find(n => n.id === 'z').settings.weights).toBe('norm');
+    expect(whyNot(graph.nodes, [], 'h', 'net')).toBeNull();
+    expect(whyNot(graph.nodes, [], 'z', 'net')).toBeNull();
+    expect(whyNot(graph.nodes, [], 'eeg', 'net')).toMatch(/reads features or a sequence/);
+    expect(whyNot(graph.nodes, [], 'h', 'z')).toMatch(/gives a sequence/);
+    // Opened and saved again, its stored blocks keep every setting.
+    expect(toConfig(graph, 'focus').nodes.find(n => n.name === 'net')).toEqual({
+      name: 'net',
+      op: 'network',
+      in: 'h',
+      layers: [],
+    });
+  });
+});

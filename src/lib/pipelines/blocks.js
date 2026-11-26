@@ -1,6 +1,7 @@
 // The openfrenz blocks the pipeline editor offers, with the settings each takes. Mirrors openfrenz's
-// docs/MODELS.md "Blocks" table; blocks that need stored numbers (asr, network, normalize with weights) are left
-// out, since a pipeline made here has no model.safetensors.
+// docs/MODELS.md "Blocks" table. Blocks that need stored numbers (asr, history and network; normalize with
+// weights) are not offered, since a pipeline made here has no model.safetensors; they are known (`stored`) so that
+// a model opened from the band, such as a trained one, can be shown and rewired around them.
 
 /** The band's streams a pipeline can read, with their channels and sample rates. */
 export const STREAMS = {
@@ -280,12 +281,45 @@ export const BLOCKS = {
       number('warmup_steps', 'Warm-up (steps)', 2),
     ],
   },
+  asr: {
+    group: 'Stored',
+    stored: true,
+    label: 'Artifact removal (ASR)',
+    reads: 'signal',
+    gives: 'signal',
+    about: 'Removes large, brief disturbances, judged against a calibration stored with the model.',
+    settings: [],
+  },
+  history: {
+    group: 'Stored',
+    stored: true,
+    label: 'History',
+    reads: 'features',
+    gives: 'sequence',
+    about: 'The last few steps of features, for a network to read.',
+    settings: [],
+  },
+  network: {
+    group: 'Stored',
+    stored: true,
+    label: 'Network',
+    reads: ['features', 'sequence'],
+    gives: 'features',
+    about: 'A trained network, with its weights stored with the model.',
+    settings: [],
+  },
 };
 
-/** Block names by group, for the palette. */
+/** Whether `block` reads what `kind` is. */
+export function readsKind(block, kind) {
+  return Array.isArray(block.reads) ? block.reads.includes(kind) : block.reads === kind;
+}
+
+/** Block names by group, for the palette; blocks that need stored numbers are not offered. */
 export function palette() {
   const groups = {};
-  for (const [op, block] of Object.entries(BLOCKS)) (groups[block.group] ??= []).push(op);
+  for (const [op, block] of Object.entries(BLOCKS))
+    if (!block.stored) (groups[block.group] ??= []).push(op);
   return groups;
 }
 

@@ -23,7 +23,12 @@
     modelCharts,
   } from '../devices/frenzTraces.js';
 
-  let { isOpen = $bindable(false), device = '' } = $props();
+  // onEdit(model) opens a chart's model in the pipeline editor; onNew() opens the editor on a new pipeline.
+  let { isOpen = $bindable(false), device = '', onEdit = null, onNew = null } = $props();
+
+  // The model each chart draws, whose pipeline the editor can open. EEG and pulse are the band's own streams.
+  const MODEL_OF = { power: 'eeg-power', eyes: 'eog', brow: 'brow-emg', head: 'head' };
+  const modelOf = id => (id.startsWith('model:') ? id.slice('model:'.length) : MODEL_OF[id]);
 
   // One hue per series, in a fixed order, checked for colour-blind separation on this app's dark surface.
   const HUES = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181'];
@@ -413,6 +418,14 @@
                 <h3>{about.title} <span>{about.note}</span></h3>
               </button>
               <div class="chart-actions">
+                {#if onEdit && modelOf(chart.id)}
+                  <button
+                    class="edit"
+                    title="Open its pipeline in the editor"
+                    aria-label="Open the pipeline of {about.title}"
+                    onclick={() => onEdit(modelOf(chart.id))}>✎ Pipeline</button
+                  >
+                {/if}
                 <button
                   aria-label="Remove {about.title}"
                   onclick={() => {
@@ -429,6 +442,9 @@
           </section>
         {/each}
         <div class="chart-add">
+          {#if onNew}
+            <button class="new-signal" onclick={() => onNew()}>+ New signal</button>
+          {/if}
           {#if removed.length}
             <select
               aria-label="Add a chart"
@@ -632,6 +648,21 @@
     gap: 0.5rem;
     justify-content: flex-end;
     padding-top: 0.25rem;
+  }
+  .chart-add .new-signal {
+    margin-right: auto;
+    border-color: color-mix(in srgb, var(--color-primary) 55%, transparent);
+    color: var(--color-primary);
+  }
+  .chart-add .new-signal:hover {
+    background: color-mix(in srgb, var(--color-primary) 12%, var(--color-surface-elevated));
+  }
+  .chart-actions .edit {
+    font-size: 0.72rem;
+  }
+  .chart-actions .edit:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
   }
   .chart h3 span {
     margin-left: 0.4rem;
