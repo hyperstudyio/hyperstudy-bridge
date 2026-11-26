@@ -523,6 +523,10 @@
       message = String(error);
     }
   }
+  // Saves what is being edited, then exports it.
+  async function exportCurrent() {
+    if (await save()) await exportSaved({ name });
+  }
   async function exportSaved(entry) {
     const folder = await chooseFolder({ directory: true, title: 'Export the pipeline into…' });
     if (!folder) return;
@@ -600,6 +604,12 @@
           >
         {/if}
         <button onclick={save} disabled={!check.ok}>Save</button>
+        <button
+          onclick={exportCurrent}
+          disabled={!check.ok}
+          title="Save it, then export it as a folder: config.json and a model card, ready to share or upload"
+          >Export…</button
+        >
         {#if onUse}
           <button
             class="primary"
@@ -661,17 +671,26 @@
                 ? `An edited copy of ${entry.config.editor.replaces}`
                 : entry.name}>{entry.name}</button
             >
-            {#if onUse}<button title="Run it with the band" onclick={() => useSaved(entry)}
-                >Use</button
-              >{/if}
-            <button title="Export as a folder" onclick={() => exportSaved(entry)}>⇩</button>
-            <button
-              title="Delete"
-              aria-label="Delete {entry.name}"
-              class:confirm={confirmDelete === entry.name}
-              onclick={() => removeSaved(entry)}
-              >{confirmDelete === entry.name ? 'Delete?' : '×'}</button
-            >
+            <div class="saved-actions">
+              {#if onUse}<button
+                  title="Run it with the band"
+                  aria-label="Use {entry.name}"
+                  onclick={() => useSaved(entry)}>Use</button
+                >{/if}
+              <button
+                title="Export as a folder: config.json and a model card"
+                aria-label="Export {entry.name}"
+                onclick={() => exportSaved(entry)}>Export</button
+              >
+              <button
+                title="Delete"
+                aria-label="Delete {entry.name}"
+                class="delete"
+                class:confirm={confirmDelete === entry.name}
+                onclick={() => removeSaved(entry)}
+                >{confirmDelete === entry.name ? 'Delete?' : 'Delete'}</button
+              >
+            </div>
           </div>
         {:else}
           <p class="quiet">None yet.</p>
@@ -922,20 +941,40 @@
     padding: 0.1rem 0.5rem;
     font-size: 0.72rem;
   }
+  /* Each saved pipeline: its name (click to open), then what can be done with it. */
   .saved {
+    display: grid;
+    gap: 0.3rem;
+    padding: 0.4rem;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+  }
+  .saved .open {
+    overflow: hidden;
+    border: none;
+    background: none;
+    padding: 0;
+    color: var(--color-text-primary);
+    font-family: ui-monospace, monospace;
+    font-size: 0.75rem;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .saved .open:hover {
+    color: var(--color-primary);
+  }
+  .saved-actions {
     display: flex;
     gap: 0.25rem;
   }
-  .saved .open {
+  .saved-actions button {
     flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    padding: 0.15rem 0.3rem;
+    font-size: 0.7rem;
   }
-  .saved button {
-    padding: 0.2rem 0.45rem;
-    font-size: 0.75rem;
-  }
-  .saved .confirm {
+  .saved-actions .delete:hover,
+  .saved-actions .confirm {
     border-color: var(--color-error);
     color: var(--color-error);
   }
