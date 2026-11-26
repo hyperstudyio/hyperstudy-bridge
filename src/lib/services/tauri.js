@@ -168,8 +168,10 @@ export function scanFrenzNative() {
  * private ones from the system credential store itself.
  * @returns {Promise<{success: boolean, data?: string, error?: string}>}
  */
-export function startFrenzNative(deviceId, models = []) {
-  return frenzNative('start_frenz_native', { deviceId, models }, e => ({
+// `replacements`: edited copies kept in the configuration, each in place of a model ({ 'brow-emg':
+// 'saved:brow-emg-edited' }).
+export function startFrenzNative(deviceId, models = [], replacements = {}) {
+  return frenzNative('start_frenz_native', { deviceId, models, replacements }, e => ({
     success: false,
     error: String(e),
   }));
@@ -265,9 +267,20 @@ export function openFrenzModel(name) {
   return invoke('open_frenz_model', { name });
 }
 
-/** Runs a saved pipeline with the band now, replacing a running copy: { success, data: name, error }. */
-export function runPipeline(name) {
-  return frenzNative('run_pipeline', { name }, e => ({ success: false, error: String(e) }));
+/**
+ * Runs a saved pipeline with the band now, replacing a running copy, or in place of the model `insteadOf`:
+ * { success, data: name, error }.
+ */
+export function runPipeline(name, insteadOf = null) {
+  return frenzNative('run_pipeline', { name, insteadOf }, e => ({
+    success: false,
+    error: String(e),
+  }));
+}
+
+/** Puts back the model an edited copy runs in place of, on the same stream. */
+export function revertFrenzModel(name) {
+  return frenzNative('revert_frenz_model', { name }, e => ({ success: false, error: String(e) }));
 }
 
 export function stopPipelinePreview() {

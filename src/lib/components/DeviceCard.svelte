@@ -10,6 +10,7 @@
     startFrenzNative,
     getFrenzNativeStatus,
     runPipeline,
+    revertFrenzModel,
     FRENZ_OPENFRENZ,
   } from '../services/tauri.js';
   import { getSecret } from '../services/secrets.js';
@@ -59,7 +60,25 @@
   // A saved pipeline chosen in the editor joins the models run with the band from the next connection.
   // A saved pipeline put to use: added to the FRENZ models, so it runs at every connection, and started now if
   // the band is streaming (replacing a running copy). Returns what happened, for the editor to say.
-  async function usePipeline(name) {
+  // Edited copies kept in the configuration, each in place of a model: { 'brow-emg': 'saved:brow-emg-edited' }.
+  const replacements = $derived(device.config?.replacements ?? {});
+
+  // A saved pipeline put to use. An edited copy of a model (`replaces`) runs in that model's place, on its
+  // stream: written to the configuration so it does so at every connection, and swapped in now if the band is
+  // streaming. Any other is added to the FRENZ models and started now. Returns what happened, for the editor.
+  async function usePipeline(name, replaces = null) {
+    if (replaces) {
+      onConfigUpdate(device.id, {
+        ...device.config,
+        replacements: { ...replacements, [replaces]: `saved:${name}` },
+      });
+      if (frenzNativeStatus.state !== 'streaming')
+        return `${name} will run in place of ${replaces} from the next connection. Revert puts ${replaces} back.`;
+      const result = await runPipeline(name, replaces);
+      return result?.success
+        ? `${name} now runs in place of ${replaces}, on its stream, now and at every connection. Revert puts ${replaces} back; ${name} stays saved.`
+        : `Kept in the configuration, but it could not start now: ${result?.error ?? 'unknown error'}`;
+    }
     const models = (device.config?.models || '')
       .split(/[\s,]+/)
       .map(m => m.trim())
@@ -73,6 +92,21 @@
     return result?.success
       ? `${name} is running with the band as ${result.data}, published and in the live view.`
       : `Added to the FRENZ models, but it could not start now: ${result?.error ?? 'unknown error'}`;
+  }
+
+  // Puts a model back in place of its edited copy: from the configuration, and now if the band is streaming. The
+  // copy stays saved until deleted.
+  async function revertModel(name) {
+    const copy = replacements[name]?.replace(/^saved:/, '') ?? frenzNativeStatus.stand_ins?.[name];
+    const rest = { ...replacements };
+    delete rest[name];
+    onConfigUpdate(device.id, { ...device.config, replacements: rest });
+    if (frenzNativeStatus.state === 'streaming' && frenzNativeStatus.stand_ins?.[name]) {
+      const result = await revertFrenzModel(name);
+      if (!result?.success)
+        return `Could not put ${name} back now: ${result?.error ?? 'unknown error'}`;
+    }
+    return `${name} is back${copy ? `; ${copy} stays saved` : ''}.`;
   }
 
   // What the pipeline editor opens next: a running model ({ kind: 'model', name }) or a new pipeline.
@@ -357,7 +391,7 @@
           .split(/[\s,]+/)
           .map(m => m.trim())
           .filter(Boolean);
-        const result = await startFrenzNative(frenzDeviceId, models);
+        const result = await startFrenzNative(frenzDeviceId, models, replacements);
         if (!result.success) throw new Error(result.error || 'Could not connect to the band');
       }
       await bridgeStore.connectDevice('frenz', { ...device.config, device_name: frenzDeviceId });
@@ -634,6 +668,12 @@
             <span class="value bridge-message">{frenzNativeStatus.message}</span>
           </div>
         {/if}
+        {#each Object.entries(replacements) as [model, copy] (model)}
+          <div class="config-row">
+            <span class="label">Edited:</span>
+            <span class="value">{model} → {copy.replace(/^saved:/, '')}</span>
+          </div>
+        {/each}
         {#each frenzNativeStatus.model_errors || [] as problem (problem)}
           <div class="config-row">
             <span class="label">Model not loaded:</span>
@@ -770,10 +810,14 @@
     device={frenzDeviceId || ''}
     onEdit={editModel}
     onNew={newSignal}
+    standIns={frenzNativeStatus.stand_ins ?? {}}
+    onRevert={revertModel}
   />
   <PipelineEditor
     bind:isOpen={showPipelines}
     bind:request={pipelineRequest}
+    standIns={frenzNativeStatus.stand_ins ?? {}}
+    onRevert={revertModel}
     connected={frenzNativeStatus.state === 'streaming'}
     onUse={usePipeline}
   />

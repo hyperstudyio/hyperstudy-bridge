@@ -391,6 +391,7 @@ pub async fn scan_frenz_native(
 pub async fn start_frenz_native(
     device_id: String,
     models: Option<Vec<String>>,
+    replacements: Option<std::collections::BTreeMap<String, String>>,
     state: State<'_, Arc<AppState>>,
     secrets: State<'_, crate::secrets::SecretsState>,
     app_handle: AppHandle,
@@ -424,6 +425,20 @@ pub async fn start_frenz_native(
             _ => source,
         })
         .collect();
+    // Edited copies kept in the configuration, each in place of a model (`brow-emg` → `saved:brow-emg-edited`).
+    let instead: Vec<(String, String)> = replacements
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, source)| {
+            let folder = match (source.strip_prefix("saved:"), &data) {
+                (Some(saved), Some(data)) => crate::pipelines::path(data, saved)
+                    .map(|dir| dir.to_string_lossy().to_string())
+                    .unwrap_or(source),
+                _ => source,
+            };
+            (name, folder)
+        })
+        .collect();
     let token = if models.iter().all(|m| std::path::Path::new(m).is_dir()) {
         None
     } else {
@@ -436,7 +451,7 @@ pub async fn start_frenz_native(
     Ok(
         match state
             .frenz_native
-            .start(&device_id, &models, token, Some(app_handle))
+            .start(&device_id, &models, &instead, token, Some(app_handle))
             .await
         {
             Ok(()) => CommandResult::success("Connected through openfrenz".to_string()),
@@ -488,6 +503,10 @@ pub struct OpenedModel {
     pub stored: bool,
     /// The saved pipeline it is, if it is one: saving under this name changes it.
     pub saved: Option<String>,
+    /// The running model an edited copy takes the place of when used: set for a model the configuration names
+    /// (a built-in or a Hugging Face model), which the editor never changes, and for a copy already standing in
+    /// for one. None for a saved pipeline run in its own right, which is changed in place.
+    pub replaces: Option<String>,
 }
 
 /// The pipeline of the model `name` running with the band, for the editor to show or change.
@@ -506,7 +525,9 @@ pub async fn open_frenz_model(
     let saved = data_dir(&app_handle)
         .ok()
         .and_then(|data| crate::pipelines::saved_name(&data, &dir));
+    let replaces = (saved.is_none() || state.frenz_native.stands_in(&name)).then(|| name.clone());
     Ok(OpenedModel {
+        replaces,
         origin: match &saved {
             Some(saved) => format!("saved:{saved}"),
             None => format!("model:{name}"),
@@ -564,11 +585,25 @@ pub async fn preview_pipeline(
     })
 }
 
+/// Puts back the model an edited copy stands in for, on the same stream.
+#[tauri::command]
+pub async fn revert_frenz_model(
+    name: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<CommandResult<String>, ()> {
+    Ok(match state.frenz_native.revert_model(&name).await {
+        Ok(()) => CommandResult::success(name),
+        Err(e) => CommandResult::error(e),
+    })
+}
+
 /// Runs the saved pipeline `name` with the band now, published and drawn like the other models; a running
-/// copy of it is replaced. Returns the name it runs under.
+/// copy of it is replaced. With `instead_of`, it runs in place of that model until the band disconnects. Returns
+/// the name it runs under.
 #[tauri::command]
 pub async fn run_pipeline(
     name: String,
+    instead_of: Option<String>,
     state: State<'_, Arc<AppState>>,
     app_handle: AppHandle,
 ) -> Result<CommandResult<String>, ()> {
@@ -576,10 +611,16 @@ pub async fn run_pipeline(
         Ok(dir) => dir,
         Err(e) => return Ok(CommandResult::error(e)),
     };
-    Ok(match state.frenz_native.run_model(dir).await {
-        Ok(running) => CommandResult::success(running),
-        Err(e) => CommandResult::error(e),
-    })
+    Ok(
+        match state
+            .frenz_native
+            .run_model(dir, instead_of.as_deref())
+            .await
+        {
+            Ok(running) => CommandResult::success(running),
+            Err(e) => CommandResult::error(e),
+        },
+    )
 }
 
 #[tauri::command]

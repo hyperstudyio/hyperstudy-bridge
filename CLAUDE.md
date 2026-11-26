@@ -75,6 +75,11 @@ HyperStudy Bridge is a unified, high-performance desktop application that serves
   starts it at once (`run_pipeline`, `FrenzNative::run_model`), replacing a running copy. A model with stored
   numbers (`model.safetensors`) keeps them: the window names its origin as `saved:<name>` or `model:<name>`, never
   a path, and the backend checks, tries and saves with that model's numbers (`pipelines::build`).
+  Built-in models are never changed. Opening one gives an editable copy; Use runs the copy in its place, on its
+  stream (`run_pipeline` with `instead_of`), and keeps that in the FRENZ `replacements` setting
+  (`{"brow-emg": "saved:brow-emg-edited"}`) so it does so at every connection. Revert (`revert_frenz_model`, on
+  the chart and in the editor) puts the original back and drops the setting; the copy stays saved until deleted.
+  A saved copy records what it replaces in `editor.replaces`.
 - **Tests**: `src-tauri/tests/frenz_native.rs` replays a synthetic recording; its `real_band` test (ignored by default)
   connects to a band named in `FRENZ_BAND`.
 

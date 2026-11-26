@@ -24,7 +24,16 @@
   } from '../devices/frenzTraces.js';
 
   // onEdit(model) opens a chart's model in the pipeline editor; onNew() opens the editor on a new pipeline.
-  let { isOpen = $bindable(false), device = '', onEdit = null, onNew = null } = $props();
+  // standIns: models with an edited copy running in their place (name → copy); onRevert(model) puts one back.
+  let {
+    isOpen = $bindable(false),
+    device = '',
+    onEdit = null,
+    onNew = null,
+    standIns = {},
+    onRevert = null,
+  } = $props();
+  let reverting = $state('');
 
   // The model each chart draws, whose pipeline the editor can open. EEG and pulse are the band's own streams.
   const MODEL_OF = { power: 'eeg-power', eyes: 'eog', brow: 'brow-emg', head: 'head' };
@@ -415,9 +424,31 @@
                 onclick={() => setLayout(toggle(layout, chart.id))}
               >
                 <span class="chevron" class:closed={chart.collapsed} aria-hidden="true">▾</span>
-                <h3>{about.title} <span>{about.note}</span></h3>
+                <h3>
+                  {about.title}
+                  {#if standIns[modelOf(chart.id)]}<em
+                      class="edited"
+                      title="An edited copy runs in place of {modelOf(chart.id)}"
+                      >edited · {standIns[modelOf(chart.id)]}</em
+                    >{/if}
+                  <span>{about.note}</span>
+                </h3>
               </button>
               <div class="chart-actions">
+                {#if onRevert && standIns[modelOf(chart.id)]}
+                  <button
+                    class="revert"
+                    title="Put {modelOf(
+                      chart.id
+                    )} back in place of its edited copy; the copy stays saved"
+                    disabled={reverting === chart.id}
+                    onclick={async () => {
+                      reverting = chart.id;
+                      await onRevert(modelOf(chart.id));
+                      reverting = '';
+                    }}>↺ Revert</button
+                  >
+                {/if}
                 {#if onEdit && modelOf(chart.id)}
                   <button
                     class="edit"
@@ -657,6 +688,17 @@
   .chart-add .new-signal:hover {
     background: color-mix(in srgb, var(--color-primary) 12%, var(--color-surface-elevated));
   }
+  .chart h3 .edited {
+    margin-left: 0.4rem;
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-warning) 16%, transparent);
+    color: var(--color-warning);
+    font-size: 0.68rem;
+    font-style: normal;
+    font-weight: 600;
+  }
+  .chart-actions .revert,
   .chart-actions .edit {
     font-size: 0.72rem;
   }

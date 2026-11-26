@@ -73,6 +73,9 @@ pub struct NativeStatus {
     pub samples: BTreeMap<String, u64>,
     /// Models asked for that could not be loaded, each with why; the rest run without them.
     pub model_errors: Vec<String>,
+    /// Models running in place of another for this connection, by the name they run under (the original's):
+    /// the folder name of the pipeline standing in. The original comes back at the next connection.
+    pub stand_ins: BTreeMap<String, String>,
 }
 
 impl NativeStatus {
@@ -84,6 +87,7 @@ impl NativeStatus {
             streams: Vec::new(),
             samples: BTreeMap::new(),
             model_errors: Vec::new(),
+            stand_ins: BTreeMap::new(),
         }
     }
 }
@@ -255,6 +259,8 @@ struct Shared {
     models: StdMutex<Vec<(String, String)>>,
     /// The folder each running model was loaded from, by name: what the pipeline editor opens.
     dirs: StdMutex<BTreeMap<String, PathBuf>>,
+    /// For a model with a copy standing in for it, the folder of the original, to revert to.
+    originals: StdMutex<BTreeMap<String, PathBuf>>,
     /// The editor's pipeline under trial: its output names and recent outputs.
     preview: StdMutex<Option<(Vec<String>, Outputs)>>,
     app: Option<AppHandle>,
@@ -330,6 +336,7 @@ impl FrenzNative {
                 output_names: StdMutex::new(BTreeMap::new()),
                 models: StdMutex::new(Vec::new()),
                 dirs: StdMutex::new(BTreeMap::new()),
+                originals: StdMutex::new(BTreeMap::new()),
                 preview: StdMutex::new(None),
                 app: None,
             })),
@@ -379,10 +386,12 @@ impl FrenzNative {
         &self,
         device: &str,
         extra: &[String],
+        instead: &[(String, String)],
         token: Option<String>,
         app: Option<AppHandle>,
     ) -> Result<(), String> {
-        self.start_with(device, extra, token, app, None).await
+        self.start_with(device, extra, instead, token, app, None)
+            .await
     }
 
     /// Plays a recording back as if it were the band `device`, at its recorded pace. For trying the app
@@ -392,17 +401,21 @@ impl FrenzNative {
         device: &str,
         recording: &std::path::Path,
         extra: &[String],
+        instead: &[(String, String)],
         token: Option<String>,
         app: Option<AppHandle>,
     ) -> Result<(), String> {
-        self.start_with(device, extra, token, app, Some(recording))
+        self.start_with(device, extra, instead, token, app, Some(recording))
             .await
     }
 
+    /// `instead`: models to run in place of others from the start, as `(name it replaces, folder)`: an edited
+    /// copy of a built-in, kept in the configuration. The original is remembered, to revert to.
     async fn start_with(
         &self,
         device: &str,
         extra: &[String],
+        instead: &[(String, String)],
         token: Option<String>,
         app: Option<AppHandle>,
         replay: Option<&std::path::Path>,
@@ -428,6 +441,7 @@ impl FrenzNative {
             output_names: StdMutex::new(BTreeMap::new()),
             models: StdMutex::new(Vec::new()),
             dirs: StdMutex::new(BTreeMap::new()),
+            originals: StdMutex::new(BTreeMap::new()),
             preview: StdMutex::new(None),
             app,
         });
@@ -436,10 +450,20 @@ impl FrenzNative {
         }
         shared.update(|_| {});
         // Fetched before the band is connected: a download can take a while, and needs no band.
-        let (models, errors) = load_models(extra.to_vec(), token).await;
-        if !errors.is_empty() {
-            shared.update(|s| s.model_errors = errors);
+        let (mut models, mut errors) = load_models(extra.to_vec(), token).await;
+        let swapped = swap_in(&mut models, instead, &mut errors).await;
+        if let Ok(mut originals) = shared.originals.lock() {
+            for (name, original, _) in &swapped {
+                originals.insert(name.clone(), original.clone());
+            }
         }
+        shared.update(|s| {
+            s.model_errors = errors;
+            s.stand_ins = swapped
+                .into_iter()
+                .map(|(name, _, copy)| (name, copy))
+                .collect();
+        });
         match open(device, replay, models, shared.clone()).await {
             Ok(opened) => {
                 *session = Some(opened);
@@ -592,18 +616,74 @@ impl FrenzNative {
             .unwrap_or_default()
     }
 
-    /// Starts the model in `dir` on the connected band, published and drawn like the others. A model already
-    /// running from the same folder is replaced, keeping its name and stream. Returns the name it runs under.
-    pub async fn run_model(&self, dir: PathBuf) -> Result<String, String> {
+    /// Whether the model running as `name` stands in for another this connection.
+    pub fn stands_in(&self, name: &str) -> bool {
+        self.status().stand_ins.contains_key(name)
+    }
+
+    /// Starts the model in `dir` on the connected band, published and drawn like the others. With `instead_of`,
+    /// it runs in place of that running model (a built-in, say) until the band disconnects: under its name, on
+    /// its stream and in its chart. Otherwise a model already running from the same folder is replaced, keeping
+    /// its name and stream. Returns the name it runs under.
+    pub async fn run_model(
+        &self,
+        dir: PathBuf,
+        instead_of: Option<&str>,
+    ) -> Result<String, String> {
         let shared = self.shared();
         let same = |a: &Path, b: &Path| {
             a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
         };
-        let replacing = shared.dirs.lock().ok().and_then(|dirs| {
-            dirs.iter()
-                .find(|(_, d)| same(d, &dir))
-                .map(|(name, _)| name.clone())
-        });
+        let replacing = match instead_of {
+            Some(name) => {
+                let running = shared
+                    .models
+                    .lock()
+                    .map(|m| m.iter().any(|(n, _)| n == name));
+                if !running.unwrap_or(false) {
+                    return Err(format!(
+                        "{name} is not running, so nothing can run in its place."
+                    ));
+                }
+                Some(name.to_owned())
+            }
+            None => shared.dirs.lock().ok().and_then(|dirs| {
+                dirs.iter()
+                    .find(|(_, d)| same(d, &dir))
+                    .map(|(name, _)| name.clone())
+            }),
+        };
+        // Standing in for another model: asked to, or already doing so and changed again.
+        let stand_in = instead_of.is_some()
+            || replacing
+                .as_deref()
+                .is_some_and(|name| self.stands_in(name));
+        self.start_in_place(dir, replacing, stand_in).await
+    }
+
+    /// Puts back the model a copy stands in for (see [`FrenzNative::run_model`]), on the same stream.
+    pub async fn revert_model(&self, name: &str) -> Result<(), String> {
+        let original = self
+            .shared()
+            .originals
+            .lock()
+            .ok()
+            .and_then(|o| o.get(name).cloned())
+            .ok_or_else(|| format!("{name} is not an edited copy."))?;
+        self.start_in_place(original, Some(name.to_owned()), false)
+            .await
+            .map(|_| ())
+    }
+
+    /// Starts the model in `dir`, in place of the running model `replacing` if any (its task stopped, its outlet
+    /// closed and opened again under the same name), as a stand-in for it or not.
+    async fn start_in_place(
+        &self,
+        dir: PathBuf,
+        replacing: Option<String>,
+        stand_in: bool,
+    ) -> Result<String, String> {
+        let shared = self.shared();
         let found = {
             let dir = dir.clone();
             tokio::task::spawn_blocking(move || {
@@ -640,6 +720,16 @@ impl FrenzNative {
             }
         };
         if replacing.is_some() {
+            // The first copy to stand in keeps the original's folder, to revert to; reverting forgets it.
+            if let (Ok(mut originals), Ok(dirs)) = (shared.originals.lock(), shared.dirs.lock()) {
+                if !stand_in {
+                    originals.remove(&name);
+                } else if let (false, Some(current)) =
+                    (originals.contains_key(&name), dirs.get(&name))
+                {
+                    originals.insert(name.clone(), current.clone());
+                }
+            }
             if let Some(task) = session.models.remove(&name) {
                 task.abort();
             }
@@ -653,12 +743,24 @@ impl FrenzNative {
                 outputs.remove(&name);
             }
         }
+        let copy = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         let loaded = Loaded {
-            source: format!(
-                "model {} {} (files {fingerprint})",
-                dir.display(),
-                pipeline.spec().version
-            ),
+            source: if stand_in {
+                format!(
+                    "model {} {} (files {fingerprint}), in place of {name}",
+                    dir.display(),
+                    pipeline.spec().version
+                )
+            } else {
+                format!(
+                    "model {} {} (files {fingerprint})",
+                    dir.display(),
+                    pipeline.spec().version
+                )
+            },
             name: name.clone(),
             suffix,
             pipeline,
@@ -669,6 +771,11 @@ impl FrenzNative {
         shared.update(|s| {
             if !s.streams.contains(&stream) {
                 s.streams.push(stream);
+            }
+            if stand_in {
+                s.stand_ins.insert(name.clone(), copy);
+            } else {
+                s.stand_ins.remove(&name);
             }
         });
         info!(device = "frenz", "model {name} started while connected");
@@ -868,6 +975,56 @@ async fn load_models(extra: Vec<String>, token: Option<String>) -> (Vec<Loaded>,
     })
     .await
     .unwrap_or_else(|e| (Vec::new(), vec![format!("loading models failed: {e}")]))
+}
+
+/// Puts each `(name, folder)` of `instead` in place of the loaded model `name`, keeping its name and stream. A
+/// copy that cannot be loaded leaves the original running, with why. Returns `(name, original folder, copy's
+/// folder name)` for each swapped.
+async fn swap_in(
+    models: &mut [Loaded],
+    instead: &[(String, String)],
+    errors: &mut Vec<String>,
+) -> Vec<(String, PathBuf, String)> {
+    let mut swapped = Vec::new();
+    for (name, folder) in instead {
+        let dir = PathBuf::from(folder);
+        let copy = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| folder.clone());
+        let Some(model) = models.iter_mut().find(|m| &m.name == name) else {
+            errors.push(format!(
+                "{copy}: {name} is not running, so it has nothing to replace"
+            ));
+            continue;
+        };
+        let loaded = {
+            let dir = dir.clone();
+            tokio::task::spawn_blocking(move || {
+                if !dir.is_dir() {
+                    return Err(frenz_model::Error::Files("no such saved pipeline".into()));
+                }
+                let fingerprint = frenz_model::fingerprint_dir(&dir)?;
+                Pipeline::from_dir(&dir).map(|p| (p, fingerprint))
+            })
+            .await
+        };
+        match loaded {
+            Ok(Ok((pipeline, fingerprint))) => {
+                model.source = format!(
+                    "model {} {} (files {fingerprint}), in place of {name}",
+                    dir.display(),
+                    pipeline.spec().version
+                );
+                model.pipeline = pipeline;
+                let original = std::mem::replace(&mut model.dir, dir);
+                swapped.push((name.clone(), original, copy));
+            }
+            Ok(Err(e)) => errors.push(format!("{copy}: {e}; {name} runs as it comes")),
+            Err(e) => errors.push(format!("{copy}: {e}; {name} runs as it comes")),
+        }
+    }
+    swapped
 }
 
 /// Opens the band, the outlets and the tasks that feed them.

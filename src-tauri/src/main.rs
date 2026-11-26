@@ -331,6 +331,7 @@ async fn main() {
             check_pipeline,
             open_frenz_model,
             run_pipeline,
+            revert_frenz_model,
             preview_pipeline,
             stop_pipeline_preview,
             list_pipelines,

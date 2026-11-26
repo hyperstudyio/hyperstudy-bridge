@@ -17,7 +17,7 @@ async fn a_replayed_band_is_published_and_readable() {
     let native = FrenzNative::new();
     assert_eq!(native.status().state, NativeState::Stopped);
     assert!(native
-        .start_replay("bad name!", &recording, &[], None, None)
+        .start_replay("bad name!", &recording, &[], &[], None, None)
         .await
         .is_err());
 
@@ -37,7 +37,7 @@ async fn a_replayed_band_is_published_and_readable() {
         "./not/a model".to_owned(),
     ];
     native
-        .start_replay("FRENZT01", &recording, &models, None, None)
+        .start_replay("FRENZT01", &recording, &models, &[], None, None)
         .await
         .unwrap();
     let status = native.status();
@@ -54,7 +54,7 @@ async fn a_replayed_band_is_published_and_readable() {
         .contains(&"FRENZT01_EOG_openfrenz".to_owned()));
     // One band, one connection.
     assert!(native
-        .start_replay("FRENZT01", &recording, &[], None, None)
+        .start_replay("FRENZT01", &recording, &[], &[], None, None)
         .await
         .is_err());
 
@@ -204,7 +204,10 @@ async fn a_replayed_band_is_published_and_readable() {
             "outputs": ["s"]}"#,
     )
     .unwrap();
-    assert_eq!(native.run_model(second.clone()).await.unwrap(), "second");
+    assert_eq!(
+        native.run_model(second.clone(), None).await.unwrap(),
+        "second"
+    );
     let streams_now = native.status().streams.len();
     assert_eq!(streams_now, streams_before + 1);
     assert!(native
@@ -228,7 +231,10 @@ async fn a_replayed_band_is_published_and_readable() {
             "outputs": ["s"]}"#,
     )
     .unwrap();
-    assert_eq!(native.run_model(extra.clone()).await.unwrap(), "my-level");
+    assert_eq!(
+        native.run_model(extra.clone(), None).await.unwrap(),
+        "my-level"
+    );
     assert_eq!(native.status().streams.len(), streams_now);
     tokio::time::sleep(Duration::from_secs(2)).await;
     let replaced = native.recent(5.0).await;
@@ -242,7 +248,139 @@ async fn a_replayed_band_is_published_and_readable() {
         mine.channels
     );
     assert!(mine.t.len() > 3);
-    assert!(native.run_model(dir.join("missing")).await.is_err());
+    assert!(native.run_model(dir.join("missing"), None).await.is_err());
+
+    // An edited copy of a built-in runs in its place: same name, same stream, the copy's outputs.
+    let copy = dir.join("brow-emg-edited");
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(
+        copy.join("config.json"),
+        r#"{"openfrenz_model": "pipeline", "name": "brow-emg-edited", "version": "1",
+            "step": {"stream": "eeg", "samples": 25},
+            "nodes": [{"name": "pairs", "op": "mix", "in": "eeg",
+                       "channels": [{"name": "brow", "weights": {"forehead_left": 0.5, "forehead_right": -0.5}}]},
+                      {"name": "level", "op": "summary", "in": "pairs", "stats": ["sd"]}],
+            "outputs": ["level"]}"#,
+    )
+    .unwrap();
+    // An LSL reader on the built-in's stream, as a study recording would hold.
+    let brow_stream = native
+        .status()
+        .streams
+        .into_iter()
+        .find(|s| s.ends_with("_BROW_EMG_openfrenz"))
+        .unwrap();
+    let found = lsl::resolve_byprop("name", &brow_stream, 1, 5.0).unwrap();
+    let inlet = lsl::StreamInlet::new(&found[0], 360, 0, true).unwrap();
+    inlet.open_stream(5.0).unwrap();
+    let streams_then = native.status().streams.len();
+    assert!(native
+        .run_model(copy.clone(), Some("nothing-running"))
+        .await
+        .is_err());
+    assert_eq!(
+        native
+            .run_model(copy.clone(), Some("brow-emg"))
+            .await
+            .unwrap(),
+        "brow-emg"
+    );
+    assert_eq!(native.status().streams.len(), streams_then, "no new stream");
+    assert_eq!(native.status().stand_ins["brow-emg"], "brow-emg-edited");
+    assert_eq!(
+        native.model_dir("brow-emg").as_deref(),
+        Some(copy.as_path())
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let brow = native
+        .recent(5.0)
+        .await
+        .into_iter()
+        .find(|t| t.name == "brow-emg")
+        .expect("brow-emg is not drawn");
+    assert_eq!(
+        brow.channels,
+        ["brow:sd"],
+        "the copy's outputs, under the built-in's name"
+    );
+    assert!(brow.t.len() > 3);
+    // The reader that was open on the built-in's stream gets the copy's samples.
+    let mut sample = vec![0.0_f64; 1];
+    let mut got = 0;
+    for _ in 0..50 {
+        if inlet.pull_sample_buf(&mut sample, 0.2).unwrap_or(0.0) > 0.0 {
+            got += 1;
+        }
+    }
+    assert!(got > 3, "the open reader got {got} samples from the copy");
+    // Changed again, it keeps standing in.
+    assert_eq!(
+        native.run_model(copy.clone(), None).await.unwrap(),
+        "brow-emg"
+    );
+    assert!(native.stands_in("brow-emg"));
+
+    // Reverted, the built-in is back on the same stream, and the copy is forgotten.
+    assert!(
+        native.revert_model("my-level").await.is_err(),
+        "only a copy can be reverted"
+    );
+    native.revert_model("brow-emg").await.unwrap();
+    assert!(!native.stands_in("brow-emg"));
+    assert_eq!(native.status().streams.len(), streams_then);
+    assert_ne!(
+        native.model_dir("brow-emg").as_deref(),
+        Some(copy.as_path())
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let back = native
+        .recent(5.0)
+        .await
+        .into_iter()
+        .find(|t| t.name == "brow-emg")
+        .expect("brow-emg is not drawn after reverting");
+    assert_eq!(
+        back.channels,
+        ["brow:log_sd"],
+        "the built-in's outputs again"
+    );
+    assert!(back.t.len() > 3);
+    assert!(
+        native.revert_model("brow-emg").await.is_err(),
+        "nothing left to revert"
+    );
+
+    // A copy kept in the configuration runs in the built-in's place from the start, and reverts the same way.
+    native.stop().await;
+    let instead = [
+        ("brow-emg".to_owned(), copy.to_string_lossy().to_string()),
+        ("not-a-model".to_owned(), copy.to_string_lossy().to_string()),
+    ];
+    native
+        .start_replay("FRENZT01", &recording, &[], &instead, None, None)
+        .await
+        .unwrap();
+    let status = native.status();
+    assert_eq!(status.stand_ins["brow-emg"], "brow-emg-edited");
+    assert_eq!(status.model_errors.len(), 1, "{:?}", status.model_errors);
+    assert!(status.model_errors[0].contains("not-a-model is not running"));
+    assert!(status
+        .streams
+        .contains(&"FRENZT01_BROW_EMG_openfrenz".to_owned()));
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let brow = native
+        .recent(5.0)
+        .await
+        .into_iter()
+        .find(|t| t.name == "brow-emg")
+        .expect("brow-emg is not drawn");
+    assert_eq!(brow.channels, ["brow:sd"], "the copy runs from the start");
+    native.revert_model("brow-emg").await.unwrap();
+    assert!(native.status().stand_ins.is_empty());
+    assert!(
+        copy.join("config.json").is_file(),
+        "reverting never deletes the copy"
+    );
 
     native.stop().await;
     assert_eq!(native.status().state, NativeState::Stopped);
@@ -262,7 +400,7 @@ async fn real_band() {
     let bands = native.scan().await.unwrap();
     println!("scan: {bands:?}");
     let started = std::time::Instant::now();
-    native.start(&name, &[], None, None).await.unwrap();
+    native.start(&name, &[], &[], None, None).await.unwrap();
     println!("connected in {:.1} s", started.elapsed().as_secs_f64());
     for _ in 0..8 {
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -321,6 +459,7 @@ async fn hub_model_on_a_replay() {
             "FRENZT02",
             std::path::Path::new(&recording),
             &models,
+            &[],
             Some("hf_not_valid".into()),
             None,
         )
@@ -334,6 +473,7 @@ async fn hub_model_on_a_replay() {
             "FRENZT02",
             std::path::Path::new(&recording),
             &models,
+            &[],
             token,
             None,
         )

@@ -44,6 +44,8 @@
     request = $bindable(null),
     connected = false,
     onUse = null,
+    standIns = {},
+    onRevert = null,
   } = $props();
 
   const nodeTypes = { block: PipelineNode };
@@ -69,6 +71,9 @@
   // null for one made here. `stored`: whether there are any.
   let origin = $state(null);
   let stored = $state(false);
+  // The model this pipeline is an edited copy of, when it is one (a built-in, say): Use runs it in that model's
+  // place, and Revert puts the model back. Kept in the saved pipeline (`editor.replaces`).
+  let replaces = $state(null);
   let warning = $state('');
 
   const groups = palette();
@@ -259,6 +264,7 @@
     graph = next;
     origin = null;
     stored = false;
+    replaces = null;
   }
   function startFrom(recipe) {
     fresh(recipe.graph());
@@ -412,7 +418,8 @@
   async function save() {
     if (!config) return false;
     try {
-      await savePipeline(cleanId(name), config, origin);
+      const kept = replaces ? { ...config, editor: { ...config.editor, replaces } } : config;
+      await savePipeline(cleanId(name), kept, origin);
       name = cleanId(name);
       // Its stored numbers were saved with it: from now on they come from the saved copy.
       if (stored) origin = `saved:${name}`;
@@ -426,14 +433,18 @@
   }
   async function saveAndUse() {
     if (!(await save())) return;
-    message = (await onUse(name)) ?? message;
+    message = (await onUse(name, replaces)) ?? message;
   }
   async function useSaved(entry) {
-    message = (await onUse(entry.name)) ?? '';
+    message = (await onUse(entry.name, entry.config.editor?.replaces ?? null)) ?? '';
+  }
+  async function revert() {
+    if (replaces) message = (await onRevert(replaces)) ?? '';
   }
   function load(entry) {
     graph = fromConfig(entry.config);
     origin = `saved:${entry.name}`;
+    replaces = entry.config.editor?.replaces ?? null;
     stored = graph.nodes.some(n => BLOCKS[n.op]?.stored || n.settings?.weights);
     fit();
     name = entry.name;
@@ -447,15 +458,19 @@
       graph = fromConfig(opened.config);
       origin = opened.origin;
       stored = opened.stored;
+      replaces = opened.replaces ?? opened.config.editor?.replaces ?? null;
       // A saved pipeline is changed in place; any other model is saved as a copy, beside the original.
       name = opened.saved ?? `${cleanId(opened.config.name ?? model)}-edited`;
       selected = null;
       warning = '';
       if (!opened.config.editor) arrange();
       else fit();
-      message = opened.saved
-        ? `Opened ${opened.saved}, running with the band. Save and Use to update it there.`
-        : `Opened ${model}, running with the band. Changes are saved as ${name}; Use runs it beside ${model}.`;
+      message =
+        opened.saved && replaces
+          ? `Opened ${opened.saved}, running in place of ${replaces}. Use updates it; Revert puts ${replaces} back.`
+          : opened.saved
+            ? `Opened ${opened.saved}, running with the band. Save and Use to update it there.`
+            : `Opened ${model}. Your changes are a copy, ${name}: Use runs it in place of ${model}, on its stream; Revert puts ${model} back.`;
     } catch (error) {
       message = `Could not open ${model}: ${error}`;
     }
@@ -570,9 +585,17 @@
             class="primary"
             onclick={saveAndUse}
             disabled={!check.ok}
-            title={connected
-              ? 'Save it and run it with the band now, published and in the live view'
-              : 'Save it and run it with the band from the next connection'}>Use</button
+            title={replaces
+              ? `Save it and run it in place of ${replaces}, on its stream, from now on`
+              : connected
+                ? 'Save it and run it with the band now, published and in the live view'
+                : 'Save it and run it with the band from the next connection'}>Use</button
+          >
+        {/if}
+        {#if onRevert && replaces && standIns[replaces]}
+          <button
+            onclick={revert}
+            title="Put {replaces} back in place of this copy; the copy stays saved">↺ Revert</button
           >
         {/if}
         <button onclick={() => (fresh(starter()), (name = 'my-pipeline'), (selected = null))}
@@ -603,7 +626,13 @@
         <h3>Saved</h3>
         {#each saved as entry (entry.name)}
           <div class="saved">
-            <button class="open" onclick={() => load(entry)}>{entry.name}</button>
+            <button
+              class="open"
+              onclick={() => load(entry)}
+              title={entry.config.editor?.replaces
+                ? `An edited copy of ${entry.config.editor.replaces}`
+                : entry.name}>{entry.name}</button
+            >
             {#if onUse}<button title="Run it with the band" onclick={() => useSaved(entry)}
                 >Use</button
               >{/if}
