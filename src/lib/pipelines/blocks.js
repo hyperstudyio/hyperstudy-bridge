@@ -101,10 +101,11 @@ export const BLOCKS = {
   },
   envelope: {
     group: 'Features',
-    label: 'Envelope',
+    label: 'Envelope (Hilbert)',
     reads: 'signal',
     gives: 'features',
-    about: 'Level and spread of the amplitude envelope of one band.',
+    about:
+      'Band-passes each channel, takes its amplitude envelope with the Hilbert transform, and gives its level and spread.',
     settings: [
       { key: 'band', label: 'Band (Hz)', type: 'band', default: [20, 58] },
       list('stats', 'Statistics', ['mean', 'sd'], 'mean, sd'),
@@ -120,12 +121,27 @@ export const BLOCKS = {
       list('stats', 'Statistics', ['mean', 'sd'], 'mean, sd, log_sd, range, largest_step'),
     ],
   },
-  wavelet: {
+  quality: {
     group: 'Features',
-    label: 'Wavelet',
+    label: 'Signal quality',
     reads: 'signal',
     gives: 'features',
-    about: 'Mean size of each channel at each frequency.',
+    about: 'Share of samples in each channel that repeat, clip at the limit, or are invalid.',
+    settings: [
+      number(
+        'limit',
+        'Largest value the sensor reports',
+        null,
+        'Leave empty if unknown: then nothing counts as clipped.'
+      ),
+    ],
+  },
+  wavelet: {
+    group: 'Features',
+    label: 'Wavelet (Morlet)',
+    reads: 'signal',
+    gives: 'features',
+    about: 'Mean amplitude of each channel at each frequency, from Morlet wavelets.',
     settings: [
       { key: 'frequencies', label: 'Frequencies (Hz)', type: 'numbers', default: [6, 10] },
       number('cycles', 'Cycles', 6),

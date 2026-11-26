@@ -175,7 +175,7 @@ export function starter() {
         kind: 'block',
         op: 'select',
         settings: { channels: ['forehead_left', 'forehead_right'] },
-        position: { x: 40, y: 170 },
+        position: { x: 40, y: 190 },
       },
       {
         id: 'clean',
@@ -188,7 +188,7 @@ export function starter() {
           ],
           start: 'settled',
         },
-        position: { x: 40, y: 300 },
+        position: { x: 40, y: 340 },
       },
       {
         id: 'power',
@@ -201,7 +201,7 @@ export function starter() {
           ],
           log: true,
         },
-        position: { x: 40, y: 430 },
+        position: { x: 40, y: 490 },
       },
     ],
     edges: [

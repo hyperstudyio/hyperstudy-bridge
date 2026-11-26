@@ -20,7 +20,7 @@ describe('pipeline graphs', () => {
       [4, 8],
       [8, 13],
     ]);
-    expect(config.editor.positions.power).toEqual([40, 430]);
+    expect(config.editor.positions.power).toEqual([40, 490]);
     const back = fromConfig(config);
     expect(back.nodes.map(n => n.id)).toEqual(['eeg', 'front', 'clean', 'power']);
     expect(back.edges.map(e => `${e.source}->${e.target}`)).toEqual([

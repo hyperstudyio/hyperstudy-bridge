@@ -68,7 +68,7 @@
     font-size: 12px;
     line-height: 1;
     cursor: pointer;
-    opacity: 0.45;
+    opacity: 0.3;
     transition: opacity 150ms ease;
   }
   .remove:hover,

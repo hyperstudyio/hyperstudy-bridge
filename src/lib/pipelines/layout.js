@@ -4,7 +4,7 @@
 import dagre from '@dagrejs/dagre';
 
 export const NODE_W = 200;
-export const NODE_H = 76;
+export const NODE_H = 100;
 
 /**
  * New positions for `nodes`, top to bottom (`TB`) or left to right (`LR`). Returns a map of id → {x, y}, the

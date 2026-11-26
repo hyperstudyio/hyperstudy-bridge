@@ -1,7 +1,8 @@
 <script>
-  // One node of the pipeline graph: a stream the pipeline reads, or a block. Input at the top (or left), output at
-  // the bottom (or right); the star marks the blocks whose values the pipeline gives, × removes the node. The
-  // border's colour says what it gives: blue for a signal, amber for features.
+  // One node of the pipeline graph. Streams are pills, as HyperStudy's cognition canvas draws its Perceive anchor:
+  // they are where the pipeline starts. Blocks are cards whose outline and type chip say what they give (blue for
+  // a signal, amber for features), and whose dots are coloured by what passes through them. Selected nodes glow
+  // green, as selections do in HyperStudy. The star marks the blocks whose values the pipeline gives; × removes.
   import { Handle, Position } from '@xyflow/svelte';
   import { BLOCKS, STREAMS } from '../../pipelines/blocks.js';
 
@@ -12,22 +13,34 @@
   const title = $derived(isStream ? STREAMS[data.stream]?.label : (block?.label ?? data.op));
   const kind = $derived(isStream ? 'signal' : block?.gives);
   const across = $derived(data.direction === 'LR');
+
+  function remove(event) {
+    event.stopPropagation();
+    data.onRemove?.(id);
+  }
 </script>
 
-<div
-  class="node"
-  class:stream={isStream}
-  class:selected={data.selected}
-  class:faulty={data.faulty}
-  class:output={data.output}
-  class:features={kind === 'features'}
->
-  {#if !isStream}
-    <Handle type="target" position={across ? Position.Left : Position.Top} />
-  {/if}
-  <div class="top">
-    <span class="title">{title}</span>
-    {#if !isStream}
+{#if isStream}
+  <div class="stream" class:selected={data.selected}>
+    <span class="stream-name">{title}</span>
+    <span class="stream-sub">{data.summary}</span>
+    <button class="drop nodrag" title="Remove" aria-label="Remove {id}" onclick={remove}>×</button>
+    <Handle type="source" class="dot signal" position={across ? Position.Right : Position.Bottom} />
+  </div>
+{:else}
+  <div
+    class="card {kind}"
+    class:selected={data.selected}
+    class:faulty={data.faulty}
+    class:output={data.output}
+  >
+    <Handle
+      type="target"
+      class="dot {block?.reads}"
+      position={across ? Position.Left : Position.Top}
+    />
+    <div class="head">
+      <span class="chip">{kind}</span>
       <button
         class="star nodrag"
         class:on={data.output}
@@ -39,117 +52,173 @@
           data.onToggleOutput?.(id);
         }}>★</button
       >
-    {/if}
-    <button
-      class="drop nodrag"
-      title="Remove"
-      aria-label="Remove {id}"
-      onclick={event => {
-        event.stopPropagation();
-        data.onRemove?.(id);
-      }}>×</button
-    >
+      <button class="drop nodrag" title="Remove" aria-label="Remove {id}" onclick={remove}>×</button
+      >
+    </div>
+    <div class="title">{title}</div>
+    <div class="id">{id}</div>
+    {#if data.summary}<div class="summary" title={data.summary}>{data.summary}</div>{/if}
+    <Handle type="source" class="dot {kind}" position={across ? Position.Right : Position.Bottom} />
   </div>
-  <div class="meta">
-    <span class="id">{id}</span>
-    <span class="kind">{kind}</span>
-  </div>
-  {#if data.summary}<div class="summary">{data.summary}</div>{/if}
-  <Handle type="source" position={across ? Position.Right : Position.Bottom} />
-</div>
+{/if}
 
 <style>
-  .node {
-    min-width: 170px;
-    max-width: 220px;
-    padding: 0.5rem 0.65rem;
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
+  /* Selection: HyperStudy's green ring and glow. */
+  .stream,
+  .card {
+    --glow: 0 0 0 1px rgba(76, 175, 80, 0.55), 0 0 14px 2px rgba(76, 175, 80, 0.35);
+    transition:
+      border-color 150ms ease,
+      box-shadow 150ms ease;
+  }
+
+  /* Streams: a pill, where the pipeline starts. */
+  .stream {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    box-sizing: border-box;
+    width: 200px;
+    padding: 9px 26px;
+    border: 1.5px solid var(--wire-signal);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--wire-signal) 12%, var(--color-surface));
+  }
+  .stream-name {
+    color: var(--wire-signal-text);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .stream-sub {
+    color: var(--color-text-secondary);
+    font-size: 10px;
+    letter-spacing: 0.02em;
+  }
+  .stream .drop {
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    transform: translateY(-50%);
+  }
+  .stream.selected {
+    border-color: var(--color-primary);
+    box-shadow: var(--glow);
+  }
+
+  /* Blocks: a card outlined in the colour of what it gives. */
+  .card {
+    position: relative;
+    box-sizing: border-box;
+    width: 200px;
+    padding: 8px 12px 10px;
+    border: 1.5px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border-radius: 10px;
     background: var(--color-surface-elevated);
     color: var(--color-text-primary);
-    font-size: 0.78rem;
   }
-  .node {
-    border-top: 3px solid var(--wire-signal);
+  .card.signal {
+    --accent: var(--wire-signal);
+    --accent-text: var(--wire-signal-text);
   }
-  .node.features {
-    border-top-color: var(--wire-features);
+  .card.features {
+    --accent: var(--wire-features);
+    --accent-text: var(--wire-features-text);
   }
-  .node.stream {
-    border-style: dashed;
-    border-top-style: solid;
-  }
-  .node.selected {
+  .card.selected {
     border-color: var(--color-primary);
-    box-shadow: 0 0 0 1px var(--color-primary);
+    box-shadow: var(--glow);
   }
-  .node.faulty {
+  .card.faulty {
     border-color: var(--color-error);
+    box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.45);
   }
-  .top {
+  .head {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.4rem;
+    gap: 2px;
+    margin-bottom: 4px;
+  }
+  .chip {
+    margin-right: auto;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent-text);
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
   .title {
-    flex: 1;
+    font-size: 13px;
     font-weight: 600;
+    line-height: 1.25;
   }
-  .drop {
-    padding: 0 0.15rem;
-    border: none;
-    background: none;
-    color: var(--color-text-disabled);
-    font-size: 0.95rem;
-    line-height: 1;
-    cursor: pointer;
-    opacity: 0;
-    transition: opacity 150ms ease;
-  }
-  .node:hover .drop,
-  .node.selected .drop {
-    opacity: 1;
-  }
-  .drop:hover {
-    color: var(--color-error);
-  }
-  .star {
-    padding: 0 0.15rem;
-    border: none;
-    background: none;
-    color: var(--color-text-disabled);
-    font-size: 0.95rem;
-    line-height: 1;
-    cursor: pointer;
-  }
-  .star.on {
-    color: var(--color-warning);
-  }
-  .meta {
-    display: flex;
-    justify-content: space-between;
-    gap: 0.4rem;
+  .id {
     color: var(--color-text-secondary);
     font-family: ui-monospace, monospace;
-    font-size: 0.7rem;
-  }
-  /* Large enough to grab easily. */
-  .node :global(.svelte-flow__handle) {
-    width: 12px;
-    height: 12px;
-    border: 2px solid var(--color-surface);
-    background: var(--color-text-secondary);
-  }
-  .node :global(.svelte-flow__handle:hover) {
-    background: var(--color-primary);
+    font-size: 10.5px;
   }
   .summary {
-    margin-top: 0.25rem;
+    margin-top: 5px;
+    padding-top: 5px;
+    border-top: 1px solid var(--color-border);
     color: var(--color-text-secondary);
-    font-size: 0.7rem;
+    font-size: 10.5px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  button {
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: none;
+    color: var(--color-text-disabled, rgba(255, 255, 255, 0.35));
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .star.on,
+  .star:hover {
+    color: var(--color-warning);
+  }
+  .drop {
+    opacity: 0;
+    transition: opacity 150ms ease;
+  }
+  .stream:hover .drop,
+  .card:hover .drop,
+  .selected .drop {
+    opacity: 1;
+  }
+  .drop:hover {
+    background: var(--color-error);
+    color: #fff;
+  }
+
+  /* Dots in the colour of what passes through them; large enough to grab. */
+  :global(.svelte-flow__handle.dot) {
+    width: 10px;
+    height: 10px;
+    border: 2px solid var(--color-surface);
+    transition: scale 120ms ease;
+  }
+  :global(.svelte-flow__handle.dot.signal) {
+    background: var(--wire-signal);
+  }
+  :global(.svelte-flow__handle.dot.features) {
+    background: var(--wire-features);
+  }
+  :global(.svelte-flow__handle.dot:hover) {
+    scale: 1.35;
+    background: var(--color-primary);
   }
 </style>

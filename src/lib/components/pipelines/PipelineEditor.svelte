@@ -40,6 +40,8 @@
   const nodeTypes = { block: PipelineNode };
   const edgeTypes = { wire: PipelineEdge };
   const HUES = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181'];
+  // What a wire carries, as the nodes' outlines, chips and dots show it (also --wire-* in the styles below).
+  const WIRE = { signal: '#3987e5', features: '#c98500' };
 
   let graph = $state(starter());
   let name = $state('my-pipeline');
@@ -86,7 +88,12 @@
         source: e.source,
         target: e.target,
         type: 'wire',
-        markerEnd: { type: 'arrowclosed', width: 16, height: 16 },
+        markerEnd: {
+          type: 'arrowclosed',
+          width: 14,
+          height: 14,
+          color: WIRE[from ? gives(from) : 'signal'],
+        },
         data: {
           carries: from ? gives(from) : 'signal',
           animated: previewing,
@@ -99,7 +106,7 @@
 
   function summarise(node) {
     if (node.kind === 'stream')
-      return `${STREAMS[node.stream].channels.length} channels, ${STREAMS[node.stream].rate} Hz`;
+      return `${STREAMS[node.stream].channels.length} channels · ${STREAMS[node.stream].rate} Hz`;
     const block = BLOCKS[node.op];
     if (node.op === 'filter') {
       const steps = node.settings?.steps ?? [];
@@ -146,11 +153,11 @@
   function spot() {
     const anchor = graph.nodes.find(n => n.id === selected);
     const at = anchor
-      ? { x: anchor.position.x, y: anchor.position.y + 130 }
+      ? { x: anchor.position.x, y: anchor.position.y + 150 }
       : { x: 60, y: 40 + graph.nodes.length * 40 };
     const taken = p =>
       graph.nodes.some(
-        n => Math.abs(n.position.x - p.x) < 200 && Math.abs(n.position.y - p.y) < 100
+        n => Math.abs(n.position.x - p.x) < 200 && Math.abs(n.position.y - p.y) < 130
       );
     while (taken(at)) at.x += 240;
     return at;
@@ -742,7 +749,9 @@
   }
   .editor {
     --wire-signal: #3987e5;
+    --wire-signal-text: #8dbdf5;
     --wire-features: #c98500;
+    --wire-features-text: #f0bd55;
   }
   .canvas {
     position: relative;
