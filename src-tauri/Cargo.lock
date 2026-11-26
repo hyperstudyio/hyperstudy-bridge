@@ -1793,7 +1793,7 @@ dependencies = [
 [[package]]
 name = "frenz"
 version = "0.3.0"
-source = "git+https://github.com/ljchang/openfrenz.git?rev=118f0e9ac5552bbd665fa5e58f4c765627b50b7f#118f0e9ac5552bbd665fa5e58f4c765627b50b7f"
+source = "git+https://github.com/ljchang/openfrenz.git?rev=1cc95011b7683fd0fb1773e1426480286182e6ff#1cc95011b7683fd0fb1773e1426480286182e6ff"
 dependencies = [
  "btleplug",
  "frenz-proto",
@@ -1809,7 +1809,7 @@ dependencies = [
 [[package]]
 name = "frenz-export"
 version = "0.3.0"
-source = "git+https://github.com/ljchang/openfrenz.git?rev=118f0e9ac5552bbd665fa5e58f4c765627b50b7f#118f0e9ac5552bbd665fa5e58f4c765627b50b7f"
+source = "git+https://github.com/ljchang/openfrenz.git?rev=1cc95011b7683fd0fb1773e1426480286182e6ff#1cc95011b7683fd0fb1773e1426480286182e6ff"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1825,7 +1825,7 @@ dependencies = [
 [[package]]
 name = "frenz-model"
 version = "0.3.0"
-source = "git+https://github.com/ljchang/openfrenz.git?rev=118f0e9ac5552bbd665fa5e58f4c765627b50b7f#118f0e9ac5552bbd665fa5e58f4c765627b50b7f"
+source = "git+https://github.com/ljchang/openfrenz.git?rev=1cc95011b7683fd0fb1773e1426480286182e6ff#1cc95011b7683fd0fb1773e1426480286182e6ff"
 dependencies = [
  "frenz",
  "frenz-export",
@@ -1841,7 +1841,7 @@ dependencies = [
 [[package]]
 name = "frenz-proto"
 version = "0.3.0"
-source = "git+https://github.com/ljchang/openfrenz.git?rev=118f0e9ac5552bbd665fa5e58f4c765627b50b7f#118f0e9ac5552bbd665fa5e58f4c765627b50b7f"
+source = "git+https://github.com/ljchang/openfrenz.git?rev=1cc95011b7683fd0fb1773e1426480286182e6ff#1cc95011b7683fd0fb1773e1426480286182e6ff"
 
 [[package]]
 name = "futures"

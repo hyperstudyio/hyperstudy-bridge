@@ -61,6 +61,28 @@ HyperStudy Bridge is a unified, high-performance desktop application that serves
   cosanlab Hugging Face org and shared by invitation; the token is `huggingface_token` in the credential store,
   read by the backend (`start_frenz_native`), never passed from the window. A model that cannot be loaded is shown
   on the card and left out.
+- **Pipeline editor** (`src/lib/components/pipelines/`, `src/lib/pipelines/`, backend `src-tauri/src/pipelines.rs`):
+  builds openfrenz pipelines as a graph (Svelte Flow). The graph converts to an openfrenz `config.json`
+  (`graph.js`, node positions kept under `editor`), which openfrenz checks on every change (`check_pipeline`), can be
+  tried on the connected band without publishing (`preview_pipeline`, drawn as the trace `preview`), and is saved to
+  `<app data>/pipelines/<name>/`. Saved pipelines run with the band as `saved:<name>` in the FRENZ models setting and
+  export as a folder with a model card. The block list in `blocks.js` mirrors openfrenz's blocks table; blocks
+  needing stored numbers are left out.
+  The canvas follows HyperStudy's agent cognition editor (dagre Tidy, wires coloured by what they carry, refusals
+  explained via `whyNot`); `recipes.js` holds starting pipelines, each checked against openfrenz.
+  From the live view, a model's chart opens its pipeline (`open_frenz_model`, by the name it runs under) and
+  "+ New signal" opens a new one. Use saves it, adds `saved:<name>` to the FRENZ models and, while streaming,
+  starts it at once (`run_pipeline`, `FrenzNative::run_model`), replacing a running copy. A model with stored
+  numbers (`model.safetensors`) keeps them: the window names its origin as `saved:<name>` or `model:<name>`, never
+  a path, and the backend checks, tries and saves with that model's numbers (`pipelines::build`).
+  Built-in models are never changed. Opening one gives an editable copy; Use runs the copy in its place, on its
+  stream (`run_pipeline` with `instead_of`), and keeps that in the FRENZ `replacements` setting
+  (`{"brow-emg": "saved:brow-emg-edited"}`) so it does so at every connection. Revert (`revert_frenz_model`, on
+  the chart and in the editor) puts the original back and drops the setting; the copy stays saved until deleted.
+  A saved copy records what it replaces in `editor.replaces`.
+  Pipelines move as folders: Export writes `config.json` (plus `model.safetensors` if any) and a model card, the
+  same form openfrenz loads and Hugging Face hosts; Import (`import_pipeline`) takes such a folder or its
+  `config.json`, checks it with openfrenz and saves it under a free name.
 - **Tests**: `src-tauri/tests/frenz_native.rs` replays a synthetic recording; its `real_band` test (ignored by default)
   connects to a band named in `FRENZ_BAND`.
 

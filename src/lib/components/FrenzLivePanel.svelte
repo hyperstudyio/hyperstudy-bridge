@@ -23,7 +23,21 @@
     modelCharts,
   } from '../devices/frenzTraces.js';
 
-  let { isOpen = $bindable(false), device = '' } = $props();
+  // onEdit(model) opens a chart's model in the pipeline editor; onNew() opens the editor on a new pipeline.
+  // standIns: models with an edited copy running in their place (name → copy); onRevert(model) puts one back.
+  let {
+    isOpen = $bindable(false),
+    device = '',
+    onEdit = null,
+    onNew = null,
+    standIns = {},
+    onRevert = null,
+  } = $props();
+  let reverting = $state('');
+
+  // The model each chart draws, whose pipeline the editor can open. EEG and pulse are the band's own streams.
+  const MODEL_OF = { power: 'eeg-power', eyes: 'eog', brow: 'brow-emg', head: 'head' };
+  const modelOf = id => (id.startsWith('model:') ? id.slice('model:'.length) : MODEL_OF[id]);
 
   // One hue per series, in a fixed order, checked for colour-blind separation on this app's dark surface.
   const HUES = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181'];
@@ -410,9 +424,39 @@
                 onclick={() => setLayout(toggle(layout, chart.id))}
               >
                 <span class="chevron" class:closed={chart.collapsed} aria-hidden="true">▾</span>
-                <h3>{about.title} <span>{about.note}</span></h3>
+                <h3>
+                  {about.title}
+                  {#if standIns[modelOf(chart.id)]}<em
+                      class="edited"
+                      title="An edited copy runs in place of {modelOf(chart.id)}"
+                      >edited · {standIns[modelOf(chart.id)]}</em
+                    >{/if}
+                  <span>{about.note}</span>
+                </h3>
               </button>
               <div class="chart-actions">
+                {#if onRevert && standIns[modelOf(chart.id)]}
+                  <button
+                    class="revert"
+                    title="Put {modelOf(
+                      chart.id
+                    )} back in place of its edited copy; the copy stays saved"
+                    disabled={reverting === chart.id}
+                    onclick={async () => {
+                      reverting = chart.id;
+                      await onRevert(modelOf(chart.id));
+                      reverting = '';
+                    }}>↺ Revert</button
+                  >
+                {/if}
+                {#if onEdit && modelOf(chart.id)}
+                  <button
+                    class="edit"
+                    title="Open its pipeline in the editor"
+                    aria-label="Open the pipeline of {about.title}"
+                    onclick={() => onEdit(modelOf(chart.id))}>✎ Pipeline</button
+                  >
+                {/if}
                 <button
                   aria-label="Remove {about.title}"
                   onclick={() => {
@@ -429,6 +473,9 @@
           </section>
         {/each}
         <div class="chart-add">
+          {#if onNew}
+            <button class="new-signal" onclick={() => onNew()}>+ New signal</button>
+          {/if}
           {#if removed.length}
             <select
               aria-label="Add a chart"
@@ -632,6 +679,32 @@
     gap: 0.5rem;
     justify-content: flex-end;
     padding-top: 0.25rem;
+  }
+  .chart-add .new-signal {
+    margin-right: auto;
+    border-color: color-mix(in srgb, var(--color-primary) 55%, transparent);
+    color: var(--color-primary);
+  }
+  .chart-add .new-signal:hover {
+    background: color-mix(in srgb, var(--color-primary) 12%, var(--color-surface-elevated));
+  }
+  .chart h3 .edited {
+    margin-left: 0.4rem;
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-warning) 16%, transparent);
+    color: var(--color-warning);
+    font-size: 0.68rem;
+    font-style: normal;
+    font-weight: 600;
+  }
+  .chart-actions .revert,
+  .chart-actions .edit {
+    font-size: 0.72rem;
+  }
+  .chart-actions .edit:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
   }
   .chart h3 span {
     margin-left: 0.4rem;

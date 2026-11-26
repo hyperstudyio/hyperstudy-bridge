@@ -9,12 +9,15 @@
     checkFrenzBridgeAvailable,
     startFrenzNative,
     getFrenzNativeStatus,
+    runPipeline,
+    revertFrenzModel,
     FRENZ_OPENFRENZ,
   } from '../services/tauri.js';
   import { getSecret } from '../services/secrets.js';
   import { listen } from '@tauri-apps/api/event';
   import DeviceConfigModal from './DeviceConfigModal.svelte';
   import FrenzLivePanel from './FrenzLivePanel.svelte';
+  import PipelineEditor from './pipelines/PipelineEditor.svelte';
 
   let { device, onConfigUpdate = () => {}, onRemove = () => {} } = $props();
 
@@ -52,6 +55,89 @@
   );
   let unlistenFrenzNative = null;
   let showLivePanel = $state(false);
+  let showPipelines = $state(false);
+
+  // A saved pipeline chosen in the editor joins the models run with the band from the next connection.
+  // A saved pipeline put to use: added to the FRENZ models, so it runs at every connection, and started now if
+  // the band is streaming (replacing a running copy). Returns what happened, for the editor to say.
+  // Edited copies kept in the configuration, each in place of a model: { 'brow-emg': 'saved:brow-emg-edited' }.
+  const replacements = $derived(device.config?.replacements ?? {});
+
+  // A saved pipeline put to use. An edited copy of a model (`replaces`) runs in that model's place, on its
+  // stream: written to the configuration so it does so at every connection, and swapped in now if the band is
+  // streaming. Any other is added to the FRENZ models and started now. Returns what happened, for the editor.
+  async function usePipeline(name, replaces = null) {
+    if (replaces) {
+      onConfigUpdate(device.id, {
+        ...device.config,
+        replacements: { ...replacements, [replaces]: `saved:${name}` },
+      });
+      if (frenzNativeStatus.state !== 'streaming')
+        return `${name} will run in place of ${replaces} from the next connection. Revert puts ${replaces} back.`;
+      const result = await runPipeline(name, replaces);
+      return result?.success
+        ? `${name} now runs in place of ${replaces}, on its stream, now and at every connection. Revert puts ${replaces} back; ${name} stays saved.`
+        : `Kept in the configuration, but it could not start now: ${result?.error ?? 'unknown error'}`;
+    }
+    const models = (device.config?.models || '')
+      .split(/[\s,]+/)
+      .map(m => m.trim())
+      .filter(Boolean);
+    const entry = `saved:${name}`;
+    if (!models.includes(entry))
+      onConfigUpdate(device.id, { ...device.config, models: [...models, entry].join(', ') });
+    if (frenzNativeStatus.state !== 'streaming')
+      return `${name} will run with the band from the next connection.`;
+    const result = await runPipeline(name);
+    return result?.success
+      ? `${name} is running with the band as ${result.data}, published and in the live view.`
+      : `Added to the FRENZ models, but it could not start now: ${result?.error ?? 'unknown error'}`;
+  }
+
+  // Puts a model back in place of its edited copy: from the configuration, and now if the band is streaming. The
+  // copy stays saved until deleted.
+  async function revertModel(name) {
+    const copy = replacements[name]?.replace(/^saved:/, '') ?? frenzNativeStatus.stand_ins?.[name];
+    const rest = { ...replacements };
+    delete rest[name];
+    onConfigUpdate(device.id, { ...device.config, replacements: rest });
+    if (frenzNativeStatus.state === 'streaming' && frenzNativeStatus.stand_ins?.[name]) {
+      const result = await revertFrenzModel(name);
+      if (!result?.success)
+        return `Could not put ${name} back now: ${result?.error ?? 'unknown error'}`;
+    }
+    return `${name} is back${copy ? `; ${copy} stays saved` : ''}.`;
+  }
+
+  // A saved pipeline deleted: any model it stood in for is put back, now and in the configuration, and it leaves
+  // the FRENZ models. Returns what happened.
+  async function pipelineDeleted(name) {
+    const entry = `saved:${name}`;
+    const models = (device.config?.models || '')
+      .split(/[\s,]+/)
+      .map(m => m.trim())
+      .filter(Boolean);
+    if (models.includes(entry))
+      onConfigUpdate(device.id, {
+        ...device.config,
+        models: models.filter(m => m !== entry).join(', '),
+      });
+    const replaced = Object.keys(replacements).filter(model => replacements[model] === entry);
+    const said = [];
+    for (const model of replaced) said.push(await revertModel(model));
+    return said.join(' ');
+  }
+
+  // What the pipeline editor opens next: a running model ({ kind: 'model', name }) or a new pipeline.
+  let pipelineRequest = $state(null);
+  function editModel(name) {
+    pipelineRequest = { kind: 'model', name };
+    showPipelines = true;
+  }
+  function newSignal() {
+    pipelineRequest = { kind: 'new' };
+    showPipelines = true;
+  }
 
   let frenzConnecting = $state(false);
   let frenzDisconnecting = $state(false);
@@ -324,7 +410,7 @@
           .split(/[\s,]+/)
           .map(m => m.trim())
           .filter(Boolean);
-        const result = await startFrenzNative(frenzDeviceId, models);
+        const result = await startFrenzNative(frenzDeviceId, models, replacements);
         if (!result.success) throw new Error(result.error || 'Could not connect to the band');
       }
       await bridgeStore.connectDevice('frenz', { ...device.config, device_name: frenzDeviceId });
@@ -496,7 +582,9 @@
     </div>
     <div class="info-row">
       <span class="label">Connection:</span>
-      <span class="value">{device.connection}</span>
+      <span class="value"
+        >{device.id === 'frenz' && frenzOpenfrenz ? 'Bluetooth + LSL' : device.connection}</span
+      >
     </div>
     <div class="info-row">
       <span class="label">Status:</span>
@@ -581,7 +669,7 @@
       </div>
       {#if frenzOpenfrenz}
         <div class="config-row">
-          <span class="label">Connection:</span>
+          <span class="label">Source:</span>
           <span class="value">openfrenz (experimental)</span>
         </div>
         <div class="config-row">
@@ -599,6 +687,12 @@
             <span class="value bridge-message">{frenzNativeStatus.message}</span>
           </div>
         {/if}
+        {#each Object.entries(replacements) as [model, copy] (model)}
+          <div class="config-row">
+            <span class="label">Edited:</span>
+            <span class="value">{model} → {copy.replace(/^saved:/, '')}</span>
+          </div>
+        {/each}
         {#each frenzNativeStatus.model_errors || [] as problem (problem)}
           <div class="config-row">
             <span class="label">Model not loaded:</span>
@@ -722,12 +816,31 @@
         Live signals
       </button>
     {/if}
+    {#if frenzOpenfrenz}
+      <button class="action-btn pulse-btn" onclick={() => (showPipelines = true)}>Pipelines</button>
+    {/if}
     <button class="action-btn config-btn" onclick={configureDevice}> Configure </button>
   </div>
 </div>
 
 {#if device.id === 'frenz'}
-  <FrenzLivePanel bind:isOpen={showLivePanel} device={frenzDeviceId || ''} />
+  <FrenzLivePanel
+    bind:isOpen={showLivePanel}
+    device={frenzDeviceId || ''}
+    onEdit={editModel}
+    onNew={newSignal}
+    standIns={frenzNativeStatus.stand_ins ?? {}}
+    onRevert={revertModel}
+  />
+  <PipelineEditor
+    bind:isOpen={showPipelines}
+    bind:request={pipelineRequest}
+    standIns={frenzNativeStatus.stand_ins ?? {}}
+    onRevert={revertModel}
+    connected={frenzNativeStatus.state === 'streaming'}
+    onUse={usePipeline}
+    onDeleted={pipelineDeleted}
+  />
 {/if}
 
 <DeviceConfigModal
@@ -853,13 +966,16 @@
     overflow: hidden;
   }
 
+  /* Wraps when a card has more buttons than fit on one row (FRENZ through openfrenz has four). */
   .device-actions {
     display: flex;
-    gap: 0.75rem;
+    flex-wrap: wrap;
+    gap: 0.6rem;
   }
 
   .action-btn {
-    flex: 1;
+    flex: 1 1 7rem;
+    white-space: nowrap;
     padding: 0.5rem;
     border: none;
     border-radius: 6px;

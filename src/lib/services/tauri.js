@@ -168,8 +168,10 @@ export function scanFrenzNative() {
  * private ones from the system credential store itself.
  * @returns {Promise<{success: boolean, data?: string, error?: string}>}
  */
-export function startFrenzNative(deviceId, models = []) {
-  return frenzNative('start_frenz_native', { deviceId, models }, e => ({
+// `replacements`: edited copies kept in the configuration, each in place of a model ({ 'brow-emg':
+// 'saved:brow-emg-edited' }).
+export function startFrenzNative(deviceId, models = [], replacements = {}) {
+  return frenzNative('start_frenz_native', { deviceId, models, replacements }, e => ({
     success: false,
     error: String(e),
   }));
@@ -236,3 +238,75 @@ export const tauriService = {
   // App info
   getAppInfo,
 };
+
+// Pipeline editor
+
+// `origin` names the model a pipeline was opened from (`saved:<name>` or `model:<name>`), whose stored numbers
+// (trained weights, a calibration) it may use; null for a pipeline made in the editor.
+
+/** Whether openfrenz accepts a pipeline config: { ok, outputs, inputs, error, node }. */
+export function checkPipeline(config, origin = null) {
+  return frenzNative('check_pipeline', { config, origin }, e => ({
+    ok: false,
+    outputs: [],
+    inputs: [],
+    error: String(e),
+  }));
+}
+
+/** Runs a pipeline on the band connected through openfrenz; drawn as the trace `preview`, never published. */
+export function previewPipeline(config, origin = null) {
+  return frenzNative('preview_pipeline', { config, origin }, e => ({
+    success: false,
+    error: String(e),
+  }));
+}
+
+/** A model running with the band, to open in the editor: { name, config, origin, stored, saved }. */
+export function openFrenzModel(name) {
+  return invoke('open_frenz_model', { name });
+}
+
+/**
+ * Runs a saved pipeline with the band now, replacing a running copy, or in place of the model `insteadOf`:
+ * { success, data: name, error }.
+ */
+export function runPipeline(name, insteadOf = null) {
+  return frenzNative('run_pipeline', { name, insteadOf }, e => ({
+    success: false,
+    error: String(e),
+  }));
+}
+
+/** Puts back the model an edited copy runs in place of, on the same stream. */
+export function revertFrenzModel(name) {
+  return frenzNative('revert_frenz_model', { name }, e => ({ success: false, error: String(e) }));
+}
+
+export function stopPipelinePreview() {
+  return frenzNative('stop_pipeline_preview', {}, () => null);
+}
+
+/** Saved pipelines, newest first: [{ name, version, outputs, saved_at, config }]. */
+export function listPipelines() {
+  return frenzNative('list_pipelines', {}, () => []);
+}
+
+/** Saves a pipeline under `name` (openfrenz checks it first). Throws with openfrenz's message when refused. */
+export function savePipeline(name, config, origin = null) {
+  return invoke('save_pipeline', { name, config, origin });
+}
+
+export function deletePipeline(name) {
+  return invoke('delete_pipeline', { name });
+}
+
+/** Imports a pipeline from its folder or config.json, after openfrenz checks it; returns its saved name. */
+export function importPipeline(source) {
+  return invoke('import_pipeline', { source });
+}
+
+/** Copies a saved pipeline, with a model card, into `destination/<name>/`; returns that folder. */
+export function exportPipeline(name, destination) {
+  return invoke('export_pipeline', { name, destination });
+}

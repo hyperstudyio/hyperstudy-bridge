@@ -122,7 +122,7 @@
         type: 'text',
         placeholder: 'owner/name, e.g. cosanlab/frenz-focus',
         default: '',
-        help: 'Run alongside the built-in models. Separate several with commas.',
+        help: 'Run alongside the built-in models: Hugging Face owner/name, or saved:<name> for a pipeline made in Pipelines. Separate several with commas.',
         openfrenzOnly: true,
       },
       huggingfaceToken: {
@@ -362,7 +362,9 @@
         hasErrors = true;
       }
       const odd = frenzOpenfrenz
-        ? modelList(formData.models).filter(m => !/^[\w.-]+\/[\w.-]+(@[\w.-]+)?$/.test(m))
+        ? modelList(formData.models).filter(
+            m => !/^([\w.-]+\/[\w.-]+(@[\w.-]+)?|saved:[\w-]+)$/.test(m)
+          )
         : [];
       if (odd.length) {
         newErrors.models = `Write each model as owner/name: ${odd.join(', ')}`;

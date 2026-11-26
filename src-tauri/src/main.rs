@@ -328,6 +328,17 @@ async fn main() {
             stop_frenz_native,
             get_frenz_native_status,
             get_frenz_native_recent,
+            check_pipeline,
+            open_frenz_model,
+            run_pipeline,
+            revert_frenz_model,
+            import_pipeline,
+            preview_pipeline,
+            stop_pipeline_preview,
+            list_pipelines,
+            save_pipeline,
+            delete_pipeline,
+            export_pipeline,
             secrets::get_secret,
             secrets::set_secrets
         ])
