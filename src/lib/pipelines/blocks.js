@@ -24,15 +24,33 @@ export const FILTERS = {
   dc_block: { label: 'Remove offset', fields: { pole: 0.99 } },
 };
 
+/**
+ * How each number of a filter is shown, with openfrenz's value when it is left empty (`order` 2, `q` 30, `pole`
+ * 0.99); `low`, `high` and `hz` must be given.
+ */
+export const FILTER_FIELDS = {
+  low: { label: 'Low (Hz)' },
+  high: { label: 'High (Hz)' },
+  hz: { label: 'At (Hz)' },
+  order: { label: 'Order', empty: 2, whole: true },
+  q: { label: 'Q', empty: 30, help: 'Centre frequency over the notch width' },
+  pole: {
+    label: 'Pole',
+    empty: 0.99,
+    help: 'Nearer 1 removes only slower drift, and settles more slowly',
+  },
+};
+
 const bands = (key, label, value) => ({ key, label, type: 'bands', default: value });
 const number = (key, label, value, help) => ({ key, label, type: 'number', default: value, help });
 const flag = (key, label, value = false) => ({ key, label, type: 'bool', default: value });
-const choice = (key, label, options, value) => ({
+const choice = (key, label, options, value, more = {}) => ({
   key,
   label,
   type: 'select',
   options,
   default: value,
+  ...more,
 });
 const list = (key, label, value, help) => ({ key, label, type: 'list', default: value, help });
 
@@ -78,8 +96,16 @@ export const BLOCKS = {
         type: 'filters',
         default: [{ type: 'bandpass', low: 1, high: 45 }],
       },
-      choice('start', 'Start', ['zero', 'settled'], 'settled'),
-      flag('zero_phase', 'Both ways within each step (no delay, no state)'),
+      choice('start', 'Before the first sample', ['settled', 'zero'], 'settled', {
+        names: { settled: 'Assume it was steady', zero: 'Assume silence' },
+        // What openfrenz does when a config leaves it out; new blocks are written with `settled`.
+        absent: 'zero',
+        help: "What the filter assumes came before the band's first sample. Steady (the first sample, held) avoids a large swing at the start when the signal has an offset, as raw EEG counts do; silence makes the filter ring for its first seconds.",
+      }),
+      {
+        ...flag('zero_phase', 'No delay: filter each step forwards and backwards'),
+        help: "Removes the filter's delay, but each step is filtered on its own, so rhythms slower than a step are distorted at its edges.",
+      },
     ],
   },
   band_power: {
