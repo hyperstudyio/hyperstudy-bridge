@@ -530,7 +530,10 @@ impl FrenzNative {
 
     /// Stops publishing and disconnects. Safe to call when nothing is connected.
     pub async fn stop(&self) {
-        let Some(mut session) = self.session.lock().await.take() else {
+        // Held to the end: a connection started while this one is still closing would otherwise be marked stopped
+        // below while it holds the band.
+        let mut slot = self.session.lock().await;
+        let Some(mut session) = slot.take() else {
             return;
         };
         let models = std::mem::take(&mut session.models).into_values();
@@ -886,9 +889,19 @@ fn unique_name(base: &str, taken: &[String]) -> String {
     } else {
         base
     };
+    // Names that differ only in case share an LSL suffix (it is the name in capitals), and two outlets under one
+    // suffix end publishing for the whole connection. A band stream's name or the editor's trial trace would be
+    // drawn twice in the window.
+    let used = |name: &str| {
+        taken.iter().any(|other| other.eq_ignore_ascii_case(name))
+            || name.eq_ignore_ascii_case("preview")
+            || STREAMS
+                .iter()
+                .any(|(stream, _)| stream.eq_ignore_ascii_case(name))
+    };
     let mut name = base.clone();
     let mut n = 2;
-    while taken.contains(&name) {
+    while used(&name) {
         name = format!("{base}-{n}");
         n += 1;
     }

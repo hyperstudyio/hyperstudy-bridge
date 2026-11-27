@@ -2379,7 +2379,11 @@ async fn handle_device_command(
             send_response(tx, response).await;
         }
         CommandAction::FrenzStatus => {
-            let stats = state.frenz_manager.get_stats().await;
+            // HyperStudy's check before a study. A band held through openfrenz has no inlets in the manager.
+            let stats = match state.frenz_native.stats() {
+                Some(stats) => stats,
+                None => state.frenz_manager.get_stats().await,
+            };
 
             send_response(
                 tx,
