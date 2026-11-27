@@ -83,6 +83,10 @@ export function canConnect(nodes, edges, source, target) {
  */
 export function toConfig(graph, name = 'pipeline') {
   const { nodes, edges, step } = graph;
+  if (graph.unsupported?.length)
+    throw new Error(
+      `This pipeline reads ${graph.unsupported.join(', ')}, which the editor cannot draw. It runs as it is, but cannot be changed here.`
+    );
   const order = ordered(nodes, edges);
   if (!order) throw new Error('The graph has a loop: a block cannot read its own output.');
   const streams = nodes.filter(n => n.kind === 'stream').map(n => n.stream);
@@ -91,7 +95,9 @@ export function toConfig(graph, name = 'pipeline') {
   const samples = stream => Math.max(1, Math.round(STREAMS[stream].rate * step.seconds));
   const inputs = {};
   for (const stream of new Set(streams))
-    if (stream !== clock) inputs[stream] = { samples: samples(stream) };
+    // Options the editor has no control for (a stream the model can do without, say) stay as they were opened.
+    if (stream !== clock)
+      inputs[stream] = { ...graph.inputOptions?.[stream], samples: samples(stream) };
   const config = {
     openfrenz_model: 'pipeline',
     name: cleanId(name),
@@ -143,9 +149,16 @@ export function fromConfig(config) {
     row += 1;
     return at;
   };
+  const unsupported = [];
   for (const stream of new Set(streamNames)) {
     if (STREAMS[stream])
       nodes.push({ id: stream, kind: 'stream', stream, position: place(stream) });
+    else unsupported.push(stream);
+  }
+  const inputOptions = {};
+  for (const [stream, input] of Object.entries(config.inputs ?? {})) {
+    const options = Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'samples'));
+    if (Object.keys(options).length) inputOptions[stream] = options;
   }
   for (const entry of config.nodes ?? []) {
     const { name, op, in: from, ...settings } = entry;
@@ -160,6 +173,8 @@ export function fromConfig(config) {
   return {
     version: config.version ?? '1',
     step: { stream: clock, seconds },
+    ...(unsupported.length ? { unsupported } : {}),
+    ...(Object.keys(inputOptions).length ? { inputOptions } : {}),
     nodes,
     edges,
     outputs: [...(config.outputs ?? [])],
