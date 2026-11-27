@@ -521,3 +521,68 @@ async fn hub_model_on_a_replay() {
     );
     native.stop().await;
 }
+
+/// A model named like a built-in but for its case would share that model's LSL suffix; two outlets under one
+/// suffix used to end publishing for the whole connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_model_named_like_a_built_in_gets_its_own_stream() {
+    let dir = std::env::temp_dir().join(format!("frenz-native-test-{}", uuid::Uuid::new_v4()));
+    let extra = dir.join("EOG");
+    std::fs::create_dir_all(&extra).unwrap();
+    let recording = dir.join("synthetic.sqlite");
+    frenz::synth::write_recording(&recording, 30).unwrap();
+    std::fs::write(
+        extra.join("config.json"),
+        r#"{"openfrenz_model": "pipeline", "name": "EOG", "version": "1",
+            "step": {"stream": "eeg", "samples": 125},
+            "nodes": [{"name": "s", "op": "summary", "in": "eeg", "stats": ["sd"]}],
+            "outputs": ["s"]}"#,
+    )
+    .unwrap();
+    let native = FrenzNative::new();
+    native
+        .start_replay(
+            "FRENZT02",
+            &recording,
+            &[extra.to_string_lossy().to_string()],
+            &[],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let streams = native.status().streams;
+    let mut distinct = streams.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), streams.len(), "{streams:?}");
+    assert!(
+        streams.contains(&"FRENZT02_EOG_2_openfrenz".to_owned()),
+        "{streams:?}"
+    );
+
+    // Both are on the network with their own widths, and the built-in still carries data.
+    let (built_in, copy, got) = tokio::task::spawn_blocking(|| {
+        let width = |name: &str| {
+            lsl::resolve_bypred(&format!("name='{name}'"), 1, 10.0)
+                .unwrap()
+                .first()
+                .map(|info| info.channel_count())
+        };
+        let info = lsl::resolve_bypred("name='FRENZT02_EOG_openfrenz'", 1, 10.0).unwrap();
+        let inlet = lsl::StreamInlet::new(&info[0], 360, 0, true).unwrap();
+        let (sample, stamp): (Vec<f64>, f64) = inlet.pull_sample(8.0).unwrap();
+        (
+            width("FRENZT02_EOG_openfrenz"),
+            width("FRENZT02_EOG_2_openfrenz"),
+            stamp != 0.0 && !sample.is_empty(),
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(built_in, Some(5));
+    assert_eq!(copy, Some(4));
+    assert!(got, "the built-in eog stream carried no data");
+    native.stop().await;
+    let _ = std::fs::remove_dir_all(dir);
+}

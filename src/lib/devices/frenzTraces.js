@@ -98,6 +98,8 @@ const BUILT_IN_TRACES = new Set([
   'heart',
   'head',
   'eeg-power',
+  // The pipeline editor's trial run: drawn in the editor, and gone when the trial ends.
+  'preview',
 ]);
 
 /** The chart for a model added in the configuration. */
@@ -109,7 +111,8 @@ export function modelCharts(traces) {
 }
 
 const knownChart = id =>
-  CHARTS.includes(id) || (typeof id === 'string' && /^model:[\w.-]+$/.test(id));
+  CHARTS.includes(id) ||
+  (typeof id === 'string' && /^model:[\w.-]+$/.test(id) && id !== 'model:preview');
 
 /** The default layout: every chart shown, none collapsed. */
 export function defaultLayout() {

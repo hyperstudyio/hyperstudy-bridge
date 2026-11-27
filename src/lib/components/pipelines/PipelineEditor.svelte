@@ -98,8 +98,9 @@
   function optionsFor(field) {
     if (field.pick === 'channels') return inputNames;
     // Features are named channel:measure, e.g. forehead_left:power:4-8.
+    // A measure alone pairs it within each channel; a whole name pairs features of different channels.
     if (field.pick === 'measures')
-      return unique(inputNames.map(n => n.split(':').slice(1).join(':')));
+      return unique([...inputNames.map(n => n.split(':').slice(1).join(':')), ...inputNames]);
     if (field.pick === 'prefixes') return unique(inputNames.map(n => n.split(':')[0]));
     if (field.type === 'mix') return inputNames;
     return null;
@@ -267,6 +268,7 @@
     origin = null;
     stored = false;
     replaces = null;
+    own = null;
   }
   function startFrom(recipe) {
     fresh(recipe.graph());
@@ -307,10 +309,25 @@
 
   let config = $state(null);
   let checkTimer = null;
+  // Where the pipeline's stored numbers come from. A pipeline without any needs no origin, and naming one that
+  // has since been deleted would have every check and save refused.
+  const numbersFrom = $derived(stored ? origin : null);
+  // The graph as it is now. `config` trails edits by the check's delay, so saving or trying from it right after
+  // a change (the click that ends an edit) would use the pipeline from before the change.
+  function current() {
+    try {
+      config = toConfig($state.snapshot(graph), name);
+      localError = '';
+    } catch (error) {
+      config = null;
+      localError = error.message;
+    }
+    return config;
+  }
   $effect(() => {
     const snapshot = $state.snapshot(graph);
     const label = name;
-    const from = origin;
+    const from = numbersFrom;
     clearTimeout(checkTimer);
     // Nothing to show while the editor is closed; it checks again when opened.
     if (!isOpen) return;
@@ -334,9 +351,16 @@
   // ---- trying it on the band
 
   let pollTimer = null;
+  let wanted = false;
   async function startPreview() {
-    if (!config || !check.ok) return;
-    const result = await previewPipeline(config, origin);
+    if (!check.ok || !current()) return;
+    wanted = true;
+    const result = await previewPipeline(config, numbersFrom);
+    // Stopped, or the editor closed, while the band was starting it.
+    if (!wanted || !isOpen) {
+      if (result?.success) await stopPipelinePreview();
+      return;
+    }
     if (!result?.success) {
       message = result?.error ?? 'Could not run the pipeline on the band.';
       previewing = false;
@@ -352,6 +376,7 @@
     }, 300);
   }
   async function stopPreview() {
+    wanted = false;
     previewing = false;
     clearInterval(pollTimer);
     preview = null;
@@ -417,12 +442,26 @@
   async function refreshSaved() {
     saved = await listPipelines();
   }
+  // The saved pipeline this graph was opened from or last saved as: saving under that name updates it.
+  let own = $state(null);
+  let confirmReplace = $state(null);
   async function save() {
-    if (!config) return false;
+    if (!current()) {
+      message = localError;
+      return false;
+    }
+    const target = cleanId(name);
+    if (target !== own && confirmReplace !== target && saved.some(entry => entry.name === target)) {
+      confirmReplace = target;
+      message = `A pipeline called ${target} is already saved. Save again to replace it, or change the name.`;
+      return false;
+    }
+    confirmReplace = null;
     try {
       const kept = replaces ? { ...config, editor: { ...config.editor, replaces } } : config;
-      await savePipeline(cleanId(name), kept, origin);
-      name = cleanId(name);
+      await savePipeline(target, kept, numbersFrom);
+      name = target;
+      own = target;
       // Its stored numbers were saved with it: from now on they come from the saved copy.
       if (stored) origin = `saved:${name}`;
       message = `Saved as ${name}.${onUse ? ' Use runs it with the band.' : ''}`;
@@ -450,6 +489,7 @@
     stored = graph.nodes.some(n => BLOCKS[n.op]?.stored || n.settings?.weights);
     fit();
     name = entry.name;
+    own = entry.name;
     selected = null;
     message = `Opened ${entry.name}.`;
   }
@@ -463,6 +503,7 @@
       replaces = opened.replaces ?? opened.config.editor?.replaces ?? null;
       // A saved pipeline is changed in place; any other model is saved as a copy, beside the original.
       name = opened.saved ?? `${cleanId(opened.config.name ?? model)}-edited`;
+      own = opened.saved ?? null;
       selected = null;
       warning = '';
       if (!opened.config.editor) arrange();
@@ -499,6 +540,11 @@
     confirmDelete = null;
     try {
       await deletePipeline(entry.name);
+      if (own === entry.name) own = null;
+      if (origin === `saved:${entry.name}`) {
+        origin = null;
+        stored = false;
+      }
       // A copy standing in for a model: the model is put back, since there is no copy left to run.
       const back = (await onDeleted?.(entry.name)) ?? '';
       message = `Deleted ${entry.name}.${back ? ` ${back}` : ''}`;
@@ -548,7 +594,7 @@
   });
 
   function close() {
-    if (previewing) stopPreview();
+    if (previewing || wanted) stopPreview();
     isOpen = false;
   }
   const status = $derived(

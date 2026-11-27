@@ -173,4 +173,36 @@ describe('models with stored numbers', () => {
       layers: [],
     });
   });
+
+  it('keeps the options of an input the editor has no control for', () => {
+    const config = {
+      openfrenz_model: 'pipeline',
+      name: 'p',
+      version: '1',
+      step: { stream: 'eeg', samples: 125 },
+      inputs: { ppg: { samples: 25, required: false, max_step_seconds: 3 } },
+      nodes: [
+        { name: 'a', op: 'summary', in: 'eeg', stats: ['sd'] },
+        { name: 'b', op: 'summary', in: 'ppg', stats: ['sd'] },
+        { name: 'c', op: 'concat', in: ['a', 'b'] },
+      ],
+      outputs: ['c'],
+    };
+    expect(toConfig(fromConfig(config), 'p').inputs).toEqual(config.inputs);
+  });
+
+  it('says so when a pipeline reads a stream it cannot draw', () => {
+    const config = {
+      openfrenz_model: 'pipeline',
+      name: 'p',
+      version: '1',
+      step: { stream: 'eeg', samples: 125 },
+      inputs: { battery: { arrived: true } },
+      nodes: [{ name: 'a', op: 'summary', in: 'battery', stats: ['mean'] }],
+      outputs: ['a'],
+    };
+    expect(() => toConfig(fromConfig(config), 'p')).toThrow(
+      /battery, which the editor cannot draw/
+    );
+  });
 });
