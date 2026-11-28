@@ -100,7 +100,8 @@
     const copy = replacements[name]?.replace(/^saved:/, '') ?? frenzNativeStatus.stand_ins?.[name];
     const rest = { ...replacements };
     delete rest[name];
-    onConfigUpdate(device.id, { ...device.config, replacements: rest });
+    // Only what changes: the rest of the configuration as this card last saw it may already be out of date.
+    onConfigUpdate(device.id, { replacements: rest });
     if (frenzNativeStatus.state === 'streaming' && frenzNativeStatus.stand_ins?.[name]) {
       const result = await revertFrenzModel(name);
       if (!result?.success)
@@ -118,10 +119,7 @@
       .map(m => m.trim())
       .filter(Boolean);
     if (models.includes(entry))
-      onConfigUpdate(device.id, {
-        ...device.config,
-        models: models.filter(m => m !== entry).join(', '),
-      });
+      onConfigUpdate(device.id, { models: models.filter(m => m !== entry).join(', ') });
     const replaced = Object.keys(replacements).filter(model => replacements[model] === entry);
     const said = [];
     for (const model of replaced) said.push(await revertModel(model));
@@ -676,9 +674,13 @@
           <span class="label">Band:</span>
           <span
             class="value bridge-status"
-            style="color: {getFrenzBridgeStateColor(frenzNativeStatus.state)}"
+            style="color: {frenzNativeStatus.reconnecting
+              ? 'var(--color-warning)'
+              : getFrenzBridgeStateColor(frenzNativeStatus.state)}"
           >
-            {getFrenzBridgeStateLabel(frenzNativeStatus.state)}
+            {frenzNativeStatus.reconnecting
+              ? 'Reconnecting...'
+              : getFrenzBridgeStateLabel(frenzNativeStatus.state)}
           </span>
         </div>
         {#if frenzNativeStatus.message}

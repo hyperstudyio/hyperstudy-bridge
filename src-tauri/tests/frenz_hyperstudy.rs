@@ -141,7 +141,9 @@ async fn hyperstudy_checks_finds_and_records_a_band_held_through_openfrenz() {
             json!({}),
         )
         .await;
+        // Only this test's band: a Bridge running on this computer may be publishing a real one.
         bands = hyperstudy_bands(found["payload"].as_array().unwrap());
+        bands.retain(|key, _| key.starts_with(&format!("{BAND}:")));
         if bands
             .values()
             .any(|streams| streams.len() == published.len())
@@ -225,6 +227,9 @@ async fn serve_a_replayed_band() {
         .ok()
         .and_then(|seconds| seconds.parse().ok())
         .unwrap_or(120);
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("warn,hyperstudy_bridge=info,frenz=debug,frenz_model=debug")
+        .try_init();
     let (state, url, dir) = bridge_with_a_band(port, seconds + 30).await;
     println!("serving {url}; study recordings in {}", dir.display());
     tokio::time::sleep(Duration::from_secs(u64::from(seconds))).await;
