@@ -586,3 +586,86 @@ async fn a_model_named_like_a_built_in_gets_its_own_stream() {
     native.stop().await;
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Sample times across a sleep of the computer with a band connected. Run it, then put the computer to sleep
+/// for half a minute or more (close the lid) within three minutes. It connects first, waits for the sleep, and
+/// checks that samples published after waking are stamped at the present on the LSL clock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn sample_times_across_sleep() {
+    let wall = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+    };
+    let source = || (frenz::clock::anchor_wall_ns() + frenz::clock::mono_ns()) as f64 / 1e9;
+    let dir = std::env::temp_dir().join(format!("frenz-native-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let recording = dir.join("synthetic.sqlite");
+    frenz::synth::write_recording(&recording, 600).unwrap();
+    let native = FrenzNative::new();
+    native
+        .start_replay("FRENZT03", &recording, &[], &[], None, None)
+        .await
+        .unwrap();
+
+    // How late samples arrive after their stamp, on the LSL clock: the median of the next 250.
+    let lateness = || {
+        tokio::task::spawn_blocking(|| {
+            let found = lsl::resolve_bypred("name='FRENZT03_EEG'", 1, 10.0).unwrap();
+            let inlet = lsl::StreamInlet::new(&found[0], 360, 0, true).unwrap();
+            let mut late = Vec::new();
+            while late.len() < 250 {
+                let (_, stamp): (Vec<f64>, f64) = inlet.pull_sample(5.0).unwrap();
+                if stamp != 0.0 {
+                    late.push(lsl::local_clock() - stamp);
+                }
+            }
+            late.sort_by(f64::total_cmp);
+            late[late.len() / 2]
+        })
+    };
+    let before = lateness().await.unwrap();
+    println!("SLEEP before: samples are stamped {before:.3} s before they arrive");
+
+    // The wall clock counts time asleep everywhere; where openfrenz's clock does not, it falls behind.
+    let (wall_lsl, wall_source, source_lsl) = (
+        wall() - lsl::local_clock(),
+        wall() - source(),
+        source() - lsl::local_clock(),
+    );
+    println!("SLEEP waiting for the computer to sleep (up to 3 minutes)...");
+    let mut gap = 0.0;
+    for _ in 0..180 {
+        let (tick, at) = (std::time::Instant::now(), wall());
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Either clock standing still against the wall clock shows the sleep.
+        gap = (wall() - at) - tick.elapsed().as_secs_f64();
+        if gap > 5.0 || wall() - at > 6.0 {
+            gap = gap.max(wall() - at - 1.0);
+            break;
+        }
+    }
+    assert!(gap > 5.0, "the computer did not sleep");
+    println!(
+        "SLEEP slept. Against the wall clock, openfrenz's clock fell behind by {:.1} s and the LSL clock by {:.1} s",
+        wall() - source() - wall_source,
+        wall() - lsl::local_clock() - wall_lsl
+    );
+    println!(
+        "SLEEP openfrenz's clock against the LSL clock moved by {:.3} s (what a fixed offset would get wrong)",
+        source() - lsl::local_clock() - source_lsl
+    );
+    // Let what queued up during the sleep drain, then measure.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let after = lateness().await.unwrap();
+    println!("SLEEP after: samples are stamped {after:.3} s before they arrive");
+    native.stop().await;
+    let _ = std::fs::remove_dir_all(dir);
+    assert!(
+        (after - before).abs() < 1.0,
+        "samples moved by {} s on the LSL clock",
+        after - before
+    );
+}

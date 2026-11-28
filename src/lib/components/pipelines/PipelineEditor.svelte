@@ -269,6 +269,7 @@
     stored = false;
     replaces = null;
     own = null;
+    confirmReplace = null;
   }
   function startFrom(recipe) {
     fresh(recipe.graph());
@@ -351,14 +352,22 @@
   // ---- trying it on the band
 
   let pollTimer = null;
-  let wanted = false;
+  // The trial asked for last, counted: 0 when none is wanted. A slower earlier start must not replace a later one.
+  let wanted = 0;
+  let asked = 0;
   async function startPreview() {
     if (!check.ok || !current()) return;
-    wanted = true;
+    const mine = (asked += 1);
+    wanted = mine;
     const result = await previewPipeline(config, numbersFrom);
     // Stopped, or the editor closed, while the band was starting it.
     if (!wanted || !isOpen) {
       if (result?.success) await stopPipelinePreview();
+      return;
+    }
+    // A later trial was asked for meanwhile: start that one again, in case this one landed after it.
+    if (wanted !== mine) {
+      if (wanted === asked) startPreview();
       return;
     }
     if (!result?.success) {
@@ -376,7 +385,7 @@
     }, 300);
   }
   async function stopPreview() {
-    wanted = false;
+    wanted = 0;
     previewing = false;
     clearInterval(pollTimer);
     preview = null;
@@ -490,6 +499,7 @@
     fit();
     name = entry.name;
     own = entry.name;
+    confirmReplace = null;
     selected = null;
     message = `Opened ${entry.name}.`;
   }
@@ -504,6 +514,7 @@
       // A saved pipeline is changed in place; any other model is saved as a copy, beside the original.
       name = opened.saved ?? `${cleanId(opened.config.name ?? model)}-edited`;
       own = opened.saved ?? null;
+      confirmReplace = null;
       selected = null;
       warning = '';
       if (!opened.config.editor) arrange();

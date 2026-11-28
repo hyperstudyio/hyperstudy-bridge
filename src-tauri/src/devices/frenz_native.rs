@@ -15,13 +15,13 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex as StdMutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use frenz::{Band, ConnectOptions, ReplayOptions};
+use frenz::{Band, ConnectOptions, Event, ReplayOptions};
 use frenz_model::streams::{self, Chunk, End, Streams};
 use frenz_model::{Live, Model, Pipeline};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -76,6 +76,8 @@ pub struct NativeStatus {
     /// Models running in place of another for this connection, by the name they run under (the original's):
     /// the folder name of the pipeline standing in. The original comes back at the next connection.
     pub stand_ins: BTreeMap<String, String>,
+    /// The link to the band is down and being retried: nothing is arriving, though the streams stay open.
+    pub reconnecting: bool,
 }
 
 impl NativeStatus {
@@ -88,6 +90,7 @@ impl NativeStatus {
             samples: BTreeMap::new(),
             model_errors: Vec::new(),
             stand_ins: BTreeMap::new(),
+            reconnecting: false,
         }
     }
 }
@@ -133,27 +136,30 @@ enum ToLsl {
     Close,
 }
 
-fn unix_now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or_default()
+/// Now, on the clock openfrenz times its samples with: Unix seconds at the moment the process first used
+/// openfrenz, plus the time counted since by the operating system's monotonic clock. It is not the wall clock: it
+/// does not follow adjustments, and on macOS it does not count time asleep, so it falls behind the wall clock
+/// there with every sleep.
+fn source_now() -> f64 {
+    (frenz::clock::anchor_wall_ns() + frenz::clock::mono_ns()) as f64 / 1e9
 }
 
-/// What to subtract from a Unix time to put it on this computer's LSL clock, measured once per connection: the
-/// wall clock read between two reads of the LSL clock. The study recorder stores its own `host_wall_lsl`
-/// samples, so the mapping can be checked and refitted afterwards.
-fn unix_minus_lsl() -> f64 {
+/// What to subtract from a sample time to put it on this computer's LSL clock: openfrenz's clock read between
+/// two reads of the LSL clock. Checked for every chunk published: on macOS the LSL clock
+/// counts time asleep and openfrenz's does not, so the difference steps at every sleep. Taken against the wall
+/// clock, or once per connection, it stamped samples early by the time the computer had slept. The study
+/// recorder stores its own `host_wall_lsl` samples for mapping LSL time to the wall clock.
+fn source_minus_lsl() -> f64 {
     let before = lsl::local_clock();
-    let wall = unix_now();
+    let source = source_now();
     let after = lsl::local_clock();
-    wall - (before + after) / 2.0
+    source - (before + after) / 2.0
 }
 
 /// Owns every outlet of one connection until it is told to close or its sender is dropped.
 fn publish(device: String, session: String, commands: mpsc::Receiver<ToLsl>) {
     use lsl::ExPushable;
-    let offset = unix_minus_lsl();
+    let offset = std::cell::Cell::new(source_minus_lsl());
     let mut outlets: BTreeMap<String, lsl::StreamOutlet> = BTreeMap::new();
     let open = |suffix: &str,
                 channels: &[String],
@@ -181,7 +187,10 @@ fn publish(device: String, session: String, commands: mpsc::Receiver<ToLsl>) {
             // Each sample's time is openfrenz's estimate of when it was taken, in Unix seconds, moved to the
             // LSL clock with one offset measured when the connection opened.
             ("timestamp_policy", "source_unix"),
-            ("source_unix_to_lsl_offset", &format!("{:.9}", -offset)),
+            (
+                "source_unix_to_lsl_offset",
+                &format!("{:.9}", -offset.get()),
+            ),
             (
                 "values",
                 "raw device counts; model outputs in the units openfrenz documents",
@@ -219,6 +228,18 @@ fn publish(device: String, session: String, commands: mpsc::Receiver<ToLsl>) {
                 rows,
             } => {
                 if let Some(outlet) = outlets.get(&suffix) {
+                    // Checked for every chunk, changed only for a step (a sleep): following its small
+                    // measurement noise would jitter the stamps, even backwards.
+                    let measured = source_minus_lsl();
+                    if (measured - offset.get()).abs() > 0.5 {
+                        warn!(
+                            device = "frenz",
+                            "the sample clock moved {:.1} s against the LSL clock (the computer slept?)",
+                            measured - offset.get()
+                        );
+                        offset.set(measured);
+                    }
+                    let offset = offset.get();
                     let stamps: Vec<f64> = stamps.iter().map(|t| t - offset).collect();
                     if let Err(e) = outlet.push_chunk_stamped_ex(&rows, &stamps, true) {
                         warn!(device = "frenz", "publishing {suffix}: {e}");
@@ -289,6 +310,53 @@ impl Shared {
         if let Ok(mut status) = self.status.lock() {
             *status.samples.entry(stream.to_owned()).or_default() += samples as u64;
         }
+    }
+
+    fn reconnecting(&self) -> bool {
+        self.status.lock().is_ok_and(|status| status.reconnecting)
+    }
+
+    /// Follows the link to the band: a loss is shown and told to HyperStudy at once, though openfrenz keeps
+    /// retrying for minutes and the streams stay open meanwhile.
+    fn link(&self, event: &Event) {
+        match event {
+            Event::Disconnected { .. } => {
+                warn!(device = "frenz", "openfrenz: the link to the band was lost");
+                self.update(|s| {
+                    s.reconnecting = true;
+                    s.message = Some("The connection to the band was lost. Reconnecting…".into());
+                });
+                self.announce(false, "FRENZ band connection lost");
+            }
+            // Told twice, by the data arriving and by openfrenz's own event; said once.
+            Event::Reconnected { .. } if self.reconnecting() => {
+                info!(device = "frenz", "openfrenz: the link to the band is back");
+                self.update(|s| {
+                    s.reconnecting = false;
+                    s.message = None;
+                });
+                self.announce(true, "FRENZ band reconnected");
+            }
+            _ => {}
+        }
+    }
+
+    /// Tells every HyperStudy client that the band is, or is no longer, connected.
+    fn announce(&self, connected: bool, reason: &str) {
+        use crate::bridge::state::DeviceStatusEvent;
+        let Some(state) = self
+            .app
+            .as_ref()
+            .and_then(|app| app.try_state::<Arc<crate::bridge::AppState>>())
+        else {
+            return;
+        };
+        let (id, kind) = ("frenz".to_owned(), crate::devices::DeviceType::LSL);
+        state.broadcast_device_status(if connected {
+            DeviceStatusEvent::connected_with_info(id, kind, reason, serde_json::json!({}))
+        } else {
+            DeviceStatusEvent::disconnected(id, kind, reason)
+        });
     }
 
     fn fail(&self, message: String) {
@@ -480,7 +548,8 @@ impl FrenzNative {
     /// the SDK helper's streams are reported in. `None` when it is not streaming.
     pub fn stats(&self) -> Option<serde_json::Value> {
         let status = self.status();
-        if status.state != NativeState::Streaming {
+        // While the link is down nothing is arriving: HyperStudy must not count the band as connected.
+        if status.state != NativeState::Streaming || status.reconnecting {
             return None;
         }
         let shared = self.shared();
@@ -815,7 +884,7 @@ impl FrenzNative {
             });
         }
         let shared = self.shared();
-        let since = unix_now() - seconds;
+        let since = source_now() - seconds;
         let running = shared.models.lock().map(|m| m.clone()).unwrap_or_default();
         if let Ok(preview) = shared.preview.lock() {
             if let Some((channels, kept)) = preview.as_ref() {
@@ -1053,6 +1122,21 @@ async fn open(
     }
     .map_err(|e| e.to_string())?;
     let reconnects = replay.is_none();
+    // From the first moment: a link lost while the outlets are being opened must not be missed.
+    let mut tasks = Vec::new();
+    if reconnects {
+        let (mut events, shared) = (band.subscribe(), shared.clone());
+        tasks.push(tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(event) => shared.link(&event),
+                    // Events were missed, perhaps the link's return: arriving data settles it (see below).
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }));
+    }
 
     let session_id = uuid::Uuid::new_v4().to_string();
     let (lsl, commands) = mpsc::channel();
@@ -1068,7 +1152,6 @@ async fn open(
     };
 
     let mut published = Vec::new();
-    let mut tasks = Vec::new();
 
     // Models first: on a replay each must subscribe before the recording starts to play.
     let mut models_running = BTreeMap::new();
@@ -1116,6 +1199,17 @@ async fn open(
                             continue;
                         }
                         shared.count(&name, rows.len());
+                        // Data is arriving, so the link is up, whatever events were missed.
+                        if first && shared.reconnecting() {
+                            info!(
+                                device = "frenz",
+                                samples = rows.len(),
+                                newest = stamps.last().copied().unwrap_or(0.0),
+                                now = source_now(),
+                                "EEG arrived while the link was marked lost"
+                            );
+                            shared.link(&Event::Reconnected { mono_ns: 0 });
+                        }
                         let _ = lsl.send(ToLsl::Push {
                             suffix: suffix.to_owned(),
                             stamps,
@@ -1128,7 +1222,9 @@ async fn open(
                             match end {
                                 End::Finished => shared.update(|s| *s = NativeStatus::stopped()),
                                 End::Lost => {
-                                    shared.fail("The connection to the band was lost.".into())
+                                    shared.update(|s| s.reconnecting = false);
+                                    shared.fail("The connection to the band was lost.".into());
+                                    shared.announce(false, "FRENZ band connection lost");
                                 }
                             }
                         }
@@ -1142,7 +1238,10 @@ async fn open(
     shared.update(|s| {
         s.state = NativeState::Streaming;
         s.streams = published;
-        s.message = None;
+        // A link already lost keeps its message.
+        if !s.reconnecting {
+            s.message = None;
+        }
     });
     info!(device = "frenz", "openfrenz connected to {device}");
     Ok(Session {
@@ -1235,4 +1334,39 @@ fn start_model(
         }
     });
     Ok((name, task))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lost link stops HyperStudy's status from counting the band as connected at once, and the link coming
+    /// back restores it; openfrenz itself only gives up after minutes.
+    #[test]
+    fn a_lost_link_is_not_reported_as_connected() {
+        let native = FrenzNative::new();
+        native.shared().update(|s| {
+            s.state = NativeState::Streaming;
+            s.device = Some("FRENZT01".into());
+        });
+        assert!(native.stats().is_some());
+
+        native.shared().link(&Event::Disconnected { mono_ns: 0 });
+        let status = native.status();
+        assert!(status.reconnecting && status.message.is_some());
+        assert!(native.stats().is_none());
+        // Still held: the SDK helper must not start meanwhile.
+        assert!(native.active());
+
+        native.shared().link(&Event::Reconnected { mono_ns: 0 });
+        let status = native.status();
+        assert!(!status.reconnecting && status.message.is_none());
+        assert!(native.stats().is_some());
+    }
+
+    /// A sample taken now lands at now on the LSL clock.
+    #[test]
+    fn a_sample_time_lands_on_the_lsl_clock() {
+        assert!((source_now() - source_minus_lsl() - lsl::local_clock()).abs() < 0.002);
+    }
 }
